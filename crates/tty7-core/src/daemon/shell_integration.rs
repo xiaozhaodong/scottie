@@ -745,6 +745,14 @@ fn bash_rcfile() -> String {
 # Replays what a real *login* shell would have sourced, in the same order —
 # necessary because tty7 spawns bash non-login (see shell_integration.rs) so
 # that --rcfile is honored at all; bash silently ignores it for login shells.
+#
+# ~/.bashrc belongs to the same first-match-wins chain, not after it. A login
+# shell never sources it on its own; it arrives only because the profile that
+# won the chain forwarded to it, which is how nearly every ~/.bash_profile in
+# the wild is written. Sourcing it unconditionally on top therefore runs the
+# user's whole ~/.bashrc twice: banners print twice, completions get sourced
+# twice, and anything that appends to PROMPT_COMMAND stacks up. Keeping it in
+# the chain also preserves the fallback for a $HOME that has no profile at all.
 if [[ -f /etc/profile ]]; then source /etc/profile; fi
 if [[ -f ~/.bash_profile ]]; then
   source ~/.bash_profile
@@ -752,8 +760,9 @@ elif [[ -f ~/.bash_login ]]; then
   source ~/.bash_login
 elif [[ -f ~/.profile ]]; then
   source ~/.profile
+elif [[ -f ~/.bashrc ]]; then
+  source ~/.bashrc
 fi
-if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
 {BASH_INTEGRATION}"#
     )
 }
@@ -1545,6 +1554,51 @@ mod tests {
         assert!(rc.contains("~/.bashrc"));
         assert!(rc.contains("__tty7"));
         assert!(rc.contains("133;"));
+    }
+
+    /// The profile chain is first-match-wins, and a ~/.bash_profile that exists
+    /// only to forward to ~/.bashrc is the common case — so sourcing ~/.bashrc
+    /// after the chain ran it a second time for almost everybody.
+    #[cfg(unix)]
+    #[test]
+    fn a_forwarding_bash_profile_does_not_pull_bashrc_in_twice() {
+        let Some(home) = throwaway_dir("tty7-rcfile-home-") else {
+            return;
+        };
+        let ticks = home.join("ticks");
+        std::fs::write(
+            home.join(".bash_profile"),
+            "if [ -f ~/.bashrc ]; then . ~/.bashrc; fi\n",
+        )
+        .expect("write .bash_profile");
+        std::fs::write(
+            home.join(".bashrc"),
+            format!("printf 'tick\\n' >> '{}'\n", ticks.display()),
+        )
+        .expect("write .bashrc");
+        let rcfile = home.join("rcfile");
+        std::fs::write(&rcfile, bash_rcfile()).expect("write rcfile");
+
+        let ran = std::process::Command::new("bash")
+            .arg("--rcfile")
+            .arg(&rcfile)
+            .args(["-i", "-c", "true"])
+            .env("HOME", &home)
+            .output();
+        let sourced = ran.map(|_| {
+            std::fs::read_to_string(&ticks)
+                .unwrap_or_default()
+                .lines()
+                .count()
+        });
+        let _ = std::fs::remove_dir_all(&home);
+
+        // No bash on this box (or it refused to start) — nothing to assert.
+        let Ok(sourced) = sourced else { return };
+        assert_eq!(
+            sourced, 1,
+            "~/.bashrc must be sourced exactly once, got {sourced}",
+        );
     }
 
     #[test]
