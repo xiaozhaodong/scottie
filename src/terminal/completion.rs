@@ -93,7 +93,7 @@ pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Complet
 
     let is_command = chars[..word_start].iter().all(|c| c.is_whitespace());
     let (word_cands, pending) = if is_command && !word.contains('/') {
-        (complete_command(&word), Vec::new())
+        (complete_command(&word, cwd.is_some()), Vec::new())
     } else {
         match complete_signature(&chars, word_start, &word, cwd) {
             Some(sig) => (sig.cands, sig.pending),
@@ -129,7 +129,7 @@ pub fn complete(line: &str, cursor: usize, cwd: Option<&Path>) -> Option<Complet
     }
 }
 
-fn complete_command(word: &str) -> Vec<WordCand> {
+fn complete_command(word: &str, local: bool) -> Vec<WordCand> {
     if word.is_empty() {
         return Vec::new();
     }
@@ -139,7 +139,7 @@ fn complete_command(word: &str) -> Vec<WordCand> {
             set.insert((*b).to_string());
         }
     }
-    if let Some(path) = std::env::var_os("PATH") {
+    if let Some(path) = std::env::var_os("PATH").filter(|_| local) {
         for dir in std::env::split_paths(&path) {
             let Ok(rd) = std::fs::read_dir(&dir) else {
                 continue;
@@ -527,6 +527,7 @@ pub(super) struct CompletionSession {
     pub(super) all: Vec<Candidate>,
     pub(super) filtered: Vec<usize>,
     pub(super) index: Option<usize>,
+    pub(super) pending_generators: usize,
 }
 
 pub(super) struct Replacement {
@@ -549,7 +550,12 @@ impl Replacement {
 }
 
 impl CompletionSession {
-    pub(super) fn new(word_start: usize, open_word: String, all: Vec<Candidate>) -> Self {
+    pub(super) fn new(
+        word_start: usize,
+        open_word: String,
+        all: Vec<Candidate>,
+        pending_generators: usize,
+    ) -> Self {
         let filtered = (0..all.len()).collect();
         Self {
             word_start,
@@ -557,7 +563,16 @@ impl CompletionSession {
             all,
             filtered,
             index: Some(0),
+            pending_generators,
         }
+    }
+
+    pub(super) fn generator_answered(&mut self) {
+        self.pending_generators = self.pending_generators.saturating_sub(1);
+    }
+
+    pub(super) fn is_spent(&self) -> bool {
+        self.pending_generators == 0 && self.filtered.is_empty()
     }
 
     pub(super) fn selected(&self) -> Option<&Candidate> {
@@ -744,6 +759,7 @@ mod tests {
             0,
             "f".into(),
             vec![cand("feature", CandidateKind::Value, 0, 1)],
+            0,
         );
         let new = vec![
             cand("feature", CandidateKind::Value, 0, 1),
@@ -765,6 +781,7 @@ mod tests {
                 cand("branch-a", CandidateKind::Value, 0, 1),
                 cand("branch-b", CandidateKind::Value, 0, 1),
             ],
+            0,
         );
         s.select(true);
         assert_eq!(s.selected().unwrap().text, "branch-b");
@@ -833,7 +850,7 @@ mod tests {
             .iter()
             .map(|w| cand(w, CandidateKind::Command, 0, 1))
             .collect();
-        CompletionSession::new(0, "a".into(), cands)
+        CompletionSession::new(0, "a".into(), cands, 0)
     }
 
     #[test]
@@ -963,6 +980,30 @@ mod tests {
 
         let c = complete("ech", 3, None).expect("command completion needs no cwd");
         assert!(c.candidates.iter().any(|c| c.text == "echo"));
+    }
+
+    #[test]
+    fn a_remote_pane_offers_builtins_but_never_this_machines_binaries() {
+        let remote: Vec<String> = complete("l", 1, None)
+            .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
+            .unwrap_or_default();
+        assert!(
+            remote.iter().all(|n| BUILTINS.contains(&n.as_str())),
+            "a builtin is true on any POSIX shell, but a PATH scan reads *this* machine \
+             and its names do not exist on the remote: {remote:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            let local: Vec<String> = complete("l", 1, Some(Path::new("/")))
+                .map(|c| c.candidates.into_iter().map(|c| c.text).collect())
+                .unwrap_or_default();
+            assert!(
+                local.iter().any(|n| n == "ls"),
+                "a local pane still scans PATH: {local:?}"
+            );
+            assert!(!remote.iter().any(|n| n == "ls"));
+        }
     }
 
     #[test]
