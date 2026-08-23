@@ -3,13 +3,13 @@ title: "Core concepts"
 description: "Workspaces, tabs, panes — and the background server that owns them all."
 ---
 
-Four words explain most of tty7. Three of them you can see; the fourth is the
+Four words explain most of Scottie. Three of them you can see; the fourth is the
 reason the other three survive a reboot.
 
 ## Pane
 
 A **pane** is one terminal: one shell (or one program) attached to one PTY. It
-is the only thing in tty7 that actually runs something.
+is the only thing in Scottie that actually runs something.
 
 Panes have stable ids — `%42` — for their whole life. That id is what the
 [CLI](/cli/overview) addresses, and what `$TTY7_PANE` holds inside the pane
@@ -21,7 +21,7 @@ A **tab** is a layout of panes. One pane to start with; split it and the tab
 holds two, arranged in rows and columns you can drag around.
 
 Tabs appear in the sidebar (or the top strip, if you move it there). A tab's
-label is the best evidence tty7 has: a name you set, else the coding agent
+label is the best evidence Scottie has: a name you set, else the coding agent
 running in it, else the last segment of its working directory.
 
 ## Workspace
@@ -37,12 +37,12 @@ just that machine. <kbd>⌘ ⇧ N</kbd> opens the New Workspace form, where you
 pick the machine (this computer, or any configured SSH host) and optionally a
 name.
 
-Workspaces are how tty7 keeps ten repositories from becoming forty
+Workspaces are how Scottie keeps ten repositories from becoming forty
 indistinguishable tabs. They also travel: a workspace on a remote machine is
 still a workspace, opened from the same switcher.
 
 <Frame caption="Placeholder — screenshot: the workspace switcher, workspaces on the left, that workspace's tabs on the right">
-  <img src="/images/placeholder.svg" alt="The tty7 workspace switcher" />
+  <img src="/images/placeholder.svg" alt="The Scottie workspace switcher" />
 </Frame>
 
 ## The server
@@ -50,8 +50,8 @@ still a workspace, opened from the same switcher.
 Here is the part that matters. **The window does not own your shells — a
 background server does.**
 
-Quitting tty7 closes the window and leaves that server running. Your build keeps
-building, your agent keeps working, your SSH session stays up. Open tty7 again
+Quitting Scottie closes the window and leaves that server running. Your build keeps
+building, your agent keeps working, your SSH session stays up. Open Scottie again
 and it reattaches to exactly what was there.
 
 This is also why:
@@ -72,7 +72,7 @@ This is also why:
 
 ### What survives what
 
-| | Close a tab | Quit tty7 | Stop the server | Reboot |
+| | Close a tab | Quit Scottie | Stop the server | Reboot |
 |---|:--:|:--:|:--:|:--:|
 | The shell keeps running | ✗ | ✓ | ✗ | ✗ |
 | The layout comes back | ✗ | ✓ | ✓ | ✓ |
@@ -108,7 +108,7 @@ Every pane exports these, and anything you launch from one inherits them:
 | `TTY7_WS` | This pane's workspace id. |
 | `TTY7_CONFIG_DIR` | The config directory, which is how the CLI finds the right server. |
 
-`echo $TTY7_PANE` is the fastest way to tell whether you are inside tty7 at all.
+`echo $TTY7_PANE` is the fastest way to tell whether you are inside Scottie at all.
 
 <Card title="Drive it from a script" icon="terminal" href="/cli/overview">
   Those ids are the whole interface. The CLI page starts there.

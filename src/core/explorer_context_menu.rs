@@ -370,7 +370,7 @@ mod tests {
         let [directory, background] = registrations(app);
 
         assert_eq!(directory.location.key(), DIRECTORY_KEY);
-        assert_eq!(directory.location.label(), "Open in tty7");
+        assert_eq!(directory.location.label(), "Open in Scottie");
         assert_eq!(directory.icon, app.as_os_str());
         assert_eq!(
             directory.command,
@@ -378,7 +378,7 @@ mod tests {
         );
 
         assert_eq!(background.location.key(), BACKGROUND_KEY);
-        assert_eq!(background.location.label(), "Open tty7 here");
+        assert_eq!(background.location.label(), "Open Scottie here");
         assert_eq!(background.icon, app.as_os_str());
         assert_eq!(
             background.command,
@@ -393,16 +393,16 @@ mod tests {
     #[test]
     fn the_verb_labels_follow_the_ui_language() {
         crate::ui::i18n::set_locale("zh-CN");
-        assert_eq!(Location::Directory.label(), "在 tty7 中打开");
-        assert_eq!(Location::Background.label(), "在此处打开 tty7");
+        assert_eq!(Location::Directory.label(), "在 Scottie 中打开");
+        assert_eq!(Location::Background.label(), "在此处打开 Scottie");
 
         crate::ui::i18n::set_locale("ja-JP");
-        assert_eq!(Location::Directory.label(), "tty7 で開く");
-        assert_eq!(Location::Background.label(), "ここで tty7 を開く");
+        assert_eq!(Location::Directory.label(), "Scottie で開く");
+        assert_eq!(Location::Background.label(), "ここで Scottie を開く");
 
         crate::ui::i18n::set_locale("en");
-        assert_eq!(Location::Directory.label(), "Open in tty7");
-        assert_eq!(Location::Background.label(), "Open tty7 here");
+        assert_eq!(Location::Directory.label(), "Open in Scottie");
+        assert_eq!(Location::Background.label(), "Open Scottie here");
     }
 
     #[test]

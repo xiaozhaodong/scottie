@@ -867,7 +867,7 @@ impl Tty7App {
 
         crate::terminal::pane_liveness::sweep(cx);
         let current = crate::ui::machine_mirror::display_name_for(cx, self.workspace)
-            .unwrap_or_else(|| "tty7".to_string());
+            .unwrap_or_else(|| "Scottie".to_string());
         let monogram: String = current
             .chars()
             .next()

@@ -170,9 +170,9 @@ mod macos {
     }
 
     fn install_inner(plan: &InstallPlan) -> Result<(), String> {
-        let replacement = plan.stage.join("unpacked/tty7.app");
+        let replacement = plan.stage.join("unpacked/Scottie.app");
         wait_for_exit(plan.parent_pid);
-        log_line(&plan.log, "re-verifying staged tty7 update");
+        log_line(&plan.log, "re-verifying staged Scottie update");
         let verification = verify_archive(&plan.archive, &plan.checksums, &plan.asset_name)
             .and_then(|()| verify_update(&plan.current, &replacement, &plan.expected_version));
         if let Err(error) = verification {
@@ -224,7 +224,7 @@ mod macos {
                 .arg(&unpacked),
             "extracting the update archive",
         )?;
-        Ok(unpacked.join("tty7.app"))
+        Ok(unpacked.join("Scottie.app"))
     }
 
     fn verify_update(
@@ -465,9 +465,9 @@ mod macos {
         #[test]
         fn successful_launch_commits_the_replacement() {
             let root = tempfile::tempdir().unwrap();
-            let current = root.path().join("tty7.app");
+            let current = root.path().join("Scottie.app");
             let stage = root.path().join("stage");
-            let replacement = stage.join("tty7.app");
+            let replacement = stage.join("Scottie.app");
             bundle(&current, "old");
             bundle(&replacement, "new");
 
@@ -475,15 +475,15 @@ mod macos {
 
             assert_eq!(fs::read_to_string(current.join("marker")).unwrap(), "new");
             assert!(!stage.exists());
-            assert!(!root.path().join(".tty7.app.tty7-update-backup").exists());
+            assert!(!root.path().join(".Scottie.app.tty7-update-backup").exists());
         }
 
         #[test]
         fn failed_launch_restores_and_relaunches_the_previous_app() {
             let root = tempfile::tempdir().unwrap();
-            let current = root.path().join("tty7.app");
+            let current = root.path().join("Scottie.app");
             let stage = root.path().join("stage");
-            let replacement = stage.join("tty7.app");
+            let replacement = stage.join("Scottie.app");
             bundle(&current, "old");
             bundle(&replacement, "new");
             let launches = std::cell::Cell::new(0);
@@ -518,10 +518,10 @@ mod macos {
         #[test]
         fn replacement_does_not_remove_a_fixed_name_sibling() {
             let root = tempfile::tempdir().unwrap();
-            let current = root.path().join("tty7.app");
+            let current = root.path().join("Scottie.app");
             let stage = root.path().join("stage");
-            let replacement = stage.join("tty7.app");
-            let sibling = root.path().join(".tty7.app.tty7-update-backup");
+            let replacement = stage.join("Scottie.app");
+            let sibling = root.path().join(".Scottie.app.tty7-update-backup");
             bundle(&current, "old");
             bundle(&replacement, "new");
             bundle(&sibling, "keep");
@@ -572,7 +572,7 @@ mod macos {
         #[test]
         fn bundle_version_preserves_the_complete_nightly_identity() {
             let root = tempfile::tempdir().unwrap();
-            let app = root.path().join("tty7.app");
+            let app = root.path().join("Scottie.app");
             let contents = app.join("Contents");
             fs::create_dir_all(&contents).unwrap();
             fs::write(

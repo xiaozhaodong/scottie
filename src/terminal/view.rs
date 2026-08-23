@@ -136,7 +136,7 @@ pub struct NativeSshParts {
 }
 
 /// What a pane is called when nothing running in it has said otherwise.
-pub(crate) const DEFAULT_TITLE: &str = "tty7";
+pub(crate) const DEFAULT_TITLE: &str = "Scottie";
 
 pub struct ShellParts {
     terminal: RemoteTerminal,
@@ -232,7 +232,7 @@ pub struct TerminalView {
     pending_title: Option<String>,
     /// What the pane is called before anything running in it says otherwise —
     /// and what it goes back to when the program resets the title or the
-    /// session ends. "tty7" for a local shell; for an SSH pane it is the host
+    /// session ends. "Scottie" for a local shell; for an SSH pane it is the host
     /// it dialled, so a window full of them is still readable (#438).
     pub(super) default_title: String,
     pub marked_text: String,
@@ -518,7 +518,7 @@ fn compose_notification_title(
     match (lead.or(host), workspace) {
         (Some(lead), Some(workspace)) => format!("{lead} · {workspace}"),
         (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => "tty7".to_string(),
+        (None, None) => "Scottie".to_string(),
     }
 }
 
@@ -7085,7 +7085,7 @@ mod tests {
             compose_notification_title(Some("Claude".into()), None, None),
             "Claude"
         );
-        assert_eq!(compose_notification_title(None, None, None), "tty7");
+        assert_eq!(compose_notification_title(None, None, None), "Scottie");
     }
 
     #[test]
@@ -9237,7 +9237,7 @@ mod gpui_tests {
         let (window, _daemon) = harness(cx);
         window
             .update(cx, |view, _, cx| {
-                assert_eq!(view.title, "tty7");
+                assert_eq!(view.title, "Scottie");
                 view.handle_event(AlacEvent::Title("vim — main.rs".into()), cx);
             })
             .unwrap();
@@ -9250,7 +9250,7 @@ mod gpui_tests {
             .unwrap();
         settle(cx);
         window
-            .update(cx, |view, _, _| assert_eq!(view.title, "tty7"))
+            .update(cx, |view, _, _| assert_eq!(view.title, "Scottie"))
             .unwrap();
     }
 
@@ -9304,7 +9304,7 @@ mod gpui_tests {
 
     /// An SSH pane answers to the host it dialled, and keeps answering to it
     /// after the remote program hands the title back (#438). Before this every
-    /// SSH tab in the window read "tty7" until — and only if — the far shell
+    /// SSH tab in the window read "Scottie" until — and only if — the far shell
     /// had integration enough to title itself.
     #[gpui::test]
     fn an_ssh_pane_is_named_after_its_host(cx: &mut TestAppContext) {
@@ -11793,11 +11793,11 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 bind_to_a_disconnected_remote_workspace(view, cx);
                 view.handle_event(AlacEvent::Exit, cx);
-                assert_eq!(view.title, "tty7 — disconnected");
+                assert_eq!(view.title, "Scottie — disconnected");
 
                 view.set_workspace(None);
                 view.handle_event(AlacEvent::Exit, cx);
-                assert_eq!(view.title, "tty7 — process exited");
+                assert_eq!(view.title, "Scottie — process exited");
             })
             .unwrap();
     }
@@ -11886,7 +11886,7 @@ mod gpui_tests {
                 )
                 .expect("the swap itself cannot fail");
                 assert_eq!(
-                    view.title, "tty7",
+                    view.title, "Scottie",
                     "a relinked pane is not \"process exited\""
                 );
             })
@@ -12353,7 +12353,7 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.handle_event(AlacEvent::Exit, cx);
                 assert!(view.terminal.exited);
-                assert_eq!(view.title, "tty7 — process exited");
+                assert_eq!(view.title, "Scottie — process exited");
             })
             .unwrap();
     }

@@ -3,7 +3,7 @@ name = "tty7-server"
 version.workspace = true
 edition.workspace = true
 description = "tty7's headless session server: the persistent terminal daemon, with no GUI attached"
-repository = "https://github.com/l0ng-ai/tty7"
+repository = "https://github.com/xiaozhaodong/scottie"
 license = "Apache-2.0"
 publish = false
 

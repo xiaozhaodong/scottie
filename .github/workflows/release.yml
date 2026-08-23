@@ -171,7 +171,7 @@ jobs:
       # in-app update check (src/core/update.rs) reads /releases/latest, so users
       # would be prompted to download a release that was still missing most of
       # its assets. Same glob list as before: the bundle scripts leave
-      # intermediates in dist/ (tty7.app, entitlements.plist, the Windows staging
+      # intermediates in dist/ (Scottie.app, entitlements.plist, the Windows staging
       # dir) that must not reach the release assets.
       - uses: actions/upload-artifact@v7
         with:

@@ -8,7 +8,7 @@ setting names *and* keywords, which is usually faster than remembering which
 section something is in.
 
 <Frame caption="Placeholder — screenshot: the Settings window with the section list on the left">
-  <img src="/images/placeholder.svg" alt="tty7 Settings" />
+  <img src="/images/placeholder.svg" alt="Scottie Settings" />
 </Frame>
 
 ## The eight sections
@@ -65,7 +65,7 @@ The file is written atomically, and read forgivingly:
 - **An out-of-range number** is clamped into its band, not rejected.
 - **An unrecognised enum value** falls back to the default with a log line,
   rather than failing the whole file.
-- **An unparseable file** is not overwritten. tty7 starts on defaults, keeps a
+- **An unparseable file** is not overwritten. Scottie starts on defaults, keeps a
   copy at `config.json.corrupt`, and says so in the log.
 
 <Note>

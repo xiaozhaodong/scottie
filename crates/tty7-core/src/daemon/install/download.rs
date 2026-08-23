@@ -165,7 +165,7 @@ mod tests {
     fn talks_to_github() {
         let fetcher = HttpsFetcher::default();
         let bytes = fetcher
-            .get("https://github.com/l0ng-ai/tty7/raw/main/README.md")
+            .get("https://github.com/xiaozhaodong/scottie/raw/main/README.md")
             .expect("github must be reachable over TLS");
         assert!(
             bytes.len() > 500,

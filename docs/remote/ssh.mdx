@@ -3,7 +3,7 @@ title: "SSH"
 description: "A native Rust SSH stack: quick connects, saved profiles, keychain credentials, jump hosts."
 ---
 
-tty7 speaks SSH itself, over [russh](https://github.com/Eugeny/russh). It never
+Scottie speaks SSH itself, over [russh](https://github.com/Eugeny/russh). It never
 shells out to the `ssh` binary, and there is no compatibility mode that does.
 
 That is what makes the rest possible: credentials in the OS keychain,
@@ -12,7 +12,7 @@ you can add mid-session, and authentication prompts drawn as sheets in the pane
 instead of a password echoing into your shell.
 
 <Frame caption="Placeholder — screenshot: an SSH connection sheet asking for a key passphrase inside a pane">
-  <img src="/images/placeholder.svg" alt="Connecting over SSH in tty7" />
+  <img src="/images/placeholder.svg" alt="Connecting over SSH in Scottie" />
 </Frame>
 
 ## Four ways to connect
@@ -35,7 +35,7 @@ instead of a password echoing into your shell.
   </Accordion>
 
   <Accordion title="An alias from ~/.ssh/config">
-    Type an alias you already have and tty7 resolves it natively — common fields,
+    Type an alias you already have and Scottie resolves it natively — common fields,
     best effort — then connects over russh. **Settings → SSH → Import from
     ~/.ssh/config** turns aliases into real profiles.
 

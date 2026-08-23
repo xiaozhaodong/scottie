@@ -1,8 +1,8 @@
 #!/bin/bash
 # Usage: bundle-macos.sh <target-triple> <arch-label>
-# Package the release binary into dist/tty7.app, then publish both:
-#   dist/tty7-<version>-macos-<arch>.zip  (in-app updater)
-#   dist/tty7-<version>-macos-<arch>.dmg  (drag-to-Applications install)
+# Package the release binary into dist/Scottie.app, then publish both:
+#   dist/scottie-<version>-macos-<arch>.zip  (in-app updater)
+#   dist/scottie-<version>-macos-<arch>.dmg  (drag-to-Applications install)
 #
 # Signing posture is chosen from the environment:
 #   * Developer ID secrets present (APPLE_SIGNING_IDENTITY + APPLE_CERTIFICATE)
@@ -27,7 +27,7 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
   exit 1
 fi
 PACKAGE_UPDATE_ZIP="${TTY7_PACKAGE_UPDATE_ZIP:-1}"
-APP="dist/tty7.app"
+APP="dist/Scottie.app"
 
 rm -rf dist
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -62,9 +62,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>tty7</string>
-    <key>CFBundleDisplayName</key><string>tty7</string>
-    <key>CFBundleIdentifier</key><string>com.github.tty7</string>
+    <key>CFBundleName</key><string>Scottie</string>
+    <key>CFBundleDisplayName</key><string>Scottie</string>
+    <key>CFBundleIdentifier</key><string>ai.scottie.app</string>
     <key>CFBundleVersion</key><string>${VERSION}</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleExecutable</key><string>tty7-app</string>
@@ -72,40 +72,40 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
-    <!-- tty7 is a terminal workbench: panes are forked from the bundled
+    <!-- Scottie is a terminal workbench: panes are forked from the bundled
          executable, so macOS attributes a child process's protected-resource
-         requests to tty7.app. Without these usage strings a program you run in
+         requests to Scottie.app. Without these usage strings a program you run in
          a pane that asks for camera / microphone / contacts / calendar /
          photos / location / reminders / Apple Events is denied outright with
          no prompt, and cannot even be granted in System Settings. Declaring
          them mirrors what kitty and Kaku ship for exactly this reason: Mac
          TCC reads the responsible bundle's usage string, not the child's. -->
     <key>NSCameraUsageDescription</key>
-    <string>A program running inside tty7 would like to access the camera.</string>
+    <string>A program running inside Scottie would like to access the camera.</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>A program running inside tty7 would like to access the microphone.</string>
+    <string>A program running inside Scottie would like to access the microphone.</string>
     <key>NSContactsUsageDescription</key>
-    <string>A program running inside tty7 would like to access your contacts.</string>
+    <string>A program running inside Scottie would like to access your contacts.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>A program running inside tty7 would like to access your calendar data.</string>
+    <string>A program running inside Scottie would like to access your calendar data.</string>
     <key>NSRemindersFullAccessUsageDescription</key>
-    <string>A program running inside tty7 would like to access your reminders.</string>
+    <string>A program running inside Scottie would like to access your reminders.</string>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>A program running inside tty7 would like to access your photo library.</string>
+    <string>A program running inside Scottie would like to access your photo library.</string>
     <key>NSLocationUsageDescription</key>
-    <string>A program running inside tty7 would like to access your location information.</string>
+    <string>A program running inside Scottie would like to access your location information.</string>
     <key>NSMotionUsageDescription</key>
-    <string>A program running inside tty7 would like to access motion data.</string>
+    <string>A program running inside Scottie would like to access motion data.</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>A program running inside tty7 would like to access the local network.</string>
+    <string>A program running inside Scottie would like to access the local network.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>A program running inside tty7 would like to use Bluetooth.</string>
+    <string>A program running inside Scottie would like to use Bluetooth.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>A program running inside tty7 would like to use speech recognition.</string>
+    <string>A program running inside Scottie would like to use speech recognition.</string>
     <key>NSSystemAdministrationUsageDescription</key>
-    <string>A program running inside tty7 requires elevated privileges.</string>
+    <string>A program running inside Scottie requires elevated privileges.</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>A program running inside tty7 would like to control other applications via Apple Events.</string>
+    <string>A program running inside Scottie would like to control other applications via Apple Events.</string>
 </dict>
 </plist>
 PLIST
@@ -149,14 +149,14 @@ if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then
     <key>com.apple.security.cs.disable-library-validation</key><true/>
     <!-- Deliberately nothing beyond those three, and in particular no TCC
          entitlement to match the usage strings in Info.plist. Those strings
-         are about a *child* process's request: macOS attributes it to tty7.app
+         are about a *child* process's request: macOS attributes it to Scottie.app
          as the responsible process and reads the wording from its bundle. The
          hardened-runtime entitlement, by contrast, is checked against the
          process actually sending the request — the child, carrying its own
          signature, since entitlements are per-executable and never inherited.
-         So camera / microphone / location / apple-events on tty7.app would do
+         So camera / microphone / location / apple-events on Scottie.app would do
          nothing for a pane, while widening what injected code could reach
-         under tty7's identity; this bundle already carries
+         under Scottie's identity; this bundle already carries
          disable-library-validation. Same reasoning the comments below use to
          keep the GUI's entitlements off the CLI. -->
 </dict>
@@ -215,7 +215,7 @@ fi
 # After the signing block, because assert-macho.sh also insists on a code
 # signature, and after both postures so one pass covers Developer ID and adhoc
 # alike. Before the zip and the DMG, so a bundle that fails here never becomes
-# an artifact — and before the `mv` below, after which dist/tty7.app no longer
+# an artifact — and before the `mv` below, after which dist/Scottie.app no longer
 # exists. For a Developer ID build that puts it after notarization, which
 # spends a few minutes of notary time on a bundle that was never going to ship;
 # cheap next to carrying a second copy of this block inside each branch.
@@ -291,20 +291,20 @@ echo "✅ every Mach-O in $APP is a thin ${ARCH} binary (${SWEEP_SEEN} checked)"
 # it was told to install.
 ZIP=""
 if [[ "$PACKAGE_UPDATE_ZIP" != "0" ]]; then
-    ZIP="dist/tty7-${VERSION}-macos-${ARCH}.zip"
+    ZIP="dist/scottie-${VERSION}-macos-${ARCH}.zip"
     ditto -c -k --keepParent "$APP" "$ZIP"
 fi
 
 # Package the (now stapled) bundle as a drag-to-Applications DMG.
-DMG="dist/tty7-${VERSION}-macos-${ARCH}.dmg"
+DMG="dist/scottie-${VERSION}-macos-${ARCH}.dmg"
 STAGE="dist/dmg-stage"
 rm -rf "$STAGE"
 mkdir "$STAGE"
 # `mv`, not `cp -R`: this is the peak, and a second full copy of the bundle is
 # the most expensive thing on the volume that nobody needs. Nothing reads
-# dist/tty7.app after this point — the zip above is what the updater ships and
+# dist/Scottie.app after this point — the zip above is what the updater ships and
 # what nightly.yml verifies (it extracts that, not this), and release.yml only
-# knows about tty7.app as an intermediate to keep out of the upload globs.
+# knows about the .app as an intermediate to keep out of the upload globs.
 mv "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 # Size the image explicitly. Left to itself, `-srcfolder` measures the bytes it
@@ -321,7 +321,7 @@ ln -s /Applications "$STAGE/Applications"
 # measured against a stage of this shape, 127 MiB of empty volume cost 672 KiB
 # in the published DMG.
 STAGE_KB="$(du -sk "$STAGE" | awk '{print $1}')"
-hdiutil create -volname "tty7" -srcfolder "$STAGE" -ov -format UDZO \
+hdiutil create -volname "Scottie" -srcfolder "$STAGE" -ov -format UDZO \
     -size "$(( STAGE_KB * 2 + 65536 ))k" "$DMG"
 rm -rf "$STAGE"
 if [[ -n "$SIGN_ID" && -n "${APPLE_CERTIFICATE:-}" ]]; then

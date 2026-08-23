@@ -340,7 +340,7 @@ impl Theme {
             foreground: b.foreground,
             accent: b.accent,
             caret: b.caret,
-            selection: None,
+            selection: b.selection,
             opacity: None,
             blur: false,
             image: None,
@@ -1032,10 +1032,15 @@ struct BuiltinSpec {
     foreground: u32,
     accent: u32,
     caret: Option<u32>,
+    /// Only for themes whose own spec names a selection colour. `None` keeps
+    /// the derived `mix(bg, fg, 0.20)` in `neutrals()` — note this is the UI
+    /// selection token, not the terminal's own selection tint, which
+    /// `active_palette` derives independently.
+    selection: Option<u32>,
     ansi16: [(u8, u8, u8); 16],
 }
 
-static BUILTINS: [BuiltinSpec; 13] = [
+static BUILTINS: [BuiltinSpec; 15] = [
     BuiltinSpec {
         id: "light",
         name: "Light",
@@ -1043,6 +1048,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0x111111,
         accent: 0x00c2ff,
         caret: Some(0xf5a15c),
+        selection: None,
         ansi16: [
             (0x24, 0x29, 0x2e),
             (0xd1, 0x24, 0x2f),
@@ -1069,6 +1075,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0x383a42,
         accent: 0x4078f2,
         caret: None,
+        selection: None,
         ansi16: [
             (0x38, 0x3a, 0x42),
             (0xe4, 0x56, 0x49),
@@ -1095,6 +1102,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0x4c4f69,
         accent: 0x1e66f5,
         caret: None,
+        selection: None,
         ansi16: [
             (0xbc, 0xc0, 0xcc),
             (0xd2, 0x0f, 0x39),
@@ -1121,6 +1129,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0x575279,
         accent: 0x907aa9,
         caret: None,
+        selection: None,
         ansi16: [
             (0xf2, 0xe9, 0xe1),
             (0xb4, 0x63, 0x7a),
@@ -1141,12 +1150,40 @@ static BUILTINS: [BuiltinSpec; 13] = [
         ],
     },
     BuiltinSpec {
+        id: "april",
+        name: "April",
+        background: 0xffffff,
+        foreground: 0x17703f,
+        accent: 0x5da802,
+        caret: None,
+        selection: None,
+        ansi16: [
+            (0x1a, 0x1f, 0x1c),
+            (0xb2, 0x3b, 0x3b),
+            (0x5d, 0xa8, 0x02),
+            (0xb8, 0x8a, 0x3a),
+            (0x3d, 0x87, 0xc8),
+            (0x9b, 0x5a, 0xab),
+            (0x3f, 0x9b, 0x85),
+            (0x8c, 0xba, 0xa5),
+            (0x3d, 0x4b, 0x44),
+            (0xd0, 0x4a, 0x3d),
+            (0x7c, 0xb3, 0x42),
+            (0xd8, 0x9b, 0x47),
+            (0x5a, 0xa3, 0xd6),
+            (0xa6, 0x7a, 0xbf),
+            (0x5b, 0xb8, 0xa0),
+            (0x2a, 0x33, 0x2e),
+        ],
+    },
+    BuiltinSpec {
         id: "dark",
         name: "Dark",
         background: 0x000000,
         foreground: 0xffffff,
         accent: 0x19aad8,
         caret: None,
+        selection: None,
         ansi16: [
             (0x61, 0x61, 0x61),
             (0xff, 0x82, 0x72),
@@ -1173,6 +1210,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xf8f8f2,
         accent: 0xff79c6,
         caret: None,
+        selection: None,
         ansi16: [
             (0x00, 0x00, 0x00),
             (0xff, 0x55, 0x55),
@@ -1199,6 +1237,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xe4eef5,
         accent: 0x6c96b4,
         caret: None,
+        selection: None,
         ansi16: [
             (0x12, 0x12, 0x12),
             (0xc7, 0x61, 0x56),
@@ -1225,6 +1264,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xabb2bf,
         accent: 0x528bff,
         caret: None,
+        selection: None,
         ansi16: [
             (0x3f, 0x44, 0x51),
             (0xe0, 0x6c, 0x75),
@@ -1251,6 +1291,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xe0def4,
         accent: 0xc4a7e7,
         caret: None,
+        selection: None,
         ansi16: [
             (0x26, 0x23, 0x3a),
             (0xeb, 0x6f, 0x92),
@@ -1271,6 +1312,35 @@ static BUILTINS: [BuiltinSpec; 13] = [
         ],
     },
     BuiltinSpec {
+        id: "catppuccin_macchiato",
+        name: "Catppuccin Macchiato",
+        background: 0x24273a,
+        foreground: 0xcad3f5,
+        accent: 0x8aadf4,
+        // Rosewater and Surface2, the cursor and selection colours Catppuccin's
+        // own terminal spec names for this flavour.
+        caret: Some(0xf4dbd6),
+        selection: Some(0x5b6078),
+        ansi16: [
+            (0x49, 0x4d, 0x64),
+            (0xed, 0x87, 0x96),
+            (0xa6, 0xda, 0x95),
+            (0xee, 0xd4, 0x9f),
+            (0x8a, 0xad, 0xf4),
+            (0xf5, 0xbd, 0xe6),
+            (0x8b, 0xd5, 0xca),
+            (0xa5, 0xad, 0xcb),
+            (0x5b, 0x60, 0x78),
+            (0xec, 0x74, 0x86),
+            (0x8c, 0xcf, 0x7f),
+            (0xe1, 0xc6, 0x82),
+            (0x78, 0xa1, 0xf6),
+            (0xf2, 0xa9, 0xdd),
+            (0x63, 0xcb, 0xc0),
+            (0xb8, 0xc0, 0xe0),
+        ],
+    },
+    BuiltinSpec {
         id: "catppuccin_mocha",
         name: "Catppuccin Mocha",
         background: 0x1e1e2e,
@@ -1279,6 +1349,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         // Rosewater, the cursor colour Catppuccin's own terminal spec names —
         // the accent fallback would paint it blue.
         caret: Some(0xf5e0dc),
+        selection: None,
         ansi16: [
             (0x45, 0x47, 0x5a),
             (0xf3, 0x8b, 0xa8),
@@ -1305,6 +1376,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xebdbb2,
         accent: 0xfe8019,
         caret: Some(0xebdbb2),
+        selection: None,
         ansi16: [
             (0x28, 0x28, 0x28),
             (0xcc, 0x24, 0x1d),
@@ -1331,6 +1403,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xd8dee9,
         accent: 0x88c0d0,
         caret: Some(0xd8dee9),
+        selection: None,
         ansi16: [
             (0x3b, 0x42, 0x52),
             (0xbf, 0x61, 0x6a),
@@ -1357,6 +1430,7 @@ static BUILTINS: [BuiltinSpec; 13] = [
         foreground: 0xc0caf5,
         accent: 0x7aa2f7,
         caret: Some(0xc0caf5),
+        selection: None,
         ansi16: [
             (0x15, 0x16, 0x1e),
             (0xf7, 0x76, 0x8e),
@@ -1409,6 +1483,7 @@ mod tests {
                 "harbor",
                 "one_dark_pro",
                 "rose_pine",
+                "catppuccin_macchiato",
                 "catppuccin_mocha",
                 "gruvbox_dark",
                 "nord",

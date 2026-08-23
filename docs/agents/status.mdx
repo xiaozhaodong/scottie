@@ -4,7 +4,7 @@ description: "Installing the hooks, reading the dots, and being told when an age
 ---
 
 An agent working for two minutes and an agent that stopped ninety seconds ago
-waiting for permission look identical from outside. tty7 fixes that by letting
+waiting for permission look identical from outside. Scottie fixes that by letting
 the agent say which one it is.
 
 ## Installing the hooks
@@ -19,11 +19,11 @@ the agent say which one it is.
 
 Installing writes into that agent's own configuration directory. Once installed
 the row grows a second **Uninstall** button beside the first, which itself
-becomes **Reinstall** — or **Update**, against an **Outdated** state, when tty7
+becomes **Reinstall** — or **Update**, against an **Outdated** state, when Scottie
 ships a newer hook.
 
 <Note>
-  The hooks only do anything inside tty7. Running the same agent in another
+  The hooks only do anything inside Scottie. Running the same agent in another
   terminal is unaffected.
 </Note>
 
@@ -63,7 +63,7 @@ are the bottleneck, and left alone while you are watching.
 
 ## The tray icon
 
-tty7 keeps a status item in the system tray (menu bar on macOS). It flips to an
+Scottie keeps a status item in the system tray (menu bar on macOS). It flips to an
 attention state the moment *any* agent anywhere needs input, so you can see it
 without the window in front of you.
 
@@ -84,5 +84,5 @@ the pane, as a ready-made prompt:
 | **Agent: Send Selection** | The current terminal selection |
 | **Agent: Send Git Diff for Review** | The repository's `git diff` |
 
-If nothing recognisable is running, tty7 says *"No running coding agent found"*
+If nothing recognisable is running, Scottie says *"No running coding agent found"*
 rather than typing into your shell.
