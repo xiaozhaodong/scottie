@@ -64,7 +64,7 @@ impl ksni::Tray for SniTray {
     }
 
     fn title(&self) -> String {
-        "tty7".into()
+        "Scottie".into()
     }
 
     fn status(&self) -> ksni::Status {

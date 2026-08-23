@@ -14,7 +14,7 @@ use tty7_core::daemon::install::AssetFetcher as _;
 use crate::core::config::{Config, UpdateChannel};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 
-const REPO: &str = "l0ng-ai/tty7";
+const REPO: &str = "xiaozhaodong/scottie";
 
 /// The rolling prerelease the Nightly channel follows. Force-moved to a new
 /// commit every night, which is exactly why it cannot double as a version.
@@ -23,14 +23,17 @@ const NIGHTLY_TAG: &str = "nightly";
 /// Published beside the nightly packages so the version is stated rather than
 /// inferred. See `resolve_version`.
 const NIGHTLY_MANIFEST: &str = "nightly.json";
+#[cfg(target_os = "macos")]
+const MACOS_APP_BUNDLE_NAME: &str = "Scottie.app";
 
-pub const RELEASES_URL: &str = "https://github.com/l0ng-ai/tty7/releases/latest";
+pub const RELEASES_URL: &str = "https://github.com/xiaozhaodong/scottie/releases/latest";
 
 /// The nightly release's own page. Unlike Stable's, this URL is stable across
 /// nights — the tag stays put even as the commit under it moves. Spelled out
 /// rather than built from `NIGHTLY_TAG`, which `concat!` cannot take; the tail
 /// is asserted against it in `each_channel_reads_its_own_feed` instead.
-pub const NIGHTLY_RELEASE_URL: &str = "https://github.com/l0ng-ai/tty7/releases/tag/nightly";
+pub const NIGHTLY_RELEASE_URL: &str =
+    "https://github.com/xiaozhaodong/scottie/releases/tag/nightly";
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -155,7 +158,7 @@ impl UpdateInstallHint {
     fn english(&self) -> String {
         match self {
             #[cfg(target_os = "macos")]
-            Self::UnsupportedMacos => "This copy is not running from a writable tty7.app bundle, so replacing it would be unsafe. Move tty7 to Applications or another writable folder, or open the release page to install the update.".to_string(),
+            Self::UnsupportedMacos => "This copy is not running from a writable Scottie.app bundle, so replacing it would be unsafe. Move Scottie to Applications or another writable folder, or open the release page to install the update.".to_string(),
             #[cfg(target_os = "linux")]
             Self::UnsupportedLinux => "The release has no Linux package for this architecture. Build from source or use your package manager.".to_string(),
             #[cfg(target_os = "linux")]
@@ -1797,13 +1800,14 @@ fn release_endpoint(channel: UpdateChannel) -> String {
 }
 
 /// Recovers the version from a package name such as
-/// `tty7-26.8.2-nightly.202608071800-macos-arm64.zip`.
+/// `scottie-26.8.2-nightly.202608071800-macos-arm64.zip`.
 ///
 /// The platform segment is a closed set, which is what makes the split
-/// unambiguous — the version is everything between the `tty7-` prefix and the
-/// platform marker. `tty7-server-linux-x86_64-musl` matches that shape too but
-/// yields `server`, which `parse_version` rejects, so the remote-server assets
-/// sitting in the same release are skipped without special-casing them.
+/// unambiguous — the version is everything between the package prefix and the
+/// platform marker. Scottie owns the macOS package prefix; Linux and Windows
+/// still use the internal tty7 package names for this staged branding release.
+/// A legacy tty7 macOS asset is ignored, so an old install cannot accidentally
+/// select a package it is not allowed to migrate to.
 ///
 /// The highest version wins rather than the first one found. Two nights can be
 /// on the release at once: the workflow uploads tonight's packages before
@@ -1814,10 +1818,21 @@ fn version_from_assets(assets: &[GitHubAsset]) -> Option<String> {
     assets
         .iter()
         .filter_map(|asset| {
-            let rest = asset.name.strip_prefix("tty7-")?;
-            let cut = ["-macos-", "-linux-", "-windows-"]
-                .iter()
-                .find_map(|marker| rest.find(marker))?;
+            let (rest, prefix) = if let Some(rest) = asset.name.strip_prefix("scottie-") {
+                (rest, "scottie")
+            } else if let Some(rest) = asset.name.strip_prefix("tty7-") {
+                (rest, "tty7")
+            } else {
+                return None;
+            };
+            let (cut, marker) = ["-macos-", "-linux-", "-windows-"]
+                .into_iter()
+                .find_map(|marker| rest.find(marker).map(|cut| (cut, marker)))?;
+            if (prefix == "scottie" && marker != "-macos-")
+                || (prefix == "tty7" && marker == "-macos-")
+            {
+                return None;
+            }
             let version = &rest[..cut];
             Some((parse_version(version)?, version.to_string()))
         })
@@ -2005,6 +2020,13 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
         let Some(app) = current_macos_app_bundle() else {
             return Err(UpdateInstallHint::UnsupportedMacos);
         };
+        // The first Scottie release intentionally does not migrate an
+        // installed tty7.app in place. Its bundle identifier and artifact
+        // contract changed, so an old install must be replaced manually from
+        // the release page rather than being offered an incompatible update.
+        if app.file_name().and_then(|name| name.to_str()) != Some(MACOS_APP_BUNDLE_NAME) {
+            return Err(UpdateInstallHint::UnsupportedMacos);
+        }
         if !is_macos_update_writable(&app) || bundled_updater().is_none() {
             return Err(UpdateInstallHint::UnsupportedMacos);
         }
@@ -2016,7 +2038,7 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
             return Err(UpdateInstallHint::UnsupportedMacos);
         };
         return Ok(PackageOffer::plain(format!(
-            "tty7-{version}-macos-{arch}.zip"
+            "scottie-{version}-macos-{arch}.zip"
         )));
     }
     #[cfg(target_os = "linux")]
@@ -2278,7 +2300,7 @@ fn prepare_macos_update(
         current_macos_app_bundle().context("tty7 is not running from an application bundle")?;
     let parent = current
         .parent()
-        .context("tty7.app has no parent directory")?;
+        .context("Scottie.app has no parent directory")?;
     let updater = bundled_updater().context("tty7-updater is not bundled with this app")?;
     let staging = update_staging_dir(parent)?;
     let dir = staging.path().to_path_buf();
@@ -2904,7 +2926,7 @@ mod tests {
 
     #[test]
     fn release_asset_requires_the_platform_package_and_checksums() {
-        let name = "tty7-27.1.0-macos-arm64.zip";
+        let name = "scottie-27.1.0-macos-arm64.zip";
         let assets = [github_asset(name), github_asset("checksums.txt")];
         let selected = select_release_asset_for(Ok(PackageOffer::plain(name.to_string())), &assets);
         assert_eq!(
@@ -2920,7 +2942,7 @@ mod tests {
 
     #[test]
     fn release_without_checksums_is_never_installable() {
-        let name = "tty7-27.1.0-macos-arm64.zip";
+        let name = "scottie-27.1.0-macos-arm64.zip";
         let selected = select_release_asset_for(
             Ok(PackageOffer::plain(name.to_string())),
             &[github_asset(name)],
@@ -2933,10 +2955,10 @@ mod tests {
     fn release_without_the_exact_platform_package_is_never_guessed() {
         let selected = select_release_asset_for(
             Ok(PackageOffer::plain(
-                "tty7-27.1.0-macos-arm64.zip".to_string(),
+                "scottie-27.1.0-macos-arm64.zip".to_string(),
             )),
             &[
-                github_asset("tty7-27.1.0-macos-x86_64.zip"),
+                github_asset("scottie-27.1.0-macos-x86_64.zip"),
                 github_asset("checksums.txt"),
             ],
         );
@@ -2944,7 +2966,7 @@ mod tests {
         assert_eq!(
             selected.reason,
             Some(UpdateInstallHint::MissingPackage(
-                "tty7-27.1.0-macos-arm64.zip".to_string()
+                "scottie-27.1.0-macos-arm64.zip".to_string()
             ))
         );
     }
@@ -3177,13 +3199,19 @@ mod tests {
     fn version_is_recovered_from_nightly_asset_names() {
         let assets = [
             github_asset("checksums.txt"),
-            github_asset("tty7-26.8.2-nightly.20260807-macos-arm64.zip"),
+            github_asset("scottie-26.8.2-nightly.20260807-macos-arm64.zip"),
             github_asset("tty7-26.8.2-nightly.20260807-windows-x86_64-setup.exe"),
         ];
         assert_eq!(
             version_from_assets(&assets).as_deref(),
             Some("26.8.2-nightly.20260807")
         );
+    }
+
+    #[test]
+    fn legacy_tty7_macos_assets_are_not_used_for_scottie_updates() {
+        let assets = [github_asset("tty7-99.0.0-macos-arm64.zip")];
+        assert_eq!(version_from_assets(&assets), None);
     }
 
     /// The remote-server binaries ride along in the same release and match the
@@ -3219,10 +3247,10 @@ mod tests {
     #[test]
     fn the_newest_asset_version_wins_when_two_nights_overlap() {
         let assets = [
-            github_asset("tty7-26.8.2-nightly.202608062200-macos-arm64.zip"),
+            github_asset("scottie-26.8.2-nightly.202608062200-macos-arm64.zip"),
             github_asset("tty7-26.8.2-nightly.202608062200-linux-x86_64.tar.gz"),
             github_asset("checksums.txt"),
-            github_asset("tty7-26.8.2-nightly.202608071800-macos-arm64.zip"),
+            github_asset("scottie-26.8.2-nightly.202608071800-macos-arm64.zip"),
             github_asset("tty7-26.8.2-nightly.202608071800-linux-x86_64.tar.gz"),
         ];
         assert_eq!(
@@ -3347,7 +3375,7 @@ mod tests {
         // The bookkeeping half of `record_failure`, which needs an App to run.
         state.last_failure = Some(FailureRecord {
             version: "27.0.0".into(),
-            detail: "downloading tty7-27.0.0-macos-arm64.zip: timed out".into(),
+            detail: "downloading scottie-27.0.0-macos-arm64.zip: timed out".into(),
         });
         if state.last_prompted.as_deref() == Some("27.0.0") {
             state.last_prompted = None;

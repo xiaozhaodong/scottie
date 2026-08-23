@@ -1,10 +1,10 @@
 ---
 title: "Shell integration"
-description: "What tty7 injects into your shell, and what it buys you."
+description: "What Scottie injects into your shell, and what it buys you."
 ---
 
 A terminal that only sees bytes cannot tell a prompt from output, or a finished
-command from a hung one. tty7's shell integration closes that gap: the shell
+command from a hung one. Scottie's shell integration closes that gap: the shell
 reports where prompts begin, what was submitted, what it exited with, and where
 it is.
 
@@ -15,7 +15,7 @@ removes itself from the equation if you run the same shell elsewhere.
 
 | Shell | How it is injected |
 |---|---|
-| **zsh** | A throwaway `ZDOTDIR` whose files source yours first, then tty7's. Your `TTY7_USER_ZDOTDIR` is preserved. |
+| **zsh** | A throwaway `ZDOTDIR` whose files source yours first, then Scottie's. Your `TTY7_USER_ZDOTDIR` is preserved. |
 | **bash** | An rcfile that sources your own first. |
 | **fish** | A `-C` init command. |
 | **PowerShell** | An encoded init command that wraps your existing `prompt` function and PSReadLine's line reader. |
@@ -27,8 +27,8 @@ injection when shells nest.
 
 <Note>
   A shell launched with arguments *you* wrote — `shell.args`, or a
-  `custom_shells` entry — is left alone, because tty7's injection would
-  conflict with the flags you chose. Arguments tty7's own detection supplied
+  `custom_shells` entry — is left alone, because Scottie's injection would
+  conflict with the flags you chose. Arguments Scottie's own detection supplied
   (Git Bash's `-i -l`, a WSL row's `--distribution`) do not count, so those
   rows are still integrated.
 </Note>
@@ -41,17 +41,17 @@ injection when shells nest.
 | Command submitted | `OSC 133;C` | Knowing a command is running; agent detection on Windows, where ConPTY exposes no foreground process group |
 | Command finished, with exit code | `OSC 133;D` | The "finished after 42s" notification, failure marks in [history](/terminal/history) |
 | Working directory | `OSC 7` | New tabs and splits opening in the right place, the sidebar's repo grouping, the git branch readout |
-| Editing mode (vi / emacs) | `OSC 133;V` | Matching tty7's key handling to your shell's mode |
-| Window title | `OSC 0` | Tab labels. Only PowerShell is given this — zsh, bash, and fish already set a title of their own, and tty7 reads whatever they emit |
+| Editing mode (vi / emacs) | `OSC 133;V` | Matching Scottie's key handling to your shell's mode |
+| Window title | `OSC 0` | Tab labels. Only PowerShell is given this — zsh, bash, and fish already set a title of their own, and Scottie reads whatever they emit |
 
 ## What turns off without it
 
-Run a shell tty7 does not integrate with, and everything below still works —
+Run a shell Scottie does not integrate with, and everything below still works —
 it just falls back to less precise sources:
 
 - Ghost suggestions, the completion menu, and <kbd>⌃ R</kbd>'s fuzzy history
 - "Command finished" notifications and the failure marks in history search
-- Exact working-directory tracking (tty7 falls back to inspecting the process)
+- Exact working-directory tracking (Scottie falls back to inspecting the process)
 
 Panes, splits, scrollback, search, SSH, and the CLI are unaffected.
 

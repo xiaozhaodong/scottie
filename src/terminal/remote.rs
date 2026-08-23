@@ -2255,7 +2255,7 @@ pub(crate) fn notify_desktop(title: Option<&str>, body: &str) {
 /// click) falls back to the plain `notify-rust` path below, which is why
 /// `try_clickable_notification` reports whether it took the job.
 pub(crate) fn notify_desktop_for_pane(title: Option<&str>, body: &str, pane: Option<EntityId>) {
-    let summary = sanitize_notification_text(title.unwrap_or("tty7"), NOTIFY_TITLE_MAX);
+    let summary = sanitize_notification_text(title.unwrap_or("Scottie"), NOTIFY_TITLE_MAX);
     let body = sanitize_notification_text(body, NOTIFY_BODY_MAX);
 
     if let Some(pane) = pane
@@ -2572,7 +2572,7 @@ fn ensure_notification_app() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        if notify_rust::set_application("com.github.tty7").is_err() {
+        if notify_rust::set_application("ai.scottie.app").is_err() {
             let _ = notify_rust::set_application("com.apple.Terminal");
         }
     });

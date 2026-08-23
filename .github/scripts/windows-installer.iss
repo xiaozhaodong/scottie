@@ -24,13 +24,13 @@
 ; Never change AppId: it is how Windows ties upgrades + the uninstall entry
 ; to previous installs of tty7.
 AppId={{9A3F6C1E-4B7D-4E2A-8C5F-D01B92E64A37}
-AppName=tty7
+AppName=Scottie
 AppVersion={#AppVersion}
 VersionInfoVersion={#VersionInfoVersion}
-AppPublisher=tty7 contributors
-AppPublisherURL=https://github.com/l0ng-ai/tty7
-AppSupportURL=https://github.com/l0ng-ai/tty7/issues
-AppUpdatesURL=https://github.com/l0ng-ai/tty7/releases
+AppPublisher=Scottie contributors
+AppPublisherURL=https://github.com/xiaozhaodong/scottie
+AppSupportURL=https://github.com/xiaozhaodong/scottie/issues
+AppUpdatesURL=https://github.com/xiaozhaodong/scottie/releases
 DefaultDirName={autopf}\tty7
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -61,7 +61,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; it. Off by default: the registry is user-visible system state. The keys land
 ; under HKCU even for an all-users install, so this only ever affects whoever
 ; ran the installer. Inno restores the previous choice when upgrading.
-Name: "explorermenu"; Description: "Add ""Open in tty7"" to the folder context menu"; GroupDescription: "Shell integration:"; Flags: unchecked
+Name: "explorermenu"; Description: "Add ""Open in Scottie"" to the folder context menu"; GroupDescription: "Shell integration:"; Flags: unchecked
 
 ; Builds before the tty7/tty7-app split installed the GUI as tty7.exe. Upgrading
 ; only *adds* tty7-app.exe, so the old binary would stay on disk — and a taskbar
@@ -117,8 +117,8 @@ Source: "{#StageDir}\server\*"; DestDir: "{app}\server"; Flags: ignoreversion re
 ; per-user twin would both duplicate the Start Menu entry and outlive this
 ; uninstaller — so an elevated install depends on the stamp right here.
 [Icons]
-Name: "{autoprograms}\tty7"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "com.github.tty7"
-Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "com.github.tty7"
+Name: "{autoprograms}\Scottie"; Filename: "{app}\tty7-app.exe"; AppUserModelID: "ai.scottie.app"
+Name: "{autodesktop}\Scottie"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; AppUserModelID: "ai.scottie.app"
 
 [Run]
 ; The registry shape lives in core::explorer_context_menu, not here: the app
@@ -131,7 +131,7 @@ Name: "{autodesktop}\tty7"; Filename: "{app}\tty7-app.exe"; Tasks: desktopicon; 
 ; Skipping loses nothing: an upgrade keeps the install path, so the HKCU keys
 ; a ticked first install wrote still point at the right executable.
 Filename: "{app}\tty7-app.exe"; Parameters: "--register-explorer-menu"; Tasks: explorermenu; Flags: runhidden waituntilterminated skipifsilent
-Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,tty7}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\tty7-app.exe"; Description: "{cm:LaunchProgram,Scottie}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 ; Stop the daemon before the uninstaller deletes tty7-app.exe — the running daemon

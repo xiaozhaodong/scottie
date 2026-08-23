@@ -9,7 +9,7 @@ pointer underline; click to open one.
 ## URLs
 
 Anything that looks like a URL is detected, including one the shell wrapped
-across two lines — tty7 stitches it back together before opening it.
+across two lines — Scottie stitches it back together before opening it.
 
 Turn detection off with **Settings → Terminal → Links → Detect URLs**
 (`link_url: false`).
@@ -17,7 +17,7 @@ Turn detection off with **Settings → Terminal → Links → Detect URLs**
 ## Files
 
 A file path in the output — a compiler error, a test failure, a `grep -n` hit —
-opens in tty7's own editor, on the line the link named, and the Files panel
+opens in Scottie's own editor, on the line the link named, and the Files panel
 selects it if it is open. A path to a directory opens the Files panel on it
 instead.
 
@@ -36,7 +36,7 @@ answer for its paths, so file links are off there.
 
 | Mode | Opens in |
 | --- | --- |
-| Built-in editor | tty7's editor, at `:line:column`. The default. |
+| Built-in editor | Scottie's editor, at `:line:column`. The default. |
 | Default app | Whatever the OS associates with the file type. |
 | Command | A command of your own — see below. |
 
@@ -69,7 +69,7 @@ useful if the server is on this machine.
 
 When the pane is inside an SSH session it usually is not. Turn on **Settings →
 Terminal → Links → Forward SSH loopback links** (`ssh_loopback_forward: true`)
-and tty7 opens a temporary port forward through that connection first, so the
+and Scottie opens a temporary port forward through that connection first, so the
 link reaches the server on the remote machine.
 
 <Tip>

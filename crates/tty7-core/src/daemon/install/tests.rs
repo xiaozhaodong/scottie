@@ -458,9 +458,11 @@ fn first_install_runs_all_six_steps() {
     assert_eq!(
         release.fetched(),
         vec![
-            format!("https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/checksums.txt"),
             format!(
-                "https://github.com/l0ng-ai/tty7/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
+                "https://github.com/xiaozhaodong/scottie/releases/download/v{VERSION}/checksums.txt"
+            ),
+            format!(
+                "https://github.com/xiaozhaodong/scottie/releases/download/v{VERSION}/{ASSET_LINUX_X86_64}"
             ),
         ]
     );

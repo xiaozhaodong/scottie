@@ -1,6 +1,6 @@
 ---
 title: "The agent skill"
-description: "Teaching a coding agent to use tty7 properly — including when not to."
+description: "Teaching a coding agent to use Scottie properly — including when not to."
 ---
 
 The CLI is only half of the story. An agent has to know *when* reaching for a
@@ -10,16 +10,16 @@ touch. That is what the skill is for.
 ## Installing it
 
 ```bash
-npx skills add l0ng-ai/tty7
+npx skills add xiaozhaodong/scottie
 ```
 
 The source lives at
-[`skills/tty7/`](https://github.com/l0ng-ai/tty7/tree/main/skills/tty7) in the
+[`skills/tty7/`](https://github.com/xiaozhaodong/scottie/tree/main/skills/tty7) in the
 repository: a `SKILL.md` and two references — the full command table, and a
 delegation playbook the agent reads before handing work to another agent.
 
 <Note>
-  This is the only skill tty7 has — nothing in **Settings → Agents** installs
+  This is the only skill Scottie has — nothing in **Settings → Agents** installs
   one for you. Using the CLI to run *other* agents — a worker pane, `tty7 wait`,
   collecting the result — is covered separately.
   [Orchestration →](/agents/orchestration)
@@ -102,6 +102,6 @@ per-worker timeouts so one stuck worker cannot stall the round.
 ## For humans writing their own tooling
 
 The same material is worth reading even if you are not an agent — it is the
-shortest description of how to use tty7 as a job runner. Start with the
+shortest description of how to use Scottie as a job runner. Start with the
 [CLI overview](/cli/overview), then the
 [command reference](/cli/reference).

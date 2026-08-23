@@ -59,7 +59,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Close => "Close",
         L10nKey::QuitStopServerTitle => "Quit and Stop Server?",
         L10nKey::QuitStopServerBody => {
-            "This quits tty7 and stops the background server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window only retires tty7 to the tray — the shells keep running.)"
+            "This quits Scottie and stops the background server; anything running in your shells is terminated. Your tabs and layout reopen with fresh shells next launch. (Closing the window only retires Scottie to the tray — the shells keep running.)"
         }
         L10nKey::QuitAndStop => "Quit and Stop",
         L10nKey::CloseSshConnectionTitle => "Close this SSH connection?",
@@ -117,7 +117,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCursorBlink => "Cursor blink",
         L10nKey::SettingsCursorBlinkDesc => "Pulse the cursor while the terminal is focused.",
         L10nKey::SettingsLanguage => "Language",
-        L10nKey::SettingsLanguageDesc => "Choose the language used for the tty7 interface.",
+        L10nKey::SettingsLanguageDesc => "Choose the language used for the Scottie interface.",
         L10nKey::SettingsLanguageEnglish => "English",
         L10nKey::SettingsLanguageChinese => "简体中文",
         L10nKey::SettingsLanguageJapanese => "日本語",
@@ -178,10 +178,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ThemeDuplicateFailed => "Could not duplicate the theme",
         L10nKey::ThemeSaveFailed => "Could not save the theme",
         L10nKey::OpenInFileManagerFailed => "Could not open {path}",
-        L10nKey::ExplorerMenuOpenIn => "Open in tty7",
-        L10nKey::ExplorerMenuOpenHere => "Open tty7 here",
+        L10nKey::ExplorerMenuOpenIn => "Open in Scottie",
+        L10nKey::ExplorerMenuOpenHere => "Open Scottie here",
         L10nKey::SettingsCustomThemesIntro => {
-            "Duplicate a theme to edit its colors, or drop a tty7 YAML theme or iTerm2 .itermcolors file in the themes folder."
+            "Duplicate a theme to edit its colors, or drop a Scottie YAML theme or iTerm2 .itermcolors file in the themes folder."
         }
         L10nKey::SettingsDuplicateToEdit => "Duplicate to edit",
         L10nKey::SettingsHosts => "Hosts",
@@ -189,19 +189,19 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsInheritedByEveryHost => "Inherited by every host",
         L10nKey::SettingsNoSavedHosts => "No saved hosts yet.",
         L10nKey::SettingsNothingMatches => "Nothing matches {query}.",
-        L10nKey::SettingsInTty7 => "In tty7",
+        L10nKey::SettingsInTty7 => "In Scottie",
         L10nKey::SettingsImportFromSshConfig => "Import from ~/.ssh/config",
         L10nKey::SettingsExpandAllGroups => "Expand All Groups",
         L10nKey::SettingsNoHostsYet => "No hosts yet",
         L10nKey::SettingsNothingSelected => "Nothing selected",
         L10nKey::SettingsTypeAddressToConnect => {
-            "Type an address to connect now — tty7 offers to save it afterwards."
+            "Type an address to connect now — Scottie offers to save it afterwards."
         }
         L10nKey::SettingsMoreInSshConfig => "{count} more in ~/.ssh/config",
         L10nKey::SettingsAliasesLinked => "{count} aliases linked.",
         L10nKey::SettingsImportAliases => "Import aliases",
         L10nKey::SettingsImportAliasesDesc => {
-            "Re-reads the file and adds anything new. Edits you make here are stored by tty7 — the file itself is never written."
+            "Re-reads the file and adds anything new. Edits you make here are stored by Scottie — the file itself is never written."
         }
         L10nKey::SettingsImportNow => "Import now",
         L10nKey::SettingsImportUnreadable => "Could not read {path} — nothing was imported.",
@@ -212,7 +212,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "{count} hosts added — {updated} updated, {unchanged} already current"
         }
         L10nKey::SettingsImportIgnored => {
-            "{count} options have no setting in tty7 and were left in the file: {options}"
+            "{count} options have no setting in Scottie and were left in the file: {options}"
         }
         L10nKey::SettingsImportMoreOptions => "+{count} more",
         L10nKey::SettingsDefaultsIntro => {
@@ -392,7 +392,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsStartIn => "Start in",
         L10nKey::SettingsStartInDesc => {
-            "What a fresh shell starts in: tty7's launch directory, your home folder, or a fixed path."
+            "What a fresh shell starts in: Scottie's launch directory, your home folder, or a fixed path."
         }
         L10nKey::SettingsCustomPath => "Custom path",
         L10nKey::SettingsCustomPathDesc => "The directory new shells start in.",
@@ -469,22 +469,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsBellModeBoth => "Both",
         L10nKey::SettingsPrompt => "Prompt",
         L10nKey::SettingsPromptIntro => {
-            "tty7's own editor and menus at the shell prompt. Turn one off to hand that much back to the shell."
+            "Scottie's own editor and menus at the shell prompt. Turn one off to hand that much back to the shell."
         }
         L10nKey::SettingsPromptEditor => "Prompt editor",
         L10nKey::SettingsPromptEditorDesc => {
-            "tty7 edits the line you type at the shell prompt: selection, undo, and the menus below. Off hands the prompt back to the shell's own editor — ZLE, readline, fish."
+            "Scottie edits the line you type at the shell prompt: selection, undo, and the menus below. Off hands the prompt back to the shell's own editor — ZLE, readline, fish."
         }
         L10nKey::SettingsNeedsPromptEditor => {
             "Needs the prompt editor: with it off, this key already belongs to the shell."
         }
         L10nKey::SettingsTabCompletion => "Tab completion",
         L10nKey::SettingsTabCompletionDesc => {
-            "Tab at the prompt opens tty7's completion menu. When off, Tab goes to the shell's own completion instead."
+            "Tab at the prompt opens Scottie's completion menu. When off, Tab goes to the shell's own completion instead."
         }
         L10nKey::SettingsHistorySearch => "History search",
         L10nKey::SettingsHistorySearchDesc => {
-            "⌃R at the prompt opens tty7's fuzzy history menu. Off sends ⌃R to the shell — its own reverse-i-search, or whatever you bound there (fzf, percol)."
+            "⌃R at the prompt opens Scottie's fuzzy history menu. Off sends ⌃R to the shell — its own reverse-i-search, or whatever you bound there (fzf, percol)."
         }
         L10nKey::SettingsSelectionClipboard => "Selection & clipboard",
         L10nKey::SettingsSmartSelection => "Smart selection",
@@ -510,7 +510,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsAgentsIntro => "Agents",
         L10nKey::SettingsAgentsIntroDesc => {
-            "Hooks give panes running these agents live status (working / waiting / done) in the tab bar. Only inside tty7."
+            "Hooks give panes running these agents live status (working / waiting / done) in the tab bar. Only inside Scottie."
         }
         L10nKey::SettingsReadingAgentConfig => "Reading this machine's agent config…",
         L10nKey::SettingsStatusNotInstalled => "Not installed",
@@ -546,10 +546,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDarkMode => "Dark mode",
         L10nKey::SettingsActive => "Active",
         L10nKey::SettingsStartupWindow => "Startup window",
-        L10nKey::SettingsStartupWindowDesc => "Window state when tty7 launches.",
+        L10nKey::SettingsStartupWindowDesc => "Window state when Scottie launches.",
         L10nKey::SettingsRememberWindowSize => "Remember window size & position",
         L10nKey::SettingsRememberWindowSizeDesc => {
-            "Reopen at the size and position the window had when tty7 last quit. Off opens centered at the default size."
+            "Reopen at the size and position the window had when Scottie last quit. Off opens centered at the default size."
         }
         L10nKey::SettingsRestoreLastLayout => "Restore last layout",
         L10nKey::SettingsRestoreLastLayoutDesc => {
@@ -644,7 +644,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsUpdateFailedTitle => "Updating to {version} failed.",
         L10nKey::SettingsUpdateReady => "Version {version} is downloaded and ready to install.",
         L10nKey::SettingsUpdateReadyNextLaunch => {
-            "It will be installed the next time you start tty7."
+            "It will be installed the next time you start Scottie."
         }
         L10nKey::SettingsUpdateInstallNow => "Install and relaunch",
         L10nKey::SettingsUpdateDiscard => "Discard",
@@ -660,29 +660,29 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsUpdateChannelNightly => "Nightly",
         L10nKey::SettingsDaemonStale => "The background server is still running {build}.",
         L10nKey::SettingsDaemonStaleDesc => {
-            "tty7 was updated in place: the app is new, your panes are still served by the old build. Restarting the server picks up the new one and ends everything running in your panes. No hurry — do it when they're idle."
+            "Scottie was updated in place: the app is new, your panes are still served by the old build. Restarting the server picks up the new one and ends everything running in your panes. No hurry — do it when they're idle."
         }
         L10nKey::UpdateDialogTitle => "Update available",
         L10nKey::UpdateDialogDetail => {
-            "tty7 {version} is available — you're on {current}. Installing restarts the app; the background server keeps running, so your panes survive."
+            "Scottie {version} is available — you're on {current}. Installing restarts the app; the background server keeps running, so your panes survive."
         }
         L10nKey::UpdateDialogDetailWindows => {
-            "tty7 {version} is available — you're on {current}. Installing restarts the app and the background service: processes in your panes are ended, and your tabs and layout come back with fresh shells."
+            "Scottie {version} is available — you're on {current}. Installing restarts the app and the background service: processes in your panes are ended, and your tabs and layout come back with fresh shells."
         }
         L10nKey::UpdateDialogDetailManual => {
-            "tty7 {version} is available — you're on {current}. {hint}"
+            "Scottie {version} is available — you're on {current}. {hint}"
         }
         L10nKey::UpdateDialogCannotSelfUpdate => "This installation cannot update itself.",
         L10nKey::UpdateDialogLater => "Later",
         L10nKey::UpdateDialogNextLaunch => "Install on Next Launch",
         L10nKey::UpdateDialogNeedsElevation => {
-            "tty7 is installed for all users, so Windows asks for administrator approval once before installing. tty7 itself never runs elevated."
+            "Scottie is installed for all users, so Windows asks for administrator approval once before installing. Scottie itself never runs elevated."
         }
         L10nKey::SettingsUpdateCheckFailed => "Could not check for updates: {error}",
         L10nKey::SettingsUpdatePrepareFailed => "Update failed: {error}",
         L10nKey::SettingsUpdateLaunchFailed => "Could not start the installer: {error}",
         L10nKey::SettingsUpdateUnsupportedMacos => {
-            "This copy is not in a writable tty7.app bundle, so it cannot replace itself. Move tty7 to Applications, or open the release page to update."
+            "This copy is not in a writable Scottie.app bundle, so it cannot replace itself. Move Scottie to Applications, or open the release page to update."
         }
         L10nKey::SettingsUpdateUnsupportedLinux => {
             "The release has no Linux package for this architecture. Build from source, or use your package manager."
@@ -694,7 +694,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This copy is not a recognized Inno Setup or portable ZIP installation, so it cannot update itself. Open the release page to update it by hand."
         }
         L10nKey::SettingsUpdateWindowsAllUsers => {
-            "tty7 is installed for all users, so replacing it needs administrator rights that tty7 will not ask for itself. Open the release page and run the installer to update."
+            "Scottie is installed for all users, so replacing it needs administrator rights that Scottie will not ask for itself. Open the release page and run the installer to update."
         }
         L10nKey::SettingsUpdateUnsupportedPlatform => {
             "Automatic installation is not available on this platform. Open the release page."
@@ -703,7 +703,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The release has no {name} package for this installation. Open the release page to choose another package."
         }
         L10nKey::SettingsUpdateMissingChecksums => {
-            "The release has no checksums.txt, so tty7 refuses to install it automatically."
+            "The release has no checksums.txt, so Scottie refuses to install it automatically."
         }
         L10nKey::SettingsVersionAvailable => "Version {version} is available.",
         L10nKey::SettingsCheckUpdatesDesc => {
@@ -712,9 +712,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCheckUpdatesOnLaunch => "Check for updates on launch",
         L10nKey::SettingsCommandLine => "Command line",
         L10nKey::SettingsCommandLineDesc => {
-            "Put the bundled tty7 command on your PATH, so scripts and agents can drive tty7 from any terminal — inside a pane it works either way. Turn off to keep your own build unshadowed. Applies at next launch."
+            "Put the bundled `tty7` command on your PATH, so scripts and agents can drive Scottie from any terminal — inside a pane it works either way. Turn off to keep your own build unshadowed. Applies at next launch."
         }
-        L10nKey::SettingsInstallCliOnPath => "Install the tty7 command on PATH",
+        L10nKey::SettingsInstallCliOnPath => "Install the `tty7` command on PATH",
         L10nKey::SettingsServer => "Server",
         L10nKey::SettingsServerDesc => {
             "Restarts the background server that keeps your shells running. Every shell on this computer ends; your tabs and layout reopen with fresh ones."
@@ -722,7 +722,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRestartServer => "Restart server…",
         L10nKey::SettingsAppHttpProxy => "Proxy for updates",
         L10nKey::SettingsAppHttpProxyDesc => {
-            "Used only for tty7's update checks and downloads, not for programs in your panes. Empty follows the system proxy."
+            "Used only for Scottie's update checks and downloads, not for programs in your panes. Empty follows the system proxy."
         }
         L10nKey::SettingsAppHttpProxyInvalid => {
             "Not a valid proxy address — this value was not saved."
@@ -760,7 +760,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchCodexKeywords => "agent integration hooks install openai codex",
         L10nKey::SettingsSearchCommandLineToolKeywords => {
-            "command line tool cli tty7 path shell command install symlink terminal iterm agent script"
+            "command line tool cli tty7 scottie path shell command install symlink terminal iterm agent script"
         }
         L10nKey::SettingsSearchCopilotCliKeywords => {
             "agent integration hooks install github copilot"
@@ -1171,7 +1171,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Diff truncated at {limit} lines — run git diff in the terminal for the rest."
         }
         L10nKey::DiffTruncatedBudget => {
-            "Body not loaded — past tty7's diff budget. Run git diff in the terminal for this file."
+            "Body not loaded — past Scottie's diff budget. Run git diff in the terminal for this file."
         }
         L10nKey::DiffUntrackedHeader => "Untracked files ({count})",
         L10nKey::DiffMoreUntracked => {
@@ -1181,8 +1181,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffChangedLines => {
             "{total} changed lines, {loaded} diff rows loaded before {cap} cut the rest"
         }
-        L10nKey::DiffBudgetAndCap => "tty7's budget and the per-file cap",
-        L10nKey::DiffBudget => "tty7's budget",
+        L10nKey::DiffBudgetAndCap => "Scottie's budget and the per-file cap",
+        L10nKey::DiffBudget => "Scottie's budget",
         L10nKey::DiffPerFileCap => "the per-file cap",
         L10nKey::DiffUntrackedSummary => "{count} untracked",
         L10nKey::DiffViewSplit => "Side by Side",
@@ -1231,21 +1231,21 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteActionRetry => "Retry",
         L10nKey::RemoteActionRemoveEntry => "Remove entry",
         L10nKey::RemoteNoConnectionDetails => {
-            "This window is a workspace on {machine}, but tty7 has no connection details for it — check its SSH profile or ~/.ssh/config entry still exists."
+            "This window is a workspace on {machine}, but Scottie has no connection details for it — check its SSH profile or ~/.ssh/config entry still exists."
         }
         L10nKey::RemoteThisComputer => "this computer",
         L10nKey::RemoteProfileGone => "deleted profile",
-        L10nKey::RemoteRestartTitle => "Restart tty7's server on \"{machine}\"?",
+        L10nKey::RemoteRestartTitle => "Restart Scottie's server on \"{machine}\"?",
         L10nKey::RemoteRestartBody => {
             "This ends every shell on {machine}, including ones this window is not showing. Workspaces and layouts are kept and come back with fresh shells."
         }
         L10nKey::RemoteReplaceBody => {
-            "tty7 will install a matching server on {machine} and start it.\n\
+            "Scottie will install a matching server on {machine} and start it.\n\
              \n\
              Every session running on {machine} ends, including any this window is not \
              connected to."
         }
-        L10nKey::RemoteRestartFailedTitle => "tty7's server on \"{machine}\" was not restarted",
+        L10nKey::RemoteRestartFailedTitle => "Scottie's server on \"{machine}\" was not restarted",
         L10nKey::RemoteRestartFailedBody => {
             "{error}\n\
              \n\
@@ -1253,9 +1253,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
              gone, reconnecting starts this build's server."
         }
         L10nKey::RemoteHostUnreachable => "could not reach {machine}: {error}",
-        L10nKey::RemoteInstallTitle => "Install tty7's server on \"{machine}\"?",
+        L10nKey::RemoteInstallTitle => "Install Scottie's server on \"{machine}\"?",
         L10nKey::RemoteInstallDetail => {
-            "tty7 will write its server binary to {machine} so this machine can host \
+            "Scottie will write its server binary to {machine} so this machine can host \
              workspaces there. Nothing else on {machine} is touched, and no sudo is used.\n\
              \n\
              {path_label}\u{2003}{path}\n\
@@ -1273,7 +1273,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteInstallShaLabel => "SHA-256",
         L10nKey::RemoteInstallSilentUpgrades => "Later upgrades on this machine install silently.",
         L10nKey::RemoteInstallBytes => "bytes",
-        L10nKey::RemoteMismatchTitle => "Update tty7's server on \"{machine}\"?",
+        L10nKey::RemoteMismatchTitle => "Update Scottie's server on \"{machine}\"?",
         L10nKey::RemoteMismatchDetail => {
             "{machine} runs server {running}, which this client ({wanted}) cannot speak. A matching server is installed there, but your sessions are on the one already running.\n\n{replace_server}\u{2003}replaces it with {wanted} and ends every session it is hosting.\n{cancel}\u{2003}leaves {machine} exactly as it is. This window will not connect."
         }
@@ -1286,30 +1286,30 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::RemoteMismatchUnknownBuild => "an unknown build",
         L10nKey::RemoteMismatchUnknownBuildFromExe => "an unknown build (from {exe})",
         L10nKey::RemoteServerOutdated => {
-            "{machine} is running an old tty7 server ({build}) that this copy of tty7 \
+            "{machine} is running an old Scottie server ({build}) that this copy of Scottie \
              cannot talk to. Update it to connect."
         }
         L10nKey::RemoteServerTooNew => {
-            "{machine} is running a newer tty7 server ({build}) than this copy of tty7. \
-             Update tty7 on this computer, or replace the server there with a matching one."
+            "{machine} is running a newer Scottie server ({build}) than this copy of Scottie. \
+             Update Scottie on this computer, or replace the server there with a matching one."
         }
-        L10nKey::RemoteDaemonStartFailed => "tty7's local server could not be started: {error}",
-        L10nKey::RemoteDaemonUnreachable => "could not reach tty7's local server: {error}",
+        L10nKey::RemoteDaemonStartFailed => "Scottie's local server could not be started: {error}",
+        L10nKey::RemoteDaemonUnreachable => "could not reach Scottie's local server: {error}",
         L10nKey::RemoteDaemonTooOld => {
-            "this machine's daemon is an older build and cannot restart the server on {machine}. Quit tty7 (that stops the daemon), open it again, and retry."
+            "this machine's daemon is an older build and cannot restart the server on {machine}. Quit Scottie (that stops the daemon), open it again, and retry."
         }
         L10nKey::RemoteProfileMissing => "that saved SSH profile no longer exists",
         L10nKey::RemoteAliasMissing => "\"{alias}\" is no longer in ~/.ssh/config",
         L10nKey::RemoteWslNoSsh => "a WSL workspace has no SSH connection",
         L10nKey::RemoteLocalStdioNoSsh => "a local --stdio workspace has no SSH connection",
-        L10nKey::RemoteHostNotTty7 => "{machine} answered, but not as a tty7 server: {error}",
+        L10nKey::RemoteHostNotTty7 => "{machine} answered, but not as a Scottie server: {error}",
         L10nKey::RemoteWorkspaceListFailed => {
             "connected to {machine}, but its workspace list failed: {error}"
         }
         L10nKey::RemoteServerRestartFailed => {
-            "could not restart tty7's server on {machine}: {error}"
+            "could not restart Scottie's server on {machine}: {error}"
         }
-        L10nKey::RemoteNoRouteToHost => "tty7 no longer has a way to reach {machine}",
+        L10nKey::RemoteNoRouteToHost => "Scottie no longer has a way to reach {machine}",
         L10nKey::RemoteMachineTreeUnexpectedReply => {
             "the server answered a machine tree with {reply}"
         }
@@ -1318,12 +1318,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No running coding agent found — start one (claude, codex, …) in a pane first."
         }
         L10nKey::SwitcherThisComputer => "This Computer",
-        L10nKey::SwitcherRestartingServer => "Restarting tty7's server…",
+        L10nKey::SwitcherRestartingServer => "Restarting Scottie's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
-            "Downloading tty7's server… {done} / {total}"
+            "Downloading Scottie's server… {done} / {total}"
         }
-        L10nKey::SwitcherDownloadingServerNoTotal => "Downloading tty7's server… {done}",
-        L10nKey::SwitcherCopyingServer => "Copying tty7's server… {done} / {total}",
+        L10nKey::SwitcherDownloadingServerNoTotal => "Downloading Scottie's server… {done}",
+        L10nKey::SwitcherCopyingServer => "Copying Scottie's server… {done} / {total}",
         L10nKey::SwitcherThisWindow => "this window",
         L10nKey::SwitcherOpen => "open",
         L10nKey::SwitcherDisconnect => "Disconnect",
@@ -1481,14 +1481,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdAgentSendGitDiffSubtitle => "git diff → running coding agent",
         L10nKey::CmdSettings => "Settings…",
         L10nKey::CmdKeyboardShortcuts => "Keyboard Shortcuts",
-        L10nKey::CmdAboutTty7 => "About tty7",
+        L10nKey::CmdAboutTty7 => "About Scottie",
         L10nKey::CmdCheckForUpdates => "Check for Updates…",
         L10nKey::CmdDocumentation => "Documentation",
         L10nKey::CmdJoinDiscord => "Join the Discord",
         L10nKey::CmdReportIssue => "Report an Issue…",
         L10nKey::CmdRestartServer => "Restart Server…",
         L10nKey::CmdRestartServerSubtitle => "ends every running shell; layout is kept",
-        L10nKey::CmdQuitTty7 => "Quit tty7",
+        L10nKey::CmdQuitTty7 => "Quit Scottie",
         L10nKey::CmdQuitTty7Subtitle => "shells keep running",
         L10nKey::CmdQuickConnect => "Connect to \"{target}\"",
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
@@ -1515,16 +1515,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "This ends every shell on this computer. Your tabs and layout are kept and reopen with fresh shells."
         }
         L10nKey::ConfigQuarantinedStartup => {
-            "config.json could not be parsed. tty7 is on default settings and kept the file's contents beside it as config.json.corrupt. Fix it and tty7 reloads; until then, Settings changes are not saved."
+            "config.json could not be parsed. Scottie is on default settings and kept the file's contents beside it as config.json.corrupt. Fix it and Scottie reloads; until then, Settings changes are not saved."
         }
         L10nKey::ConfigQuarantinedReload => {
-            "The edited config.json could not be parsed. tty7 kept the settings it is running on and set the file's contents aside as config.json.corrupt. Fix it and tty7 reloads; saving a setting first overwrites it."
+            "The edited config.json could not be parsed. Scottie kept the settings it is running on and set the file's contents aside as config.json.corrupt. Fix it and Scottie reloads; saving a setting first overwrites it."
         }
         L10nKey::ConfigUnreadableStartup => {
-            "config.json could not be read. tty7 is on default settings and left the file exactly as it is. Fix its permissions or contents and tty7 reloads; until then, Settings changes are not saved."
+            "config.json could not be read. Scottie is on default settings and left the file exactly as it is. Fix its permissions or contents and Scottie reloads; until then, Settings changes are not saved."
         }
         L10nKey::ConfigUnreadableReload => {
-            "config.json could not be read. tty7 kept the settings it is running on and left the file exactly as it is. Fix its permissions or contents and tty7 reloads; saving a setting first overwrites it."
+            "config.json could not be read. Scottie kept the settings it is running on and left the file exactly as it is. Fix its permissions or contents and Scottie reloads; saving a setting first overwrites it."
         }
         L10nKey::AppWorktreeRemoveDetailDirty => {
             "The closed tab's worktree at {path} has uncommitted changes."
@@ -1548,10 +1548,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppWorktreeRemoveFailed => "Worktree removal failed: {error}",
         L10nKey::AppForkStillConnecting => "Could not fork: the pane is still connecting",
         L10nKey::AppPaneNoCodingAgent => "This pane isn't running a coding agent",
-        L10nKey::AppForkNoCommand => "tty7 has no fork command for {name}",
+        L10nKey::AppForkNoCommand => "Scottie has no fork command for {name}",
         L10nKey::AppForkLocalOnly => "{name} sessions can only be forked from a local pane",
         L10nKey::AppForkNoSessionId => {
-            "tty7 hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents"
+            "Scottie hasn't seen a {name} session id in this pane — install its hooks in Settings → Agents"
         }
         L10nKey::AppForkSessionIdNotToken => "{name}'s session id isn't a plain token",
         L10nKey::AppForkMidTurn => "{name} is mid-turn — the fork won't include the turn in flight",
@@ -1592,7 +1592,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppAgentHooksThisComputer => "This Computer",
         L10nKey::AppAgentHooksRemoteMachine => "Remote machine",
         L10nKey::AppAgentHooksNoHomeDir => {
-            "tty7 could not work out this computer's home directory, so there is nowhere to install to."
+            "Scottie could not work out this computer's home directory, so there is nowhere to install to."
         }
         L10nKey::AppAgentHooksOffline => {
             "Not connected to this machine, so its agent config can't be read or written. Open a workspace on it and come back."
@@ -1607,7 +1607,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::AppAgentHooksRemoved => "Removed",
         L10nKey::AppAgentHooksNothingInstalled => "Nothing installed; nothing to remove",
-        L10nKey::AppAgentHooksNoTty7Hooks => "No tty7 hooks found; nothing to remove",
+        L10nKey::AppAgentHooksNoTty7Hooks => "No Scottie hooks found; nothing to remove",
         L10nKey::AppAgentHooksInstallFailed => "Could not install hooks: {error}",
         L10nKey::AppAgentHooksRemoveFailed => "Could not remove hooks: {error}",
         L10nKey::AppKeybindingDisplacedNote => {
@@ -1633,7 +1633,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsFontDefault => "Default (match primary)",
         L10nKey::ForwardDescriptionPlaceholder => "what it's for",
         L10nKey::SettingsShellDefaultLoginShell => "your login shell",
-        L10nKey::SettingsShellDetected => "Shells tty7 found",
+        L10nKey::SettingsShellDetected => "Shells Scottie found",
         L10nKey::SftpErrorUnexpectedReply => "unexpected reply: {reply}",
         L10nKey::SftpErrorUnsafeRemoteName => "refusing unsafe remote name {name}",
         L10nKey::SftpErrorNoFreeLocalName => {
@@ -1646,28 +1646,28 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::Replace => "Replace",
         L10nKey::SftpErrorInvalidOctalMode => "invalid octal mode",
         L10nKey::SettingsDaemonStaleDescInPlace => {
-            "tty7 was updated in place: the app is new, your panes still run on the old build. The server can swap itself for the new one without stopping, so your shells carry straight over. Panes on tty7's built-in SSH client are the exception — those close and need reopening."
+            "Scottie was updated in place: the app is new, your panes still run on the old build. The server can swap itself for the new one without stopping, so your shells carry straight over. Panes on Scottie's built-in SSH client are the exception — those close and need reopening."
         }
         L10nKey::AppRestartServerBodyInPlace => {
-            "The server swaps itself for this build in place: your shells keep running, and the window reconnects a moment later. Panes on tty7's built-in SSH client are the exception — those close and need reopening."
+            "The server swaps itself for this build in place: your shells keep running, and the window reconnects a moment later. Panes on Scottie's built-in SSH client are the exception — those close and need reopening."
         }
         L10nKey::PaneRestoredScreenBanner => {
             "restored screen — this shell is new, nothing above it is still running"
         }
         L10nKey::SettingsPerPaneHistory => "Give each pane its own shell history",
         L10nKey::SettingsPerPaneHistoryDescription => {
-            "Up walks through what you ran in this pane, not every pane interleaved. A new pane starts from your existing history and writes back what it adds when it closes. Applies to bash and zsh panes tty7 can set up; a shell started with your own arguments is left alone."
+            "Up walks through what you ran in this pane, not every pane interleaved. A new pane starts from your existing history and writes back what it adds when it closes. Applies to bash and zsh panes Scottie can set up; a shell started with your own arguments is left alone."
         }
         L10nKey::IntegrationNoticeBlocked => {
             "\u{201c}{wrapper}\u{201d} is intercepting shell reports in this pane, so inline completion and the Ctrl+R menu are unavailable. The shell's own history search still works."
         }
         L10nKey::IntegrationNoticeNotEngaged => {
-            "tty7 shell integration hasn't engaged in this pane, so inline completion and the Ctrl+R menu are unavailable. Usual causes: a shell you started with your own arguments, a PTY wrapper, or an unsupported shell."
+            "Scottie shell integration hasn't engaged in this pane, so inline completion and the Ctrl+R menu are unavailable. Usual causes: a shell you started with your own arguments, a PTY wrapper, or an unsupported shell."
         }
         L10nKey::PaneTitleDisconnected => "{title} — disconnected",
         L10nKey::PaneTitleProcessExited => "{title} — process exited",
         L10nKey::LoopbackForwardFailed => "Couldn't forward :{port} — {error}",
-        L10nKey::TrayTooltipAgents => "tty7 — {parts}",
+        L10nKey::TrayTooltipAgents => "Scottie — {parts}",
         L10nKey::TrayAgentSep => ", ",
         L10nKey::CursorShapeBlock => "Block",
         L10nKey::CursorShapeBar => "Bar",
@@ -1680,14 +1680,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::ScmFilesChanged => "{count} files changed",
         L10nKey::ScmStagedFileCount => "{count} files staged",
-        L10nKey::AppMenuAbout => "About tty7",
+        L10nKey::AppMenuAbout => "About Scottie",
         L10nKey::AppMenuCheckForUpdates => "Check for Updates…",
         L10nKey::AppMenuSettings => "Settings…",
         L10nKey::AppMenuServices => "Services",
-        L10nKey::AppMenuHideApp => "Hide tty7",
+        L10nKey::AppMenuHideApp => "Hide Scottie",
         L10nKey::AppMenuHideOthers => "Hide Others",
         L10nKey::AppMenuShowAll => "Show All",
-        L10nKey::AppMenuQuit => "Quit tty7",
+        L10nKey::AppMenuQuit => "Quit Scottie",
         L10nKey::AppMenuFile => "File",
         L10nKey::AppMenuEdit => "Edit",
         L10nKey::AppMenuView => "View",
@@ -1732,13 +1732,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuFocusPreviousPane => "Focus Previous Pane",
         L10nKey::AppMenuZoomPane => "Zoom Pane",
         L10nKey::AppMenuClearScrollback => "Clear Scrollback",
-        L10nKey::AppMenuDocumentation => "tty7 Documentation",
+        L10nKey::AppMenuDocumentation => "Scottie Documentation",
         L10nKey::AppMenuKeyboardShortcuts => "Keyboard Shortcuts",
         L10nKey::AppMenuJoinDiscord => "Join the Discord",
         L10nKey::AppMenuReportIssue => "Report an Issue…",
         L10nKey::AppMenuRestartServer => "Restart Server…",
         L10nKey::WindowUntitled => "Untitled",
-        L10nKey::TrayShowTty7 => "Show tty7",
+        L10nKey::TrayShowTty7 => "Show Scottie",
         L10nKey::TrayNotifications => "Notifications",
         L10nKey::TrayAgentNeedsInput => "needs input",
         L10nKey::AgentStatusWorking => "Working",
@@ -1788,12 +1788,14 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsImportSummary, "other") => {
             "{count} hosts added — {updated} updated, {unchanged} already current"
         }
-        (L10nKey::SettingsImportIgnored, "zero") => "Every option in the file has a tty7 setting.",
+        (L10nKey::SettingsImportIgnored, "zero") => {
+            "Every option in the file has a Scottie setting."
+        }
         (L10nKey::SettingsImportIgnored, "one") => {
-            "1 option has no setting in tty7 and was left in the file: {options}"
+            "1 option has no setting in Scottie and was left in the file: {options}"
         }
         (L10nKey::SettingsImportIgnored, "other") => {
-            "{count} options have no setting in tty7 and were left in the file: {options}"
+            "{count} options have no setting in Scottie and were left in the file: {options}"
         }
         (L10nKey::SettingsRulesOpenedWithConnection, "zero") => {
             "0 rules, opened with the connection"

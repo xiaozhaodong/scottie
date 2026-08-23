@@ -12,7 +12,7 @@ pub const ASSET_MACOS_AARCH64: &str = "tty7-server-macos-aarch64";
 
 pub const CHECKSUMS_ASSET: &str = "checksums.txt";
 
-pub const RELEASE_BASE: &str = "https://github.com/l0ng-ai/tty7/releases/download";
+pub const RELEASE_BASE: &str = "https://github.com/xiaozhaodong/scottie/releases/download";
 
 pub const INSTALL_DIR_COMPONENTS: [&str; 4] = [".local", "share", "tty7", "bin"];
 
@@ -279,11 +279,11 @@ mod tests {
     fn download_urls_point_at_the_release_the_tag_names() {
         assert_eq!(
             download_url(&release_tag("26.7.5"), ASSET_LINUX_X86_64),
-            "https://github.com/l0ng-ai/tty7/releases/download/v26.7.5/tty7-server-linux-x86_64-musl"
+            "https://github.com/xiaozhaodong/scottie/releases/download/v26.7.5/tty7-server-linux-x86_64-musl"
         );
         assert_eq!(
             download_url(&release_tag("26.7.6-nightly.20260727"), CHECKSUMS_ASSET),
-            "https://github.com/l0ng-ai/tty7/releases/download/nightly/checksums.txt"
+            "https://github.com/xiaozhaodong/scottie/releases/download/nightly/checksums.txt"
         );
     }
 

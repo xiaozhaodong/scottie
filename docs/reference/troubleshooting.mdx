@@ -17,7 +17,7 @@ machine links exist. Most of what follows is a specific answer this gives you.
 
 The CLI is put on PATH the first time the app launches. If it is missing:
 
-- Check **Settings → Agents → Install the tty7 command on PATH** is on.
+- Check **Settings → Agents → Install the Scottie command on PATH** is on.
 - On Unix it symlinks into whichever of `/opt/homebrew/bin`, `/usr/local/bin`,
   `~/.local/bin`, `~/bin`, `~/.cargo/bin` your PATH already covers — if none of
   those are on your PATH, add one.
@@ -26,7 +26,7 @@ The CLI is put on PATH the first time the app launches. If it is missing:
 - A `tty7` you installed yourself is never replaced, so an old one earlier in
   PATH will win.
 
-Inside a tty7 pane it works regardless, since panes inherit the app's
+Inside a Scottie pane it works regardless, since panes inherit the app's
 environment.
 
 ## The server is unreachable
@@ -47,7 +47,7 @@ tty7 server logs
 ## Panes came back empty
 
 A crash, a `kill -9`, or a reboot takes the shells with it — that part is
-unavoidable. The *screens* should come back: tty7 keeps a capped tail of each
+unavoidable. The *screens* should come back: Scottie keeps a capped tail of each
 pane's output (256 KiB) and hands it to the pane that reopens on that id.
 
 It is consumed once. If a pane was restored, then closed, then reopened, the
@@ -55,7 +55,7 @@ second time there is nothing left to restore — that is by design, not a bug.
 
 ## "The background server is still running &lt;build&gt;"
 
-tty7 updated in place, so the app is new and your panes are still served by the
+Scottie updated in place, so the app is new and your panes are still served by the
 previous build. Restarting the server picks up the new one and **ends every
 process in every pane**. There is no hurry — do it when your panes are idle.
 [Updates →](/reference/updates)
@@ -64,10 +64,10 @@ process in every pane**. There is no hurry — do it when your panes are idle.
 
 | Message | What it means |
 |---|---|
-| *"running an old tty7 server that this copy cannot talk to"* | The server there predates your client's protocol. Let tty7 update it — this ends every session on that machine. |
-| *"running a newer tty7 server than this copy"* | Update tty7 here instead, or replace the server there. |
-| *"answered, but not as a tty7 server"* | Something else is listening, or the binary is not what tty7 expects. |
-| *"tty7 no longer has a way to reach &lt;machine&gt;"* | The SSH link dropped. Reconnect from the switcher. |
+| *"running an old Scottie server that this copy cannot talk to"* | The server there predates your client's protocol. Let Scottie update it — this ends every session on that machine. |
+| *"running a newer Scottie server than this copy"* | Update Scottie here instead, or replace the server there. |
+| *"answered, but not as a Scottie server"* | Something else is listening, or the binary is not what Scottie expects. |
+| *"Scottie no longer has a way to reach &lt;machine&gt;"* | The SSH link dropped. Reconnect from the switcher. |
 
 `tty7 -m <machine>` never dials a fresh connection by design — it uses a link
 the local server already holds. Connect from the GUI first.
@@ -105,7 +105,7 @@ Usually a missing required key: `background`, `foreground`, `accent`, and `ansi`
 
 ## My `config.json` edits did nothing
 
-If the file cannot be parsed, tty7 starts on defaults and keeps your original at
+If the file cannot be parsed, Scottie starts on defaults and keeps your original at
 `config.json.corrupt` — check for that file. Otherwise:
 
 - An out-of-range number is **clamped**, not applied literally.
@@ -131,7 +131,7 @@ piping into `head`. Current builds exit `141` on Unix, which is exactly what
   <Card title="Discord" icon="discord" href="https://discord.gg/s3dethqz2V">
     Ask — someone has probably hit it.
   </Card>
-  <Card title="Report an issue" icon="github" href="https://github.com/l0ng-ai/tty7/issues/new">
+  <Card title="Report an issue" icon="github" href="https://github.com/xiaozhaodong/scottie/issues/new">
     Include `tty7 doctor` output and your platform.
   </Card>
 </CardGroup>

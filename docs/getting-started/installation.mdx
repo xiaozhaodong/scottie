@@ -4,18 +4,18 @@ description: "Native builds for macOS, Windows, and Linux — plus building from
 ---
 
 Every release publishes native builds on
-[**GitHub Releases**](https://github.com/l0ng-ai/tty7/releases). There is no
+[**GitHub Releases**](https://github.com/xiaozhaodong/scottie/releases). There is no
 runtime to install first: fonts are embedded in the binary, and the Linux
 AppImage bundles its own X11/Wayland/font libraries.
 
 <Tabs>
   <Tab title="macOS">
-    Download the DMG that matches your Mac and drag **tty7** into Applications.
+    Download the DMG that matches your Mac and drag **Scottie** into Applications.
 
     | Mac | File |
     |---|---|
-    | Apple silicon (M1 and later) | `tty7-<version>-macos-arm64.dmg` |
-    | Intel | `tty7-<version>-macos-x86_64.dmg` |
+    | Apple silicon (M1 and later) | `scottie-<version>-macos-arm64.dmg` |
+    | Intel | `scottie-<version>-macos-x86_64.dmg` |
 
     Builds are signed with a Developer ID certificate and notarized by Apple, so
     Gatekeeper opens them without a right-click dance.
@@ -35,7 +35,7 @@ AppImage bundles its own X11/Wayland/font libraries.
     | `tty7-<version>-windows-x86_64.zip` | You want it portable — unzip anywhere and run `tty7-app.exe`. |
 
     The installer offers one optional setup task, off by default: **Add "Open in
-    tty7" to the folder context menu**. It writes shell verbs under `HKCU`, so
+    Scottie" to the folder context menu**. It writes shell verbs under `HKCU`, so
     only your own Windows account is affected, and the uninstaller always takes
     them back out.
 
@@ -80,16 +80,16 @@ in some other terminal — open panes and read them back.
 
 A `tty7` you installed yourself — a `cargo install` build, a package manager's
 copy — is never replaced. To turn the whole thing off, uncheck **Settings →
-Agents → Install the tty7 command on PATH**.
+Agents → Install the Scottie command on PATH**.
 
 <Tip>
-  Inside a tty7 pane the CLI works regardless of PATH, because panes inherit the
+  Inside a Scottie pane the CLI works regardless of PATH, because panes inherit the
   app's environment.
 </Tip>
 
 ## Updating
 
-tty7 checks for updates every six hours and can update itself: **Settings →
+Scottie checks for updates every six hours and can update itself: **Settings →
 About → Check now**, then **Update and relaunch**. Releases are downloaded and
 verified in the background so applying one is just a restart.
 
@@ -105,8 +105,8 @@ binary is `tty7-app`.
 <Tabs>
   <Tab title="macOS / Windows">
     ```bash
-    git clone https://github.com/l0ng-ai/tty7
-    cd tty7
+    git clone https://github.com/xiaozhaodong/scottie
+    cd scottie
     cargo build --release
     ```
   </Tab>
@@ -135,7 +135,7 @@ binary is `tty7-app`.
 
 <AccordionGroup>
   <Accordion title="macOS">
-    Quit tty7 (use **Quit and Stop Server** from the tray menu so the background
+    Quit Scottie (use **Quit and Stop Server** from the tray menu so the background
     server stops too), then drag the app to the Trash. Your settings live in
     `~/.config/tty7` and are left alone; delete that folder to remove them.
   </Accordion>

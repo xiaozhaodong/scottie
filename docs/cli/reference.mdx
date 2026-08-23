@@ -15,7 +15,7 @@ Accepted anywhere on the line, before or after the subcommand.
 
 ## Environment
 
-Set inside every tty7 pane, inherited by anything launched from one.
+Set inside every Scottie pane, inherited by anything launched from one.
 
 | Variable | Meaning |
 |---|---|
@@ -23,7 +23,7 @@ Set inside every tty7 pane, inherited by anything launched from one.
 | `TTY7_WS` | This pane's workspace id. Default for `run --keep`, `tab new`, `tab ls`, `ws tree`. |
 | `TTY7_CONFIG_DIR` | The server's config dir — how the CLI finds the right server. You never pass a socket path. |
 
-Outside a tty7 shell, address-taking verbs fail with
+Outside a Scottie shell, address-taking verbs fail with
 `not inside a tty7 shell — pass an explicit %pane/@tab/workspace`.
 
 ## Exit codes
@@ -100,7 +100,7 @@ none, so `tty7 send %42 --enter` runs whatever pane 42 already has typed. With
 one argument the text is the argument and the pane comes from `$TTY7_PANE` —
 but a lone `%42` (or bare `42`, the shape `pane ls --json` prints) is rejected
 as a missing-text error rather than typed, unless a `--key` gives it something
-to do. `--enter` is that key only for the `%`-marked spelling: `tty7 send 83
+to do. `--enter` is that key only for the `%`-marked spelling: `Scottie send 83
 --enter` is refused, because it reads as much like typing `83` into your own
 pane as like pressing Enter in pane 83, and the error names both ways to say
 which (`send %83 --enter`, `send %PANE 83 --enter`). A `%` followed by a digit
@@ -219,7 +219,7 @@ The install check: the three environment variables, whether the server answers,
 whether its control and protocol versions match this binary, pid/uptime/panes,
 how many machine links exist, and where each agent's
 [status hooks](/agents/status) stand. Adds a note when you are not inside a
-tty7 shell.
+Scottie shell.
 
 The hooks row is the one that explains a mystery: without them an agent reports
 nothing, so `tty7 agents` shows it standing still and `tty7 wait` sits there

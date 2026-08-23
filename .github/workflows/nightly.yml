@@ -152,12 +152,12 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ needs.plan.outputs.version }}"
-          ZIP="dist/tty7-${VERSION}-macos-${{ matrix.arch }}.zip"
+          ZIP="dist/scottie-${VERSION}-macos-${{ matrix.arch }}.zip"
           VERIFY_ROOT="$RUNNER_TEMP/tty7-nightly-update-verify"
           rm -rf "$VERIFY_ROOT"
           mkdir -p "$VERIFY_ROOT"
           /usr/bin/ditto -x -k "$ZIP" "$VERIFY_ROOT"
-          APP="$VERIFY_ROOT/tty7.app"
+          APP="$VERIFY_ROOT/Scottie.app"
           test -x "$APP/Contents/MacOS/tty7-updater"
           ACTUAL_VERSION="$(/usr/libexec/PlistBuddy \
             -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")"
@@ -222,7 +222,7 @@ jobs:
           "${{ matrix.arch }}" "${{ needs.plan.outputs.version }}"
 
       # Same glob list as release.yml's Release step: the bundle scripts leave
-      # intermediates in dist/ (tty7.app, entitlements.plist, the Windows
+      # intermediates in dist/ (Scottie.app, entitlements.plist, the Windows
       # staging dir) that must not reach the release assets.
       - uses: actions/upload-artifact@v7
         with:

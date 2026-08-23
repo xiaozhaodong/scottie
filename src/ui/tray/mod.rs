@@ -111,7 +111,7 @@ impl TraySnapshot {
             }
         }
         if parts.is_empty() {
-            "tty7".to_string()
+            "Scottie".to_string()
         } else {
             crate::ui::i18n::t_fmt(
                 L10nKey::TrayTooltipAgents,
@@ -268,11 +268,11 @@ mod tests {
         assert_eq!(
             snapshot_with_agent(AgentStatus::Waiting).tooltip(),
             format!(
-                "tty7 — 1 {}",
+                "Scottie — 1 {}",
                 t(crate::ui::i18n::L10nKey::PanelAgentWaiting)
             )
         );
-        assert_eq!(TraySnapshot::default().tooltip(), "tty7");
+        assert_eq!(TraySnapshot::default().tooltip(), "Scottie");
     }
 
     #[test]

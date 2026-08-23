@@ -1,9 +1,9 @@
 ---
-title: "The tty7 command"
+title: "The Scottie command"
 description: "Driving the workbench from a script, a Makefile, or another agent."
 ---
 
-`tty7` is a thin, non-interactive client of the tty7 server. Every verb runs and
+`tty7` is a thin, non-interactive client of the Scottie server. Every verb runs and
 exits; `--json` makes the output machine-readable. **The GUI does not have to be
 running** — the server is what owns the panes.
 
@@ -19,7 +19,7 @@ tty7 doctor
 One table that answers everything you need before doing anything else: whether a
 server is reachable, whether its wire dialect matches this binary, and whether
 `TTY7_CONFIG_DIR` / `TTY7_WS` / `TTY7_PANE` are set — that is, whether you are
-running *inside* a tty7 pane.
+running *inside* a Scottie pane.
 
 Being inside a pane matters because the address-taking verbs (`split`, `send`,
 `capture`, `procs`, `wait`, `pane close`) default to `$TTY7_PANE`, and
@@ -53,7 +53,7 @@ watch it happen in the window.
 
 <Note>
   Everything after `--` belongs to the child: `tty7 run -- cargo test --keep`
-  passes `--keep` to cargo, not to tty7.
+  passes `--keep` to cargo, not to Scottie.
 </Note>
 
 ### Non-blocking: a pane you talk to over time
@@ -68,7 +68,7 @@ tty7 capture "$PANE" --plain
 tty7 pane close "$PANE"
 ```
 
-If you are not inside a tty7 pane there is nothing to split, so make your own
+If you are not inside a Scottie pane there is nothing to split, so make your own
 place to work:
 
 ```bash

@@ -6937,7 +6937,7 @@ impl Tty7App {
                                     .text_xl()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(foreground)
-                                    .child("tty7"),
+                                    .child("Scottie"),
                             )
                             .child(div().text_sm().text_color(muted_fg).child(format!(
                                 "{} {}",
@@ -6946,9 +6946,9 @@ impl Tty7App {
                             )))
                             .child(
                                 Link::new("about-github")
-                                    .href("https://github.com/l0ng-ai/tty7")
+                                    .href("https://github.com/xiaozhaodong/scottie")
                                     .text_sm()
-                                    .child("github.com/l0ng-ai/tty7"),
+                                    .child("github.com/xiaozhaodong/scottie"),
                             ),
                     ),
             )
@@ -7845,7 +7845,7 @@ mod tests {
             ssh_group_label(crate::core::ssh_config::IMPORTED_GROUP),
             "~/.ssh/config"
         );
-        assert_eq!(ssh_group_label(""), "In tty7");
+        assert_eq!(ssh_group_label(""), "In Scottie");
         assert_eq!(ssh_group_label("Work"), "Work");
     }
 

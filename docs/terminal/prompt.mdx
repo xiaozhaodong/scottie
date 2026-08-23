@@ -3,11 +3,11 @@ title: "The prompt"
 description: "Ghost suggestions, tab completion that explains itself, syntax highlighting, and real multi-line editing."
 ---
 
-tty7 puts an editor at the shell prompt. Nothing to install, no plugin to source
+Scottie puts an editor at the shell prompt. Nothing to install, no plugin to source
 — the moment a supported shell starts in a pane, the prompt behaves like this.
 
 <Frame caption="Placeholder — video: typing a command with a ghost suggestion, accepting it, then opening the completion menu">
-  <img src="/images/placeholder.svg" alt="The tty7 prompt" />
+  <img src="/images/placeholder.svg" alt="The Scottie prompt" />
 </Frame>
 
 ## Ghost suggestions
@@ -39,7 +39,7 @@ build up first, and it carries across sessions and reboots.
   <img src="/images/placeholder.svg" alt="Explained tab completion" />
 </Frame>
 
-When tty7 has nothing useful to offer, the <kbd>⇥</kbd> falls through to your
+When Scottie has nothing useful to offer, the <kbd>⇥</kbd> falls through to your
 shell's own completion, so a carefully configured zsh setup is not lost.
 
 To hand <kbd>⇥</kbd> back to the shell entirely, turn off **Settings → Input →
@@ -108,7 +108,7 @@ Keybindings**.
 
 ## Which shells
 
-The prompt features arrive through tty7's shell integration, which is injected
+The prompt features arrive through Scottie's shell integration, which is injected
 automatically — nothing to add to your rc file — for **zsh**, **bash**,
 **fish**, **PowerShell**, and **WSL**. Other shells (nushell, elvish, xonsh, and
 the rest) run perfectly well in a pane; they simply do not get the prompt layer.
@@ -136,7 +136,7 @@ Turning off **Settings → Input → Prompt → Prompt editor**
 keystroke at the prompt — printable characters, arrows, IME commits, paste — goes
 straight to the PTY, and your shell's own line editor does the editing: zsh's
 ZLE, bash's readline, fish's reader. A widget you bound yourself runs exactly as
-it does outside tty7:
+it does outside Scottie:
 
 ```zsh
 # ~/.zshrc — works at a tty7 prompt with the editor off
@@ -146,7 +146,7 @@ bindkey '^[[A' history-beginning-search-backward-end
 What you give up is the layer this page describes: ghost suggestions, the
 completion menu, the fuzzy <kbd>⌃ R</kbd>, the multi-line editor, mouse caret
 placement and undo on the prompt. Tab completion and history search grey out in
-Settings while it is off — both are menus tty7 opens inside that editor, so
+Settings while it is off — both are menus Scottie opens inside that editor, so
 there is nothing left for them to switch.
 
 What you keep is everything shell integration reports: prompt boundaries, the

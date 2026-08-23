@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="assets/app-icon.svg" alt="tty7" width="88" height="88" />
+<img src="assets/app-icon.svg" alt="Scottie" width="88" height="88" />
 
-### tty7
+### Scottie
 
 **终端工作台：会话常驻、远程开发、原生支持 agent。**
 
@@ -10,9 +10,9 @@
 
 <br />
 
-[![CI](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml/badge.svg)](https://github.com/l0ng-ai/tty7/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/github/v/release/l0ng-ai/tty7?label=version&color=3FDD8C)](https://github.com/l0ng-ai/tty7/releases)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue)](https://github.com/l0ng-ai/tty7/releases)
+[![CI](https://github.com/xiaozhaodong/scottie/actions/workflows/ci.yml/badge.svg)](https://github.com/xiaozhaodong/scottie/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/release/xiaozhaodong/scottie?label=version&color=3FDD8C)](https://github.com/xiaozhaodong/scottie/releases)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-blue)](https://github.com/xiaozhaodong/scottie/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-%E5%8A%A0%E5%85%A5%E8%AE%A8%E8%AE%BA-5865F2?logo=discord&logoColor=white)](https://discord.gg/s3dethqz2V)
 
@@ -20,9 +20,12 @@
 
 <br />
 
-<img src="assets/hero.webp" alt="tty7 侧边栏列出多个仓库的 agent 会话，右侧运行 Claude Code" width="900" />
+<img src="assets/hero.webp" alt="Scottie 侧边栏列出多个仓库的 agent 会话，右侧运行 Claude Code" width="900" />
 
 </div>
+
+> Scottie 是 [tty7](https://github.com/l0ng-ai/tty7) 的个人下游发行版。
+> 为了兼容已有安装，内部的 `tty7` CLI、server、配置路径和协议名称保持不变。
 
 ## 为什么
 
@@ -38,7 +41,9 @@
 
 ## 安装
 
-macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/l0ng-ai/tty7/releases)：
+macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/xiaozhaodong/scottie/releases)：
+
+Scottie 与上游 tty7 构建共享内部 daemon 和配置路径，请不要同时安装或运行两个发行版。
 
 | | | |
 |---|---|---|
@@ -63,7 +68,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 
 **识别**无需配置：品牌头像、分支与 diff、标签页标题。
 **状态**需要在设置 → Agents 中为该 agent 安装 hook，一次点击，之后才有状态点、通知、托盘提醒、`tty7 wait` 和重启后恢复会话。
-**Fork** 两个条件都要：agent 自己提供 fork 命令，且 hook 已装——tty7 得知道 fork 的是哪个会话。
+**Fork** 两个条件都要：agent 自己提供 fork 命令，且 hook 已装——Scottie 得知道 fork 的是哪个会话。
 
 <details>
 <summary>19 个 agent 的完整支持矩阵</summary>
@@ -92,7 +97,7 @@ macOS、Windows、Linux 的原生构建都在 [**Releases**](https://github.com/
 
 </details>
 
-tty7 不包装、不代理其中任何一个 —— 你启动的就是那个 agent 本身，运行在普通 PTY 中，界面仍然是它自己的。
+Scottie 不包装、不代理其中任何一个 —— 你启动的就是那个 agent 本身，运行在普通 PTY 中，界面仍然是它自己的。
 如果你通过 wrapper 脚本启动 agent，在 `config.json` 的 `agent_commands` 里把脚本名映射到对应 agent 即可。
 
 ## 文档
@@ -106,7 +111,7 @@ agent 如何调用这套 CLI，另见 [skills/tty7/SKILL.md](skills/tty7/SKILL.m
 安装 skill：
 
 ```sh
-npx skills add l0ng-ai/tty7    # 安装
+npx skills add xiaozhaodong/scottie    # 安装
 npx skills update tty7         # 后续更新
 ```
 
@@ -114,7 +119,7 @@ npx skills update tty7         # 后续更新
 
 同一台机器、同一天、同样的 155×40 网格：Apple M1 Pro，macOS 26.3.1，每项运行五次取平均（2026-07-04）。
 
-| | **tty7** | Alacritty | Ghostty | Kitty |
+| | **Scottie** | Alacritty | Ghostty | Kitty |
 |---|---:|---:|---:|---:|
 | 纯文本 I/O：`cat` 一个 11 MB 文件 <sub>（越低越好）</sub> | **95 ms** | 239 ms | 179 ms | 185 ms |
 | [DOOM-fire](https://github.com/const-void/DOOM-fire-zig) 帧率 <sub>（越高越好）</sub> | **888 fps** | 485 fps | 552 fps | 617 fps |

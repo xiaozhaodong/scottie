@@ -23,7 +23,7 @@ pub(crate) fn traffic_light_position() -> Point<Pixels> {
 
 pub(crate) fn set_menus(cx: &mut App) {
     cx.set_menus([
-        Menu::new("tty7").items([
+        Menu::new("Scottie").items([
             MenuItem::action(t(L10nKey::AppMenuAbout), About),
             MenuItem::action(t(L10nKey::AppMenuCheckForUpdates), CheckForUpdates),
             MenuItem::separator(),

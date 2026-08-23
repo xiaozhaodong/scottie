@@ -4,7 +4,7 @@ description: "One agent opening a pane for another, waiting on it, and reading t
 ---
 
 Once an agent's status is a thing a program can ask about, one agent can run
-another. tty7 gives that loop a primitive instead of leaving it to screen
+another. Scottie gives that loop a primitive instead of leaving it to screen
 scraping.
 
 ## The loop
@@ -154,12 +154,12 @@ If you are an agent yourself, you are in that list too.
 
 ## Teaching an agent to do this
 
-tty7 installs nothing into `~/.claude` for it — no switch in **Settings →
+Scottie installs nothing into `~/.claude` for it — no switch in **Settings →
 Agents** writes a skill, and none ever will. What the agent needs to know ships
 in the repository instead, as a skill you install yourself:
 
 ```bash
-npx skills add l0ng-ai/tty7
+npx skills add xiaozhaodong/scottie
 ```
 
 That covers the pane-driving half — where it is, how to open a pane, send into

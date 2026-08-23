@@ -1,16 +1,16 @@
 ---
 title: "Coding agents"
-description: "What tty7 does around Claude Code, Codex, and 17 others — without ever wrapping them."
+description: "What Scottie does around Claude Code, Codex, and 17 others — without ever wrapping them."
 ---
 
-tty7 recognises coding agents running in a pane and builds around them. It does
+Scottie recognises coding agents running in a pane and builds around them. It does
 not wrap them, proxy them, or replace their interface: the agent you start is
-the agent you get, running in a normal PTY, with its own UI. tty7 adds the
+the agent you get, running in a normal PTY, with its own UI. Scottie adds the
 things a terminal is in a position to add — who is running where, what they
 need, and what changed.
 
 <Frame caption="Placeholder — screenshot: a sidebar of agent sessions across several repos, each with a brand avatar and status dot">
-  <img src="/images/placeholder.svg" alt="Agent sessions in the tty7 sidebar" />
+  <img src="/images/placeholder.svg" alt="Agent sessions in the Scottie sidebar" />
 </Frame>
 
 ## Which agents
@@ -87,7 +87,7 @@ Just by running an agent in a pane:
 ## What needs a hook
 
 Live status — **working**, **needs your input**, **done** — comes from the agent
-itself, over a channel tty7 installs into that agent's configuration. It powers
+itself, over a channel Scottie installs into that agent's configuration. It powers
 the status dots, the notifications, the tray icon, and `tty7 wait`.
 
 Installing takes one click per agent under **Settings → Agents**.

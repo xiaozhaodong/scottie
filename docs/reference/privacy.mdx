@@ -1,18 +1,18 @@
 ---
 title: "Privacy and permissions"
-description: "What macOS asks you, why, and what tty7 itself holds."
+description: "What macOS asks you, why, and what Scottie itself holds."
 ---
 
-## Why macOS asks tty7 for permission
+## Why macOS asks Scottie for permission
 
-Panes are forked from tty7's own bundled executable, so when a program you run
-asks macOS for a protected resource, macOS attributes the request to **tty7.app**
+Panes are forked from Scottie's own bundled executable, so when a program you run
+asks macOS for a protected resource, macOS attributes the request to **Scottie.app**
 — not to the program.
 
-If tty7 declared no usage strings, that request would be **denied outright with
+If Scottie declared no usage strings, that request would be **denied outright with
 no prompt at all**, and the program would look broken for no visible reason.
 
-So tty7 declares the matching usage strings, and you get the normal one-time
+So Scottie declares the matching usage strings, and you get the normal one-time
 prompt:
 
 <CardGroup cols={2}>
@@ -29,7 +29,7 @@ prompt:
 
 <Warning>
   **Declaring a usage string is not the same as holding the permission.**
-  tty7.app itself is granted none of these. Every prompt you see belongs to
+  Scottie.app itself is granted none of these. Every prompt you see belongs to
   whatever you ran in the pane, and you can revoke it under **System Settings →
   Privacy & Security**.
 </Warning>

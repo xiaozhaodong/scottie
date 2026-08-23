@@ -3,7 +3,7 @@ name = "tty7-core"
 version.workspace = true
 edition.workspace = true
 description = "tty7's framework-free core: wire protocol, session daemon, PTY, SSH engine, and the domain model both the GUI and the headless server build on"
-repository = "https://github.com/l0ng-ai/tty7"
+repository = "https://github.com/xiaozhaodong/scottie"
 license = "Apache-2.0"
 publish = false
 
