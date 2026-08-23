@@ -10,9 +10,9 @@
 //! It is deliberately reluctant to write. The installer stamps its own
 //! shortcuts (see `windows-installer.iss`), so the runtime write only has to
 //! cover the portable zip and installs that predate that change. It therefore
-//! touches at most the single per-user `tty7.lnk` that Inno's default install
+//! touches at most the single per-user `Scottie.lnk` that Inno's default install
 //! owns anyway — never a second Start Menu entry beside an all-users install
-//! (which would show "tty7" twice and outlive the uninstaller), and never
+//! (which would show "Scottie" twice and outlive the uninstaller), and never
 //! anything at all from a `cargo` build directory (which would repoint the
 //! user's installed shortcut at `target\debug`).
 //!
@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 /// The toast/taskbar identity. Keep in sync with the `AppUserModelID` on the
 /// installer shortcuts in `.github/scripts/windows-installer.iss` — a
 /// mismatch silently splits the identity in two (a unit test checks this).
-pub(crate) const AUMID: &str = "com.github.tty7";
+pub(crate) const AUMID: &str = "ai.scottie.app";
 
 /// How long we keep using the PowerShell identity after writing the shortcut
 /// ourselves. The shell picks a new `.lnk` up asynchronously and silently
@@ -106,8 +106,8 @@ enum Decision {
 fn decide() -> Result<Decision, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current exe: {e}"))?;
 
-    // An elevated install owns `%ProgramData%\...\tty7.lnk`, which we cannot
-    // rewrite unelevated. A per-user twin beside it would list "tty7" twice in
+    // An elevated install owns `%ProgramData%\...\Scottie.lnk`, which we cannot
+    // rewrite unelevated. A per-user twin beside it would list "Scottie" twice in
     // the Start Menu and survive the uninstaller, so that file settles the
     // question on its own: branded if the installer stamped our AUMID on it,
     // unbranded until the user upgrades to an installer that does.
@@ -204,15 +204,15 @@ fn programs_dir(env_var: &str) -> Option<PathBuf> {
 }
 
 /// The only shortcut we ever write: the per-user Start Menu, which is also
-/// where Inno's default (non-elevated) install puts `tty7.lnk` — so refreshing
+/// where Inno's default (non-elevated) install puts `Scottie.lnk` — so refreshing
 /// it adds no entry the uninstaller does not already know how to remove.
 fn start_menu_shortcut_path() -> Option<PathBuf> {
-    Some(programs_dir("APPDATA")?.join("tty7.lnk"))
+    Some(programs_dir("APPDATA")?.join("Scottie.lnk"))
 }
 
 /// The all-users twin an elevated install writes. Read-only for us.
 fn all_users_shortcut_path() -> Option<PathBuf> {
-    Some(programs_dir("ProgramData")?.join("tty7.lnk"))
+    Some(programs_dir("ProgramData")?.join("Scottie.lnk"))
 }
 
 #[derive(Default)]
@@ -346,7 +346,10 @@ mod tests {
         let Some(lnk) = super::start_menu_shortcut_path() else {
             return; // no APPDATA in this environment — nothing to assert
         };
-        assert_eq!(lnk.file_name().and_then(|n| n.to_str()), Some("tty7.lnk"));
+        assert_eq!(
+            lnk.file_name().and_then(|n| n.to_str()),
+            Some("Scottie.lnk")
+        );
         assert_eq!(
             lnk.parent()
                 .and_then(|p| p.file_name())
@@ -432,7 +435,7 @@ mod tests {
     fn a_written_shortcut_reads_back_as_ours() {
         let dir = std::env::temp_dir().join(format!("tty7-aumid-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create temp dir");
-        let lnk = dir.join("tty7.lnk");
+        let lnk = dir.join("Scottie.lnk");
 
         let written = super::write_shortcut(&lnk);
         let read = written.as_ref().ok().map(|()| super::read_shortcut(&lnk));
