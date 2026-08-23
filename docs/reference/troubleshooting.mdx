@@ -125,6 +125,24 @@ arrived. On such a build, redirect to a file and slice the file instead of
 piping into `head`. Current builds exit `141` on Unix, which is exactly what
 `cat` does.
 
+## Text looks too thin on macOS
+
+Scottie writes `AppleFontSmoothing = 0` into its own preference domain on first
+launch, which turns off the stroke-thickening CoreGraphics otherwise applies to
+every glyph. On a Retina panel that extra weight reads as blur; on a 1× external
+display the thinner result can look faint instead.
+
+To get the system rendering back, write a non-zero value — do **not** delete the
+key, because an absent key is what triggers the write in the first place, so the
+next launch would set it to `0` again:
+
+```bash
+defaults write ai.scottie.app AppleFontSmoothing -int 1
+```
+
+The preference is read once per process, so quit and reopen Scottie for either
+value to take effect. A value you set yourself is never overwritten.
+
 ## Still stuck
 
 <CardGroup cols={2}>

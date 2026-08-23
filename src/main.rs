@@ -564,6 +564,12 @@ fn main() {
     #[cfg(target_os = "windows")]
     crate::core::aumid::init();
 
+    // Settle the `AppleFontSmoothing` default before gpui's text system reads
+    // it — that read happens once per process, on the first glyph, and is
+    // cached for the rest of the run. Best-effort; no-op off macOS.
+    #[cfg(target_os = "macos")]
+    crate::core::font_smoothing::disable_dilation_by_default();
+
     let restore_session = config.restore_session;
     let daemon_result = if restore_session {
         crate::daemon::spawn::ensure_running()

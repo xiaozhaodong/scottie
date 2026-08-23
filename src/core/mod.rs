@@ -7,6 +7,8 @@ pub mod aumid;
 pub mod cli_install;
 pub mod config;
 pub mod explorer_context_menu;
+#[cfg(target_os = "macos")]
+pub mod font_smoothing;
 pub mod keychain;
 pub mod rate_meter;
 pub mod session;
