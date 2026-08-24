@@ -156,11 +156,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDimInactivePanesDesc => {
             "Fade unfocused panes in a split so the active one stands out."
         }
-        L10nKey::SettingsShowPaneTitle => "Show pane titles",
+        L10nKey::SettingsShowPaneTitle => "Show active pane title",
         L10nKey::SettingsShowPaneTitleDesc => {
-            "Name each pane along its top edge, in a tab that has been split — \
-             what the program running in it set, the agent working in it, or \
-             the folder it sits in. Costs about a line and a half of grid."
+            "Show the visible pane's name in the window's top chrome. Split panes \
+             use a hover grip instead of a persistent header."
         }
         L10nKey::SettingsOpenThemesFolder => "Open themes folder",
         L10nKey::SettingsChangeThemeImage => "Change…",

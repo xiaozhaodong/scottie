@@ -20,8 +20,8 @@ use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-// The strip draws the same titles and the same paths a pane header, the
-// sidebar and the switcher do, and all of them shorten through these. Kept in
+// The strip draws the same titles and paths as the window chrome, sidebar and
+// switcher, and all of them shorten through these helpers. Kept in
 // `path_display` rather than here so no surface has to reach into the tab
 // strip to name a pane the same way it does.
 use crate::ui::path_display::{
@@ -1425,6 +1425,7 @@ impl Tty7App {
     pub(crate) fn tab_strip(
         &self,
         show_chips: bool,
+        pane_title: Option<AnyElement>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -1782,6 +1783,13 @@ impl Tty7App {
         let panel_open = self.right_panel_open(cx);
         let right_chrome =
             (!panel_open || !cfg!(target_os = "macos")).then(|| self.window_chrome(window, cx));
+        let title_center = div()
+            .flex_1()
+            .min_w(px(GRAB_HANDLE_W))
+            .flex()
+            .items_center()
+            .justify_center()
+            .when_some(pane_title, |this, title| this.child(title));
 
         h_flex()
             .id("tab-strip")
@@ -1794,7 +1802,7 @@ impl Tty7App {
             .when_some(left_group, |this, g| this.child(g))
             .child(chips)
             .when(show_chips, move |this| this.child(add_button))
-            .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
+            .child(title_center)
             .when_some(right_chrome, |this, chrome| match chrome_band_w {
                 Some(w) => this.child(
                     h_flex()

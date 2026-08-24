@@ -533,14 +533,14 @@ impl Tab {
     /// from different panes (#580).
     ///
     /// The name itself is [`TerminalView::display_source`], the same choice
-    /// the pane's own header makes, so a chip and the header under it cannot
-    /// disagree about what they are naming. Only the *width* differs after
-    /// this: the strip shortens through `short_title`, the sidebar elides
-    /// against real glyphs, the header elides from the front.
+    /// the window chrome makes, so a chip and the chrome cannot disagree about
+    /// what they are naming. Only the *width* differs after this: the strip
+    /// shortens through `short_title`, the sidebar elides against real glyphs,
+    /// and the chrome elides from the front.
     ///
     /// Empty when the pane has said nothing and has no directory either. Each
-    /// caller spells its own placeholder for that — a tab counts, a header
-    /// falls back to the app's name.
+    /// caller spells its own placeholder for that — a tab counts, while the
+    /// window chrome falls back to the app's name.
     pub(crate) fn leaf_display_name(
         &self,
         window: Option<&Window>,
@@ -2955,10 +2955,9 @@ impl Tty7App {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
     }
 
-    /// Turning the headers on or off resizes every grid in the window — the
-    /// strip comes out of the terminal's height. Nothing here has to say so:
-    /// the element measures its own box every frame, so the next paint after
-    /// this config write is already the right number of rows.
+    /// Turning the active pane title on or off changes the window chrome. The
+    /// terminal grid keeps the same height; the next paint after this config
+    /// write simply adds or removes the title from the top bar.
     pub(crate) fn set_show_pane_title(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_pane_title = on);
     }
@@ -7012,6 +7011,61 @@ impl ForwardRoute {
     }
 }
 
+impl Tty7App {
+    /// Build the one pane title that belongs in the window chrome.
+    ///
+    /// Split panes deliberately do not get persistent in-content headers. A
+    /// zoomed pane is still a single visible pane, so it uses the same title
+    /// slot as an ordinary single-pane tab.
+    fn visible_pane_title(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !cx.global::<Config>().show_pane_title {
+            return None;
+        }
+        let active_tab = self.tabs.get(self.active)?;
+        let slot = self
+            .maximized
+            .as_ref()
+            .filter(|leaf| {
+                active_tab
+                    .pane
+                    .leaves()
+                    .iter()
+                    .any(|slot| slot.entity_id() == leaf.entity_id())
+            })
+            .map(|leaf| PaneSlot::Ready(leaf.clone()))
+            .or_else(|| {
+                (active_tab.pane.leaves().len() == 1)
+                    .then(|| active_tab.pane.focused_or_first_slot(window, cx))
+                    .flatten()
+            })?;
+        let (label, full) = match &slot {
+            PaneSlot::Ready(leaf) => {
+                let title = leaf.read(cx).header_title(cx);
+                (title.label, title.source)
+            }
+            PaneSlot::Connecting(pending) => {
+                let machine = pending.read(cx).machine.to_string();
+                (machine.clone(), machine)
+            }
+        };
+        Some(crate::ui::pane_title::chrome(
+            crate::ui::pane_title::Header {
+                pane: slot.entity_id(),
+                label,
+                full,
+                focus: slot.focus_handle(cx),
+                focused: slot.contains_focused(window, cx),
+                dim: 1.0,
+            },
+            cx,
+        ))
+    }
+}
+
 impl Render for Tty7App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
@@ -7073,7 +7127,8 @@ impl Render for Tty7App {
         // blank and write again.
         let tab_landing = self.tab_landing(window, cx);
         let detach_caret = self.detach_caret(window, cx);
-        let strip = self.tab_strip(!vertical, window, cx);
+        let pane_title = self.visible_pane_title(window, cx);
+        let strip = self.tab_strip(!vertical, pane_title, window, cx);
         let sidebar = rail.then(|| self.tab_sidebar(window, cx));
         let ssh_status = self
             .tabs
@@ -7091,11 +7146,8 @@ impl Render for Tty7App {
                         .any(|l| l.entity_id() == leaf.entity_id())
                 });
                 match maximized {
-                    // A zoomed pane draws no header. It is the only pane on
-                    // screen, so there is nothing for a name to tell it apart
-                    // from — the window title, the tab strip and the sidebar
-                    // all already say what it is, and a fourth copy would cost
-                    // it 30px of grid to repeat them.
+                    // A zoomed pane is the only pane on screen, so its title is
+                    // carried by the window chrome rather than the grid.
                     Some(leaf) => div()
                         .size_full()
                         .relative()
@@ -7104,22 +7156,15 @@ impl Render for Tty7App {
                         .into_any_element(),
                     None => {
                         let several = active_tab.pane.leaves().len() > 1;
-                        // Headers are for telling panes apart, so they arrive
-                        // with the second pane — see `PaneChrome::show_title`.
-                        let show_title = several && cx.global::<Config>().show_pane_title;
-                        // A headed pane draws no reveal band, so nothing would
-                        // ever clear a pane left in `pane_hover` — and the
-                        // first frame after the headers go away again (from
-                        // the setting, or from the config file being edited)
-                        // would put the grip dots on screen already revealed,
-                        // under a pointer that is somewhere else entirely.
-                        if show_title {
+                        // A single pane has no grip. Clear a stale hover id
+                        // when a split collapses so it cannot reveal a handle
+                        // in a later frame on an unrelated pane.
+                        if !several {
                             self.pane_hover.set(None);
                         }
                         let chrome = crate::ui::pane::PaneChrome {
                             dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
                             rearrangeable: several,
-                            show_title,
                             hovered: self.pane_hover.clone(),
                             lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
                             drag: self.pane_drag.clone(),
@@ -9375,7 +9420,7 @@ pub(crate) mod test_window {
 
     /// Two panes in one tab, each on its own socket.
     ///
-    /// The shape a header exists for, and the only one where the pane a tab is
+    /// The shape a chrome title exists for, and the only one where the pane a tab is
     /// named after and the pane running an agent can be different panes — which
     /// is where the two rules for naming a tab come apart.
     #[cfg(unix)]
@@ -9971,12 +10016,13 @@ mod rename_gpui_tests {
 }
 
 // A pane wears its name in three places at three widths: the tab chip, the
-// sidebar row, and — in a split — the header along its own top edge. Which
-// *name* that is has to be one decision, made in `TerminalView::display_source`
-// and reached from here through `Tab::leaf_display_name`. It briefly was two:
-// the header fell back to the working directory once nothing had titled the
-// pane, while the chip read `title` raw and printed the app's own name, so a
-// split tab read `~/repo` on the pane and `Scottie` on the tab above it.
+// sidebar row, and the window chrome when it is the only visible pane.
+// Which *name* that is has to be one decision, made in
+// `TerminalView::display_source` and reached from here through
+// `Tab::leaf_display_name`. It briefly was two: the window title fell back
+// to the working directory once nothing had titled the pane, while the
+// chip read `title` raw and printed the app's own name, so a tab read
+// `~/repo` in one surface and `Scottie` in the other.
 #[cfg(all(test, unix))]
 mod pane_name_gpui_tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};

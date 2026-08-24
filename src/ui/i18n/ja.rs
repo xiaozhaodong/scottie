@@ -163,11 +163,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDimInactivePanesDesc => {
             "分割内のフォーカスされていないペインを暗くし、アクティブなペインを目立たせる"
         }
-        L10nKey::SettingsShowPaneTitle => "ペインのタイトルを表示",
+        L10nKey::SettingsShowPaneTitle => "アクティブなペインのタイトルを表示",
         L10nKey::SettingsShowPaneTitleDesc => {
-            "分割されたタブで、各ペインの上端に名前を表示します——実行中のプログラムが\
-             設定したタイトル、動作中のエージェント、またはカレントディレクトリ名。\
-             グリッドの約1.5行分を使います。"
+            "現在表示しているペインの名前をウィンドウ上部のクロームに表示します。分割ペインは\
+             常駐ヘッダーの代わりにホバー時のグリップを使います。"
         }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",

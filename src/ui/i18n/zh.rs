@@ -143,9 +143,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FollowTheme => "跟随主题",
         L10nKey::SettingsDimInactivePanes => "调暗非活动窗格",
         L10nKey::SettingsDimInactivePanesDesc => "在分屏中淡化未聚焦的窗格，让活动窗格更突出。",
-        L10nKey::SettingsShowPaneTitle => "显示窗格标题",
+        L10nKey::SettingsShowPaneTitle => "显示活动窗格标题",
         L10nKey::SettingsShowPaneTitleDesc => {
-            "在分屏的每个窗格顶部显示它的名字——程序自己设置的标题、正在运行的 agent，或所在目录名。约占用一行半的终端高度。"
+            "在窗口顶部栏显示当前可见窗格的名称。分屏使用悬停拖拽柄，不显示常驻标题。"
         }
         L10nKey::SettingsOpenThemesFolder => "打开主题文件夹",
         L10nKey::SettingsChangeThemeImage => "更改…",

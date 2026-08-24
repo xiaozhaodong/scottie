@@ -142,15 +142,11 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
-    /// Whether a pane in a split tab wears its own name along its top edge.
+    /// Whether the visible pane's name appears in the window's top chrome.
     ///
-    /// On by default: a window of splits where each pane is running something
-    /// different is unreadable without it, and the tab strip can only ever
-    /// name one of them. A tab holding a single pane draws no header whatever
-    /// this says — there is nothing there to tell it apart from, and the
-    /// window title and tab strip already name it. The strip it costs is real
-    /// — roughly a line and a half of grid — which is why it can be turned off
-    /// by anyone who would rather spend that height on output.
+    /// On by default. A split keeps its terminal grid free of persistent pane
+    /// headers and exposes only the hover grip used to rearrange panes. The
+    /// setting is retained under its historical name for config compatibility.
     #[serde(default = "default_true")]
     pub show_pane_title: bool,
     pub keybindings: HashMap<String, String>,

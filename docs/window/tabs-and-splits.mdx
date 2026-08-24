@@ -51,29 +51,29 @@ with **Settings → Appearance → Dim inactive panes**.
 
 ### Pane titles
 
-Once a tab holds more than one pane, each pane names itself along its top edge:
-the title the program running in it set, or the agent working in it, or the
-folder it sits in when neither has spoken. Three shells in three directories, or
-three SSH panes on three machines, are told apart at a glance instead of by
-counting.
+When exactly one pane is visible, its name appears in the window's top chrome:
+the title the program running in it set, the agent working in it, or the folder
+it sits in when neither has spoken. The label shares the same row as the window
+controls; on macOS, it shares the same row as the right panel toolbar.
 
 A long name is shortened from the front, because the end is the part that
 differs — `me@mac:~/work/tty7/src` reads as `…/work/tty7/src`, and narrower
 still as `…tty7/src`. It is the same name the tab and the sidebar show, and
 hovering it brings the whole of it back.
 
-A tab with one pane has no header, and neither does a zoomed pane
-(<kbd>⌘ ⇧ ⏎</kbd>): there is nothing on screen to tell it apart from, and the
-window title, the tab bar and the sidebar all name it already.
+A split does not put a persistent title over each pane. Move the pointer near a
+pane's top edge and its small grip appears; that is the rearrangement affordance
+and keeps the terminal grid unobstructed. A zoomed pane
+(<kbd>⌘ ⇧ ⏎</kbd>) is still one visible pane, so it uses the same top-chrome
+title as an ordinary single-pane tab.
 
-The strip costs about a line and a half of grid per pane. Turn it off with
-**Settings → Appearance → Show pane titles**.
+Turn the top-chrome title off with **Settings → Appearance → Show active pane title**.
 
 ## Rearranging by dragging
 
-The header is also the grip: drag a pane by its title to move it somewhere else
-in the tab. With pane titles turned off, hover a pane instead and a small grip
-appears along its top edge — the same drag, a smaller target.
+Hover a pane and a small grip appears along its top edge; drag it to move the
+pane somewhere else in the tab. The grip is always used for split panes, so the
+terminal grid has no permanent per-pane title strip.
 
 <Frame caption="Placeholder — video: dragging a pane by its header, with the landing highlighted">
   <img src="/images/placeholder.svg" alt="Dragging a pane to a new position" />
@@ -124,8 +124,8 @@ were already looking at. A plain click still switches, as always.
 
 ## Making a pane a tab of its own
 
-The same move backwards. Drag a pane by its grip — its title, or the small grip
-that appears on hover when pane titles are off — up to the tab bar, or out to
+The same move backwards. Drag a pane by its grip — the small capsule that
+appears on hover — up to the tab bar, or out to
 the sidebar if that is where your tabs live, and a caret shows which two tabs it
 would go between. Drop it and it leaves the split it was in and becomes a tab of
 its own, at that spot.
