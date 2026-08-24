@@ -45,6 +45,10 @@ pub enum TabLabel<'a> {
     /// It may well be a path (`user@host:~/dir` is what the shell integration
     /// sets), so a caller that abbreviates [`Cwd`](Self::Cwd) has to abbreviate
     /// this too.
+    ///
+    /// One title does not reach here: the one an agent writes that is only its
+    /// own name. That says nothing [`Agent`](Self::Agent) does not say better,
+    /// so it gives way — see [`CLIAgent::is_own_name`].
     Osc(&'a str),
     /// No name and no title, but an agent is running in it — which is what
     /// anyone scanning a list of tabs is looking for.
@@ -101,11 +105,17 @@ impl TabView {
         {
             return TabLabel::Named(name);
         }
+        // An agent that titles its pane with its own name has not said
+        // anything the ranking below does not already say, and says it better:
+        // `Claude Code` rather than `claude`. So a title like that does not
+        // count as the terminal having spoken, and the agent arm takes it.
+        // See [`CLIAgent::is_own_name`].
         if let Some(title) = self
             .osc_title
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
+            .filter(|t| !self.agent.is_some_and(|agent| agent.is_own_name(t)))
         {
             return TabLabel::Osc(title);
         }
@@ -218,6 +228,57 @@ mod tests {
             ..view()
         };
         assert_eq!(plain.label(), TabLabel::Cwd("/work"));
+    }
+
+    /// The one title that does not outrank the agent: the agent's own name.
+    ///
+    /// #558 put the OSC title ahead of the agent so that switching away from a
+    /// workspace stopped turning its tabs into a column of identical
+    /// `Claude Code` rows. An agent titling its pane `claude` walks that
+    /// straight back — same column, one spelling worse — so it gives way and
+    /// the agent arm spells the name properly.
+    #[test]
+    fn an_agent_titling_a_tab_with_its_own_name_gives_way_to_the_agent() {
+        for title in ["claude", "claude-code", "  CLAUDE  ", "Claude Code"] {
+            let self_named = TabView {
+                osc_title: Some(title.into()),
+                agent: Some(CLIAgent::Claude),
+                cwd: Some("/work".into()),
+                ..view()
+            };
+            assert_eq!(
+                self_named.label(),
+                TabLabel::Agent(CLIAgent::Claude),
+                "{title:?} is only the agent naming itself"
+            );
+        }
+
+        // A title carrying anything of its own still wins, which is the whole
+        // point of ranking it above the agent.
+        let working = TabView {
+            osc_title: Some("claude-patcher".into()),
+            agent: Some(CLIAgent::Claude),
+            ..view()
+        };
+        assert_eq!(working.label(), TabLabel::Osc("claude-patcher"));
+
+        // With no agent detected there is nothing better to fall through to,
+        // so the title stands as the only thing anybody said about the tab.
+        let untagged = TabView {
+            osc_title: Some("claude".into()),
+            cwd: Some("/work".into()),
+            ..view()
+        };
+        assert_eq!(untagged.label(), TabLabel::Osc("claude"));
+
+        // And a name someone gave the tab is still ahead of all of it.
+        let named = TabView {
+            name: Some("deploy".into()),
+            osc_title: Some("claude".into()),
+            agent: Some(CLIAgent::Claude),
+            ..view()
+        };
+        assert_eq!(named.label(), TabLabel::Named("deploy"));
     }
 
     #[test]

@@ -1445,7 +1445,10 @@ impl TerminalView {
     ///    nothing once the head comes off. An SSH pane's host *does* count —
     ///    #438 puts it in `title` and puts it back there on `ResetTitle`,
     ///    which is why the test is against the generic default and not against
-    ///    `default_title`.
+    ///    `default_title`. Nor does an agent writing nothing but its own name
+    ///    count: `claude` says only what rank 2 says, and says it worse, so it
+    ///    falls through to be spelled `Claude Code` there
+    ///    ([`crate::core::cli_agent::CLIAgent::is_own_name`]).
     /// 2. The agent working in it, when one is and it has not said anything
     ///    yet. Its directory answers a worse question than its name does: the
     ///    shell that launched it was already sitting there, and so is the pane
@@ -1470,10 +1473,14 @@ impl TerminalView {
     /// name, a tab row counts ("Shell 2").
     pub fn display_source(&self) -> Option<PaneName> {
         let title = self.title.trim();
-        if title != DEFAULT_TITLE && crate::ui::path_display::names_something(title) {
+        let agent = self.agent();
+        if title != DEFAULT_TITLE
+            && crate::ui::path_display::names_something(title)
+            && !agent.is_some_and(|agent| agent.is_own_name(title))
+        {
             return Some(PaneName::Title(title.to_string()));
         }
-        if let Some(agent) = self.agent() {
+        if let Some(agent) = agent {
             return Some(PaneName::Agent(agent.display_name().to_string()));
         }
         self.cwd()
@@ -9602,6 +9609,43 @@ mod gpui_tests {
 
         let (window, mut daemon) = harness(cx);
         seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+        window
+            .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
+            .unwrap();
+        assert_eq!(header(cx, &window), "✳ fixing the switcher");
+    }
+
+    /// And the case in between those two, which used to read as the first one.
+    ///
+    /// A title of `claude` is the agent naming itself, not naming its work: it
+    /// carries nothing the agent rank does not carry, and carries it worse.
+    /// Taken as "the program has spoken" it beat `Claude Code` to the header
+    /// with a lowercase copy of it, and — because the agent goes quiet between
+    /// turns — it also replaced whatever the last turn had been called.
+    #[gpui::test]
+    fn an_agent_titling_a_pane_with_its_own_name_is_named_properly(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        let (window, mut daemon) = harness(cx);
+        seed_cwd(cx, &window, &mut daemon, "/srv/deploy/app");
+        seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+
+        for title in ["claude", "claude-code", "Claude Code"] {
+            window
+                .update(cx, |view, _, _| view.title = title.into())
+                .unwrap();
+            assert_eq!(
+                header(cx, &window),
+                "Claude Code",
+                "{title:?} is the agent naming itself, and this is how it is spelled"
+            );
+        }
+
+        // Giving way is a fall to the *next* rank, not past it — the seeded cwd
+        // above is what makes that testable, since `/srv/deploy/app` is what
+        // the header would read had the title fallen past the agent too. And
+        // nothing sticks: the next title that does name the work takes the
+        // header straight back.
         window
             .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
             .unwrap();

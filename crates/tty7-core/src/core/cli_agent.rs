@@ -134,6 +134,41 @@ impl CLIAgent {
         }
     }
 
+    /// Whether a title is this agent naming itself rather than saying anything.
+    ///
+    /// A pane running Claude Code that titles itself `claude` has told the
+    /// window nothing the foreground process had not already told it — and
+    /// [`Self::display_name`] is a better spelling of that same fact. So a
+    /// title like this one steps aside and lets the ranking fall through to
+    /// the agent, which is where the name belongs and where it is spelled
+    /// properly. Anything else a title says outranks the agent, exactly as
+    /// before: what the program is *doing* beats what the program *is*.
+    ///
+    /// Every name the agent answers to counts, because any of them could be
+    /// what a title reports: the launcher basenames it is detected by, the
+    /// slug the CLI takes, and the display name itself. They are not the same
+    /// set — `cursor` is the slug while `cursor-agent` is the binary, and
+    /// Antigravity is detected as `agy` but slugged `antigravity`.
+    ///
+    /// **Compared whole, never by containment.** `claude-patcher` and
+    /// `grok on the parser` both open with a name and both say more than the
+    /// name does; matching on a prefix would throw away the only part of them
+    /// worth reading.
+    ///
+    /// Only ever asked of the agent actually detected in a pane, so it cannot
+    /// reach a title that merely collides with some *other* agent's name: a
+    /// plain shell titled `pi` has no agent to compare against, and a Claude
+    /// pane titled `pi` is compared against `claude` alone. That is what makes
+    /// the short names here (`pi`, `amp`, `agy`, `omp`) safe to include.
+    pub fn is_own_name(self, title: &str) -> bool {
+        let title = title.trim();
+        self.aliases()
+            .iter()
+            .copied()
+            .chain([self.slug(), self.display_name()])
+            .any(|name| name.eq_ignore_ascii_case(title))
+    }
+
     pub fn resume_command(
         self,
         session_id: &str,
@@ -790,6 +825,64 @@ mod tests {
         assert_eq!(
             CLIAgent::detect_from_argv(&argv(&["FOO=1", "BAR=baz", "claude"])),
             Some(CLIAgent::Claude)
+        );
+    }
+
+    #[test]
+    fn an_agent_knows_when_a_title_is_only_its_own_name() {
+        // Every name it answers to, across all three sets — and the sets are
+        // not the same: `cursor` is only the slug, `cursor-agent` only the
+        // binary, `agy` only the alias while `antigravity` is only the slug.
+        for (agent, title) in [
+            (CLIAgent::Claude, "claude"),
+            (CLIAgent::Claude, "claude-code"),
+            (CLIAgent::Claude, "Claude Code"),
+            (CLIAgent::Cursor, "cursor"),
+            (CLIAgent::Cursor, "cursor-agent"),
+            (CLIAgent::Antigravity, "agy"),
+            (CLIAgent::Antigravity, "antigravity"),
+            (CLIAgent::OhMyPi, "omp"),
+            (CLIAgent::OhMyPi, "Oh My Pi"),
+            (CLIAgent::Pi, "pi"),
+        ] {
+            assert!(
+                agent.is_own_name(title),
+                "{agent:?} answers to {title:?}, so a title of it says nothing"
+            );
+        }
+
+        // Case and surrounding space are spelling, not meaning.
+        assert!(CLIAgent::Claude.is_own_name("  CLAUDE  "));
+        assert!(CLIAgent::Qwen.is_own_name("qwen code"));
+    }
+
+    /// The half that keeps the rule from eating the titles it exists to let
+    /// through. A name is only its own name when it is the *whole* title:
+    /// anything built around one says more than the name does, and that
+    /// remainder is the entire reason a title outranks an agent.
+    #[test]
+    fn a_title_built_around_a_name_is_not_that_name() {
+        for (agent, title) in [
+            (CLIAgent::Claude, "claude-patcher"),
+            (CLIAgent::Claude, "✳ fixing the switcher"),
+            (CLIAgent::Claude, "claude: reading tab_view.rs"),
+            (CLIAgent::Grok, "grok on the parser"),
+            (CLIAgent::Pi, "pi/3 rounding"),
+            (CLIAgent::Amp, "amps and volts"),
+        ] {
+            assert!(
+                !agent.is_own_name(title),
+                "{title:?} says more than {agent:?} does and must reach the tab"
+            );
+        }
+
+        // And it is never asked across agents, but hold the line anyway: a
+        // pane running one agent must not fall through on another's name.
+        assert!(!CLIAgent::Claude.is_own_name("pi"));
+        assert!(!CLIAgent::Pi.is_own_name("claude"));
+        assert!(
+            !CLIAgent::Claude.is_own_name(""),
+            "an empty title is handled by the emptiness checks above this call"
         );
     }
 
