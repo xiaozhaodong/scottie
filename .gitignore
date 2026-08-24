@@ -19,6 +19,10 @@ openwiki/.last-update.json
 # local scratch notes (never committed)
 /todo.md
 
+# 本地工作笔记:计划、评审、调查记录。只留在磁盘上,不进仓库,也不参与
+# docs/ 的 Mintlify 发布(docs.json 不引用它)。
+/docs/notes/
+
 # repomix generated output
 repomix-output.*
 

@@ -515,16 +515,33 @@ impl Tab {
         leaf.and_then(|l| l.terminal().cloned())
     }
 
+    /// The raw title of the leaf a tab names itself after — what the program
+    /// in it wrote, [`DEFAULT_TITLE`](crate::terminal::view::DEFAULT_TITLE)
+    /// and all.
+    ///
+    /// The sidebar's search matches against this rather than against
+    /// [`Self::leaf_display_name`] on purpose: a query should still find a
+    /// pane by the `user@host:` head its row does not show.
     pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
         self.title_leaf(window, cx)
             .map(|l| l.read(cx).title.clone())
             .unwrap_or_default()
     }
 
-    /// [`Self::leaf_title`] together with what a `~` in it would mean — one
-    /// leaf lookup, so the title and the home shortening it can never come
+    /// What this tab is named after, and what a `~` in it would mean — one
+    /// leaf lookup, so the name and the home shortening it can never come
     /// from different panes (#580).
-    pub(crate) fn leaf_title_and_home(
+    ///
+    /// The name itself is [`TerminalView::display_source`], the same choice
+    /// the pane's own header makes, so a chip and the header under it cannot
+    /// disagree about what they are naming. Only the *width* differs after
+    /// this: the strip shortens through `short_title`, the sidebar elides
+    /// against real glyphs, the header elides from the front.
+    ///
+    /// Empty when the pane has said nothing and has no directory either. Each
+    /// caller spells its own placeholder for that — a tab counts, a header
+    /// falls back to the app's name.
+    pub(crate) fn leaf_display_name(
         &self,
         window: Option<&Window>,
         cx: &App,
@@ -533,7 +550,35 @@ impl Tab {
             return (String::new(), None);
         };
         let leaf = leaf.read(cx);
-        (leaf.title.clone(), leaf.display_home(cx))
+        (
+            leaf.display_source()
+                .map(crate::terminal::view::PaneName::into_text)
+                .unwrap_or_default(),
+            leaf.display_home(cx),
+        )
+    }
+
+    /// Whether this tab's label says anything a line of its path would not.
+    ///
+    /// The switcher draws a row's directory under its label, which is worth
+    /// the line right up until the label *is* that directory — then the row
+    /// prints the same place twice. It used to ask "did someone name this tab,
+    /// or is an agent running in it", which was a stand-in for the real
+    /// question and stopped tracking it once a pane with an agent beside it
+    /// could be labelled after its own cwd.
+    ///
+    /// So put the question to the pane the label came from —
+    /// [`TerminalView::named_by_its_place`], which knows both the name and the
+    /// directory and compares them as places rather than by which rank the
+    /// name arrived by. A tab with nothing to go on at all is labelled by a
+    /// count ("Shell 2"), which tells you no place, so it keeps its subtitle.
+    pub(crate) fn names_more_than_its_place(&self, window: Option<&Window>, cx: &App) -> bool {
+        if self.name.as_deref().is_some_and(|n| !n.trim().is_empty()) {
+            return true;
+        }
+        !self
+            .title_leaf(window, cx)
+            .is_some_and(|leaf| leaf.read(cx).named_by_its_place(cx))
     }
 
     pub(crate) fn git_status(
@@ -2908,6 +2953,14 @@ impl Tty7App {
 
     pub(crate) fn set_dim_inactive_panes(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.dim_inactive_panes = on);
+    }
+
+    /// Turning the headers on or off resizes every grid in the window — the
+    /// strip comes out of the terminal's height. Nothing here has to say so:
+    /// the element measures its own box every frame, so the next paint after
+    /// this config write is already the right number of rows.
+    pub(crate) fn set_show_pane_title(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.show_pane_title = on);
     }
 
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -7038,16 +7091,35 @@ impl Render for Tty7App {
                         .any(|l| l.entity_id() == leaf.entity_id())
                 });
                 match maximized {
+                    // A zoomed pane draws no header. It is the only pane on
+                    // screen, so there is nothing for a name to tell it apart
+                    // from — the window title, the tab strip and the sidebar
+                    // all already say what it is, and a fourth copy would cost
+                    // it 30px of grid to repeat them.
                     Some(leaf) => div()
                         .size_full()
+                        .relative()
                         .overflow_hidden()
                         .child(leaf.clone())
                         .into_any_element(),
                     None => {
                         let several = active_tab.pane.leaves().len() > 1;
+                        // Headers are for telling panes apart, so they arrive
+                        // with the second pane — see `PaneChrome::show_title`.
+                        let show_title = several && cx.global::<Config>().show_pane_title;
+                        // A headed pane draws no reveal band, so nothing would
+                        // ever clear a pane left in `pane_hover` — and the
+                        // first frame after the headers go away again (from
+                        // the setting, or from the config file being edited)
+                        // would put the grip dots on screen already revealed,
+                        // under a pointer that is somewhere else entirely.
+                        if show_title {
+                            self.pane_hover.set(None);
+                        }
                         let chrome = crate::ui::pane::PaneChrome {
                             dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
                             rearrangeable: several,
+                            show_title,
                             hovered: self.pane_hover.clone(),
                             lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
                             drag: self.pane_drag.clone(),
@@ -9301,6 +9373,45 @@ pub(crate) mod test_window {
         (app, vcx, stream)
     }
 
+    /// Two panes in one tab, each on its own socket.
+    ///
+    /// The shape a header exists for, and the only one where the pane a tab is
+    /// named after and the pane running an agent can be different panes — which
+    /// is where the two rules for naming a tab come apart.
+    #[cfg(unix)]
+    pub(crate) fn harness_with_split(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty7App>,
+        VisualTestContext,
+        Vec<std::os::unix::net::UnixStream>,
+    ) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.cursor_blink = false;
+            cx.set_global(cfg);
+        });
+        let streams = app.update_in(&mut vcx, |app, window, cx| {
+            let (first, first_stream) = quiet_test_pane(1, window, cx);
+            let (second, second_stream) = quiet_test_pane(2, window, cx);
+            app.tabs.push(super::Tab::new(Pane::split_node(
+                gpui::Axis::Vertical,
+                0.5,
+                Pane::leaf(PaneSlot::Ready(first)),
+                Pane::leaf(PaneSlot::Ready(second)),
+            )));
+            app.active = 0;
+            cx.notify();
+            vec![first_stream, second_stream]
+        });
+        vcx.background_executor.run_until_parked();
+        (app, vcx, streams)
+    }
+
     /// Wait until the window has actually stopped drawing — which is not the
     /// same as having reached the state a test was waiting for.
     ///
@@ -9855,6 +9966,225 @@ mod rename_gpui_tests {
             assert!(app.renaming.is_some());
             app.close_tab_inner(0, true, window, cx);
             assert!(app.renaming.is_none(), "losing its own tab closes the box");
+        });
+    }
+}
+
+// A pane wears its name in three places at three widths: the tab chip, the
+// sidebar row, and — in a split — the header along its own top edge. Which
+// *name* that is has to be one decision, made in `TerminalView::display_source`
+// and reached from here through `Tab::leaf_display_name`. It briefly was two:
+// the header fell back to the working directory once nothing had titled the
+// pane, while the chip read `title` raw and printed the app's own name, so a
+// split tab read `~/repo` on the pane and `Scottie` on the tab above it.
+#[cfg(all(test, unix))]
+mod pane_name_gpui_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use crate::core::cli_agent::CLIAgent;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::terminal::view::TerminalView;
+    use crate::ui::app::test_window::{harness_with_pane, harness_with_split};
+
+    /// The tab's nth pane, in the order a split lays them out.
+    fn pane(
+        app: &Entity<super::Tty7App>,
+        vcx: &mut VisualTestContext,
+        n: usize,
+    ) -> Entity<TerminalView> {
+        app.update(vcx, |app, _| {
+            app.tabs[0]
+                .pane
+                .terminals()
+                .get(n)
+                .cloned()
+                .expect("the tab has that pane")
+        })
+    }
+
+    /// Hands a pane a directory the way the daemon reports one, and waits for
+    /// its reader thread to have taken it. The thread is a real one, so only
+    /// real time moves it.
+    fn seed_cwd(
+        pane: &Entity<TerminalView>,
+        vcx: &mut VisualTestContext,
+        daemon: &mut std::os::unix::net::UnixStream,
+        dir: &str,
+    ) {
+        let want = std::path::PathBuf::from(dir);
+        DaemonMsg::Cwd(want.clone()).encode(daemon).unwrap();
+        for _ in 0..200 {
+            if vcx.update(|_, cx| pane.read(cx).cwd()).as_deref() == Some(want.as_path()) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the pane never took the cwd {dir:?}");
+    }
+
+    /// The same wait for the agent report, which rides the same thread.
+    fn seed_agent(
+        pane: &Entity<TerminalView>,
+        vcx: &mut VisualTestContext,
+        daemon: &mut std::os::unix::net::UnixStream,
+        agent: CLIAgent,
+    ) {
+        DaemonMsg::Agent(Some(agent)).encode(daemon).unwrap();
+        for _ in 0..200 {
+            if vcx.update(|_, cx| pane.read(cx).agent()) == Some(agent) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the pane never took the agent {agent:?}");
+    }
+
+    #[gpui::test]
+    fn a_tab_and_the_header_under_it_name_an_untitled_pane_the_same_way(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = harness_with_pane(cx);
+        let leaf = pane(&app, &mut vcx, 0);
+        // Nothing has titled this pane, so its `title` is still the app's own
+        // name — the case the two surfaces used to disagree about.
+        seed_cwd(&leaf, &mut vcx, &mut daemon, "/srv/deploy/app");
+
+        app.update(&mut vcx, |app, cx| {
+            let tab = &app.tabs[0];
+            let header = leaf.read(cx).header_title(cx);
+            assert_eq!(
+                header.label, "/srv/deploy/app",
+                "the header names the pane after the directory, not after the app"
+            );
+            assert_eq!(
+                app.tab_label(tab, 0, None, cx),
+                header.label,
+                "and the chip above it says the same thing"
+            );
+            let (shown, _) = tab.leaf_display_name(None, cx);
+            assert_eq!(
+                shown, header.source,
+                "both start from the one source the sidebar elides too"
+            );
+        });
+    }
+
+    /// The other half of the bargain: once something *does* title the pane,
+    /// every surface goes back to naming it after that.
+    #[gpui::test]
+    fn a_titled_pane_is_named_by_its_title_everywhere(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = harness_with_pane(cx);
+        let leaf = pane(&app, &mut vcx, 0);
+        seed_cwd(&leaf, &mut vcx, &mut daemon, "/srv/deploy/app");
+
+        app.update(&mut vcx, |app, cx| {
+            let tab = &app.tabs[0];
+            leaf.update(cx, |view, _| view.title = "vim — main.rs".into());
+            let header = leaf.read(cx).header_title(cx);
+            assert_eq!(header.label, "vim — main.rs");
+            assert_eq!(app.tab_label(tab, 0, None, cx), header.label);
+        });
+    }
+
+    /// The rank between those two. An agent that has not titled itself is what
+    /// names the pane — ahead of the directory it happens to be working in,
+    /// the way `TabLabel::Agent` ranks it for every tab this window does not
+    /// own. Both surfaces have to move together, or the strip disagrees with
+    /// the header for the length of an agent's first turn.
+    #[gpui::test]
+    fn an_agent_names_a_pane_that_has_not_titled_itself(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = harness_with_pane(cx);
+        let leaf = pane(&app, &mut vcx, 0);
+        seed_cwd(&leaf, &mut vcx, &mut daemon, "/srv/deploy/app");
+        seed_agent(&leaf, &mut vcx, &mut daemon, CLIAgent::Claude);
+
+        app.update(&mut vcx, |app, cx| {
+            let tab = &app.tabs[0];
+            let header = leaf.read(cx).header_title(cx);
+            assert_eq!(
+                header.label, "Claude Code",
+                "the agent says more than the directory it was launched from"
+            );
+            assert_eq!(app.tab_label(tab, 0, None, cx), header.label);
+            let (shown, _) = tab.leaf_display_name(None, cx);
+            assert_eq!(shown, header.source);
+        });
+    }
+
+    /// The switcher prints a tab's directory on a second line under its label.
+    /// That line is worth having until the label *is* that directory, and the
+    /// test that used to gate it — "does this tab have a name, or an agent" —
+    /// stopped tracking the question the moment a tab could hold an agent in
+    /// one pane and be named after another pane's cwd. The row then read
+    /// `~/repo` over `~/repo`.
+    ///
+    /// Only a split can show it: with one pane, an agent in the tab *is* an
+    /// agent in the pane the tab is named after, so the label is the agent's
+    /// name and there is nothing to repeat.
+    #[gpui::test]
+    fn a_tab_named_after_a_directory_does_not_print_it_twice(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = harness_with_split(cx);
+        let (shell, agent) = (pane(&app, &mut vcx, 0), pane(&app, &mut vcx, 1));
+        let [shell_daemon, agent_daemon] = &mut streams[..] else {
+            panic!("the split has two panes");
+        };
+        // The keyboard is in the shell, which has said nothing — so the tab is
+        // named after where that shell is. The agent works on beside it.
+        seed_cwd(&shell, &mut vcx, shell_daemon, "/srv/deploy/app");
+        seed_agent(&agent, &mut vcx, agent_daemon, CLIAgent::Claude);
+
+        app.update(&mut vcx, |app, cx| {
+            let tab = &app.tabs[0];
+            assert_eq!(app.tab_label(tab, 0, None, cx), "/srv/deploy/app");
+            assert!(
+                tab.agent(cx).is_some(),
+                "the tab does hold an agent — just not in the pane naming it"
+            );
+            assert!(
+                !tab.names_more_than_its_place(None, cx),
+                "so the label is the place, and a line repeating it is a wasted row"
+            );
+        });
+
+        // And once something in that pane says more than where it sits, the
+        // label stops being the bare path and the second line earns its place.
+        app.update(&mut vcx, |app, cx| {
+            shell.update(cx, |view, _| view.title = "vim — main.rs".into());
+            assert!(app.tabs[0].names_more_than_its_place(None, cx));
+        });
+    }
+
+    /// The other half of that gate, and the one provenance alone gets wrong.
+    ///
+    /// A shell integration does not leave the title empty — it writes the
+    /// working directory into it, head and all. That is a `Title` by rank and
+    /// the pane's own location in fact, so a row asking only "which rank did
+    /// this name come from" draws `…/deploy/app` with `~/deploy/app` under it.
+    #[gpui::test]
+    fn a_shell_titled_with_its_own_directory_does_not_print_it_twice(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = harness_with_pane(cx);
+        let leaf = pane(&app, &mut vcx, 0);
+        seed_cwd(&leaf, &mut vcx, &mut daemon, "/srv/deploy/app");
+
+        app.update(&mut vcx, |app, cx| {
+            // What tty7's own shell integration writes.
+            leaf.update(cx, |view, _| view.title = "me@box:/srv/deploy/app".into());
+            let tab = &app.tabs[0];
+            assert_eq!(
+                app.tab_label(tab, 0, None, cx),
+                "/srv/deploy/app",
+                "the head comes off, and what is left is the directory itself"
+            );
+            assert!(
+                !tab.names_more_than_its_place(None, cx),
+                "so the row must not print that directory a second time"
+            );
+        });
+
+        // A title naming somewhere else is not this pane's place, however much
+        // it looks like a path — the comparison is against the cwd, not a
+        // guess at the shape of the string.
+        app.update(&mut vcx, |app, cx| {
+            leaf.update(cx, |view, _| view.title = "me@box:/etc/nginx".into());
+            assert!(app.tabs[0].names_more_than_its_place(None, cx));
         });
     }
 }

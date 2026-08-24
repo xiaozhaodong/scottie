@@ -143,6 +143,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FollowTheme => "跟随主题",
         L10nKey::SettingsDimInactivePanes => "调暗非活动窗格",
         L10nKey::SettingsDimInactivePanesDesc => "在分屏中淡化未聚焦的窗格，让活动窗格更突出。",
+        L10nKey::SettingsShowPaneTitle => "显示窗格标题",
+        L10nKey::SettingsShowPaneTitleDesc => {
+            "在分屏的每个窗格顶部显示它的名字——程序自己设置的标题、正在运行的 agent，或所在目录名。约占用一行半的终端高度。"
+        }
         L10nKey::SettingsOpenThemesFolder => "打开主题文件夹",
         L10nKey::SettingsChangeThemeImage => "更改…",
         L10nKey::SettingsChooseThemeImage => "选择…",
@@ -713,6 +717,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "调暗 非活动窗格 淡化 未聚焦 分屏 高亮 active dimming pane focus"
+        }
+        L10nKey::SettingsSearchShowPaneTitleKeywords => {
+            "窗格标题 标题栏 名称 顶部 分屏 目录名 pane title header name folder osc"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "焦点跟随鼠标 悬停 激活 窗格 focus follows mouse hover activate pane"
