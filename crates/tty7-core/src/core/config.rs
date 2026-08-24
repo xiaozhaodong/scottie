@@ -129,6 +129,17 @@ pub struct Config {
     /// the chrome was drawn at, so an existing config renders unchanged.
     #[serde(default = "default_ui_font_size")]
     pub ui_font_size: f32,
+    /// The absolute pixel size of the title for a single or zoomed pane.
+    ///
+    /// This is intentionally independent of `ui_font_size`: the pane title is
+    /// a focused status label, so changing the rest of the interface must not
+    /// make it unreadably small.
+    #[serde(default = "default_pane_title_font_size")]
+    pub pane_title_font_size: f32,
+    /// The neutral title color used in the window chrome, independent of the
+    /// active theme's semantic or accent colors.
+    #[serde(default = "default_pane_title_color")]
+    pub pane_title_color: String,
     pub theme: String,
     pub theme_preset: String,
     pub theme_follow_system: bool,
@@ -578,6 +589,8 @@ impl Default for Config {
             font_size: 15.0,
             line_height: 1.4,
             ui_font_size: default_ui_font_size(),
+            pane_title_font_size: default_pane_title_font_size(),
+            pane_title_color: default_pane_title_color(),
             theme: "light".to_string(),
             theme_preset: "light".to_string(),
             theme_follow_system: false,
@@ -693,6 +706,14 @@ impl Config {
         Self::load_with_outcome().0
     }
 
+    /// Return the pane title color as an opaque RGB value.
+    ///
+    /// `Config::load` sanitizes the string, but keeping the fallback here
+    /// makes callers safe when they use a freshly constructed or test config.
+    pub fn pane_title_color_rgb(&self) -> u32 {
+        parse_hex_rgb(&self.pane_title_color).unwrap_or(PANE_TITLE_COLOR_DEFAULT_RGB)
+    }
+
     /// [`Config::load`] with the verdict the file earned. Most callers want
     /// the values either way and use `load`; the watcher that swaps a running
     /// app onto the result needs the outcome to keep a broken file from
@@ -765,6 +786,15 @@ impl Config {
         // shrink one label — it makes the window unusable. Keep the range to
         // sizes the layout still holds together at.
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
+        if !self.pane_title_font_size.is_finite() || self.pane_title_font_size <= 0.0 {
+            self.pane_title_font_size = default_pane_title_font_size();
+        }
+        self.pane_title_font_size = self
+            .pane_title_font_size
+            .clamp(PANE_TITLE_FONT_SIZE_MIN, PANE_TITLE_FONT_SIZE_MAX);
+        if parse_hex_rgb(&self.pane_title_color).is_none() {
+            self.pane_title_color = default_pane_title_color();
+        }
         self.scrollback_limit = self.scrollback_limit.clamp(100, MAX_SCROLLBACK);
         if !self.mouse_scroll_multiplier.is_finite() || self.mouse_scroll_multiplier <= 0.0 {
             self.mouse_scroll_multiplier = Config::default().mouse_scroll_multiplier;
@@ -1152,6 +1182,17 @@ pub const UI_FONT_SIZE_DEFAULT: f32 = 16.0;
 pub const UI_FONT_SIZE_MIN: f32 = 12.0;
 pub const UI_FONT_SIZE_MAX: f32 = 24.0;
 
+/// The pane title is a focused label in the window chrome, so it keeps its
+/// own absolute-pixel range instead of following the interface rem scale.
+pub const PANE_TITLE_FONT_SIZE_DEFAULT: f32 = 13.0;
+pub const PANE_TITLE_FONT_SIZE_MIN: f32 = 8.0;
+pub const PANE_TITLE_FONT_SIZE_MAX: f32 = 24.0;
+
+/// Otty's default window-chrome title color: a neutral dim foreground rather
+/// than a theme accent. It intentionally does not follow the active theme.
+pub const PANE_TITLE_COLOR_DEFAULT: &str = "#6B7280";
+pub const PANE_TITLE_COLOR_DEFAULT_RGB: u32 = 0x6B7280;
+
 /// The terminal's font-size and line-height bounds, shared by `sanitize` and
 /// the GUI's steppers. The GUI used to keep its own, narrower pair (6–48,
 /// 1.0–2.0), so a value inside the config range but outside the GUI's got
@@ -1165,6 +1206,22 @@ pub const LINE_HEIGHT_MAX: f32 = 4.0;
 
 fn default_ui_font_size() -> f32 {
     UI_FONT_SIZE_DEFAULT
+}
+
+fn default_pane_title_font_size() -> f32 {
+    PANE_TITLE_FONT_SIZE_DEFAULT
+}
+
+fn default_pane_title_color() -> String {
+    PANE_TITLE_COLOR_DEFAULT.to_string()
+}
+
+/// Parse a six-digit RGB hex color, accepting an optional leading `#`.
+fn parse_hex_rgb(value: &str) -> Option<u32> {
+    let hex = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    (hex.len() == 6)
+        .then(|| u32::from_str_radix(hex, 16).ok())
+        .flatten()
 }
 
 fn default_sidebar_width() -> f32 {
@@ -1353,6 +1410,42 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.show_pane_title);
+    }
+
+    #[test]
+    fn pane_title_font_size_defaults_and_round_trips() {
+        assert_eq!(
+            Config::default().pane_title_font_size,
+            PANE_TITLE_FONT_SIZE_DEFAULT
+        );
+
+        // A config written before the key existed gets the independent default.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.pane_title_font_size, PANE_TITLE_FONT_SIZE_DEFAULT);
+
+        let custom: Config = serde_json::from_str(r#"{"pane_title_font_size": 15.5}"#).unwrap();
+        assert_eq!(custom.pane_title_font_size, 15.5);
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pane_title_font_size, 15.5);
+    }
+
+    #[test]
+    fn pane_title_color_defaults_and_round_trips() {
+        assert_eq!(Config::default().pane_title_color, PANE_TITLE_COLOR_DEFAULT);
+        assert_eq!(
+            Config::default().pane_title_color_rgb(),
+            PANE_TITLE_COLOR_DEFAULT_RGB
+        );
+
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.pane_title_color, PANE_TITLE_COLOR_DEFAULT);
+
+        let custom: Config = serde_json::from_str(r##"{"pane_title_color":"#123456"}"##).unwrap();
+        assert_eq!(custom.pane_title_color_rgb(), 0x123456);
+        let json = serde_json::to_string(&custom).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pane_title_color, "#123456");
     }
 
     #[test]
@@ -1557,6 +1650,41 @@ mod tests {
         assert_eq!(sanitized(2.0), UI_FONT_SIZE_MIN);
         // A size the user actually picked comes back untouched.
         assert_eq!(sanitized(18.0), 18.0);
+    }
+
+    #[test]
+    fn sanitize_holds_pane_title_font_size_to_its_independent_range() {
+        let sanitized = |pane_title_font_size: f32| {
+            let mut cfg = Config {
+                pane_title_font_size,
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.pane_title_font_size
+        };
+
+        assert_eq!(sanitized(0.0), PANE_TITLE_FONT_SIZE_DEFAULT);
+        assert_eq!(sanitized(f32::NAN), PANE_TITLE_FONT_SIZE_DEFAULT);
+        assert_eq!(sanitized(1000.0), PANE_TITLE_FONT_SIZE_MAX);
+        assert_eq!(sanitized(2.0), PANE_TITLE_FONT_SIZE_MIN);
+        assert_eq!(sanitized(15.0), 15.0);
+    }
+
+    #[test]
+    fn sanitize_restores_invalid_pane_title_color() {
+        let sanitized = |pane_title_color: &str| {
+            let mut cfg = Config {
+                pane_title_color: pane_title_color.to_string(),
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.pane_title_color
+        };
+
+        assert_eq!(sanitized("#123456"), "#123456");
+        assert_eq!(sanitized("123456"), "123456");
+        assert_eq!(sanitized("#fff"), PANE_TITLE_COLOR_DEFAULT);
+        assert_eq!(sanitized("not-a-color"), PANE_TITLE_COLOR_DEFAULT);
     }
 
     struct TestDir(std::path::PathBuf);

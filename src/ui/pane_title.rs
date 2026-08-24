@@ -26,7 +26,6 @@ use gpui::{
     MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
     div, px,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::tooltip::Tooltip;
 
 /// How opaque the title paints in a pane that does not have focus, before the
@@ -88,9 +87,8 @@ pub(crate) fn chrome(header: Header, cx: &App) -> AnyElement {
         dim,
     } = header;
 
-    let ink = cx
-        .theme()
-        .muted_foreground
+    let config = cx.global::<crate::core::config::Config>();
+    let ink = gpui::Hsla::from(gpui::rgb(config.pane_title_color_rgb()))
         .opacity(if focused { 1.0 } else { UNFOCUSED_INK })
         .opacity(dim);
     let text = div()
@@ -99,7 +97,7 @@ pub(crate) fn chrome(header: Header, cx: &App) -> AnyElement {
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis_start()
-        .text_xs()
+        .text_size(px(config.pane_title_font_size))
         .text_color(ink)
         .child(label);
     let full = SharedString::from(full);

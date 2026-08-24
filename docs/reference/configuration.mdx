@@ -38,6 +38,7 @@ failing the file.
 | `font_size` | number | `15` | Terminal text size in px (4–256). |
 | `line_height` | number | `1.4` | Multiple of the font size (0.5–4). |
 | `ui_font_size` | number | `16` | The interface's root size in px (12–24). |
+| `pane_title_font_size` | number | `13` | Absolute title size in px for a single or zoomed pane (8–24). Independent of `ui_font_size`. |
 
 [More about fonts →](/customization/fonts)
 
@@ -50,6 +51,7 @@ failing the file.
 | `theme_preset_light` | string | `"light"` | Used when following the system. |
 | `theme_preset_dark` | string | `"dark"` | Used when following the system. |
 | `theme_legible_palette` | bool | `true` | Brighten or darken bright ANSI colours that would be unreadable on the background. |
+| `pane_title_color` | string | `"#6B7280"` | Neutral title color for the window chrome. Six-digit RGB hex, independent of the active theme. |
 | `window_opacity` | number | — | 0.2–1.0. Unset means "follow the theme". |
 | `window_blur` | bool | — | Blur behind a translucent window (macOS). Unset means "follow the theme". |
 | `window_backdrop` | enum | `"auto"` | Windows only: `auto`, `blur`, `mica`, `mica-alt`, `acrylic`, `off`. |
