@@ -7042,16 +7042,7 @@ impl Tty7App {
                     .then(|| active_tab.pane.focused_or_first_slot(window, cx))
                     .flatten()
             })?;
-        let (label, full) = match &slot {
-            PaneSlot::Ready(leaf) => {
-                let title = leaf.read(cx).header_title(cx);
-                (title.label, title.source)
-            }
-            PaneSlot::Connecting(pending) => {
-                let machine = pending.read(cx).machine.to_string();
-                (machine.clone(), machine)
-            }
-        };
+        let (label, full) = self.visible_pane_name(active_tab, &slot, cx);
         Some(crate::ui::pane_title::chrome(
             crate::ui::pane_title::Header {
                 pane: slot.entity_id(),
@@ -7063,6 +7054,45 @@ impl Tty7App {
             },
             cx,
         ))
+    }
+
+    /// The name the title bar puts on the one pane it is naming, and that name
+    /// in full for the tooltip behind it.
+    ///
+    /// Split out of [`Self::visible_pane_title`] because that one returns a
+    /// painted element: this is the half with a decision in it, and the
+    /// decision — whose name wins — is the part worth a test.
+    ///
+    /// **A name someone gave the tab outranks anything the pane inside it
+    /// calls itself.** That is the ranking the chip above the pane already
+    /// uses ([`Self::tab_label`]) and the one the mirror uses for a tab this
+    /// window does not own (`TabLabel::Named`). This bar was the last surface
+    /// still picking for itself, which put `~/repo` under a chip reading
+    /// `deploy` — one pane wearing two names.
+    pub(crate) fn visible_pane_name(
+        &self,
+        tab: &Tab,
+        slot: &PaneSlot,
+        cx: &gpui::App,
+    ) -> (String, String) {
+        if let Some(name) = tab
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            return (name.to_string(), name.to_string());
+        }
+        match slot {
+            PaneSlot::Ready(leaf) => {
+                let title = leaf.read(cx).header_title(cx);
+                (title.label, title.source)
+            }
+            PaneSlot::Connecting(pending) => {
+                let machine = pending.read(cx).machine.to_string();
+                (machine.clone(), machine)
+            }
+        }
     }
 }
 
@@ -10231,6 +10261,46 @@ mod pane_name_gpui_tests {
         app.update(&mut vcx, |app, cx| {
             leaf.update(cx, |view, _| view.title = "me@box:/etc/nginx".into());
             assert!(app.tabs[0].names_more_than_its_place(None, cx));
+        });
+    }
+
+    /// The fourth surface, and the one that was still picking for itself.
+    ///
+    /// The bar in the window chrome names the same pane the chip above it
+    /// does, so a rename has to move both. It read the pane directly while the
+    /// chip read `Tab::name`, which left a single-pane tab renamed `deploy`
+    /// wearing `/srv/deploy/app` over its grid — one pane, two names, and the
+    /// rename apparently ignored.
+    #[gpui::test]
+    fn a_renamed_tab_names_the_chrome_bar_too(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = harness_with_pane(cx);
+        let leaf = pane(&app, &mut vcx, 0);
+        seed_cwd(&leaf, &mut vcx, &mut daemon, "/srv/deploy/app");
+
+        app.update(&mut vcx, |app, cx| {
+            let slot = crate::ui::pane::PaneSlot::Ready(leaf.clone());
+
+            // Nobody has named the tab, so the pane's own name stands.
+            let (label, full) = app.visible_pane_name(&app.tabs[0], &slot, cx);
+            assert_eq!(label, "/srv/deploy/app");
+            assert_eq!(full, "/srv/deploy/app");
+
+            app.tabs[0].name = Some("  deploy  ".into());
+            let (label, full) = app.visible_pane_name(&app.tabs[0], &slot, cx);
+            assert_eq!(label, "deploy", "a given name wins, trimmed");
+            assert_eq!(full, "deploy", "and the tooltip spells out that name");
+            assert_eq!(
+                app.tab_label(&app.tabs[0], 0, None, cx),
+                label,
+                "which is what the chip above it was already showing"
+            );
+
+            // Whitespace is no name at all — the same reading `tab_label` and
+            // `TabLabel::Named` give it, so the three surfaces agree on the
+            // empty case too.
+            app.tabs[0].name = Some("   ".into());
+            let (label, _) = app.visible_pane_name(&app.tabs[0], &slot, cx);
+            assert_eq!(label, "/srv/deploy/app");
         });
     }
 }
