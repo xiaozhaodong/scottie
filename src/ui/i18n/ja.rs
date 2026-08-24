@@ -163,6 +163,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDimInactivePanesDesc => {
             "分割内のフォーカスされていないペインを暗くし、アクティブなペインを目立たせる"
         }
+        L10nKey::SettingsShowPaneTitle => "ペインのタイトルを表示",
+        L10nKey::SettingsShowPaneTitleDesc => {
+            "分割されたタブで、各ペインの上端に名前を表示します——実行中のプログラムが\
+             設定したタイトル、動作中のエージェント、またはカレントディレクトリ名。\
+             グリッドの約1.5行分を使います。"
+        }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",
         L10nKey::SettingsChooseThemeImage => "選択…",
@@ -804,6 +810,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchDimInactivePanesKeywords => {
             "非アクティブ ペイン 暗く フォーカス 分割 fade unfocused inactive split pane focus opacity highlight active dimming"
+        }
+        L10nKey::SettingsSearchShowPaneTitleKeywords => {
+            "ペイン タイトル ヘッダー 名前 上端 分割 ディレクトリ pane title header name folder osc"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "ペイン ホバー アクティブ focus follows mouse pane hover activate"

@@ -49,12 +49,33 @@ Pane Next*, and friends).
 Inactive panes are dimmed slightly so the focused one is obvious. Turn that off
 with **Settings → Appearance → Dim inactive panes**.
 
+### Pane titles
+
+Once a tab holds more than one pane, each pane names itself along its top edge:
+the title the program running in it set, or the agent working in it, or the
+folder it sits in when neither has spoken. Three shells in three directories, or
+three SSH panes on three machines, are told apart at a glance instead of by
+counting.
+
+A long name is shortened from the front, because the end is the part that
+differs — `me@mac:~/work/tty7/src` reads as `…/work/tty7/src`, and narrower
+still as `…tty7/src`. It is the same name the tab and the sidebar show, and
+hovering it brings the whole of it back.
+
+A tab with one pane has no header, and neither does a zoomed pane
+(<kbd>⌘ ⇧ ⏎</kbd>): there is nothing on screen to tell it apart from, and the
+window title, the tab bar and the sidebar all name it already.
+
+The strip costs about a line and a half of grid per pane. Turn it off with
+**Settings → Appearance → Show pane titles**.
+
 ## Rearranging by dragging
 
-Hover a pane and a small grip appears along its top edge. Drag it to move that
-pane somewhere else in the tab.
+The header is also the grip: drag a pane by its title to move it somewhere else
+in the tab. With pane titles turned off, hover a pane instead and a small grip
+appears along its top edge — the same drag, a smaller target.
 
-<Frame caption="Placeholder — video: dragging a pane by its grip, with the landing highlighted">
+<Frame caption="Placeholder — video: dragging a pane by its header, with the landing highlighted">
   <img src="/images/placeholder.svg" alt="Dragging a pane to a new position" />
 </Frame>
 
@@ -103,10 +124,11 @@ were already looking at. A plain click still switches, as always.
 
 ## Making a pane a tab of its own
 
-The same move backwards. Drag a pane by its grip up to the tab bar — or out to
-the sidebar, if that is where your tabs live — and a caret shows which two tabs
-it would go between. Drop it and it leaves the split it was in and becomes a tab
-of its own, at that spot.
+The same move backwards. Drag a pane by its grip — its title, or the small grip
+that appears on hover when pane titles are off — up to the tab bar, or out to
+the sidebar if that is where your tabs live, and a caret shows which two tabs it
+would go between. Drop it and it leaves the split it was in and becomes a tab of
+its own, at that spot.
 
 Nothing restarts here either. The last pane in a tab has nowhere to go, since it
 is already a tab on its own, so no caret appears for it.

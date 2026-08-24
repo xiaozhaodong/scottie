@@ -116,6 +116,13 @@ pub(crate) struct PaneChrome {
     /// Whether a pane can be picked up and put somewhere else. False for a tab
     /// holding one pane: there is nowhere to move it to.
     pub rearrangeable: bool,
+    /// Whether each pane names itself along its top edge. Both
+    /// `Config::show_pane_title` *and* a tab with more than one pane: a lone
+    /// pane is already named by the window title, the tab strip and the
+    /// sidebar, and would be paying 30px of grid for a fourth copy. It also
+    /// decides what a pane is dragged by: with a header, the header; without
+    /// one, the grip dots.
+    pub show_title: bool,
     /// The pane whose top edge the pointer is near. The leaves write it as the
     /// pointer crosses their reveal bands and the same frame's siblings read
     /// it, so at most one grip is ever drawn.
@@ -950,23 +957,70 @@ impl Pane<PaneSlot> {
                 } else {
                     1.0
                 };
+                let title = chrome.show_title.then(|| match v {
+                    // Both halves of the name: what the header draws, and what
+                    // it was shortened from, which the grip's tooltip shows
+                    // back on a pane too narrow to hold it.
+                    PaneSlot::Ready(t) => {
+                        let named = t.read(cx).header_title(cx);
+                        (named.label, named.source)
+                    }
+                    PaneSlot::Connecting(p) => {
+                        let machine = p.read(cx).machine.to_string();
+                        (machine.clone(), machine)
+                    }
+                });
+                let titled = title.is_some();
+                // The two strips do not stack: the header is the taller of the
+                // pair and holds the grip itself, so a split pane spends this
+                // height instead of the grip strip rather than on top of it.
+                let top_pad = match (titled, chrome.rearrangeable) {
+                    (true, _) => crate::ui::pane_title::PANE_TITLE_HEIGHT,
+                    (false, true) => crate::ui::pane_drag::HANDLE_STRIP,
+                    (false, false) => 0.,
+                };
                 div()
                     .size_full()
                     .relative()
                     .overflow_hidden()
-                    .when(chrome.rearrangeable, |d| {
-                        d.pt(px(crate::ui::pane_drag::HANDLE_STRIP))
-                    })
+                    .when(top_pad > 0., |d| d.pt(px(top_pad)))
                     .map(|d| match v {
                         PaneSlot::Ready(t) => {
                             t.update(cx, |v, _cx| v.set_dim(dim));
                             d.child(t.clone())
                         }
-                        PaneSlot::Connecting(p) => {
-                            d.when(dim < 1., |d| d.opacity(dim)).child(p.clone())
-                        }
+                        // The opacity goes on a box holding *only* the pending
+                        // pane. gpui multiplies an element's opacity through
+                        // its whole subtree, so setting it out here would dim
+                        // the header a second time on top of the `dim` its own
+                        // ink already carries — an unfocused connecting pane
+                        // was reading its name at 0.65 × 0.55 × 0.55 while a
+                        // ready one next to it read at 0.65 × 0.55.
+                        PaneSlot::Connecting(p) => d.child(
+                            div()
+                                .size_full()
+                                .when(dim < 1., |d| d.opacity(dim))
+                                .child(p.clone()),
+                        ),
                     })
-                    .when(grip, |d| {
+                    .when_some(title, |d, (label, full)| {
+                        d.child(crate::ui::pane_title::bar(
+                            crate::ui::pane_title::Header {
+                                pane: id,
+                                label,
+                                full,
+                                focus: v.focus_handle(cx),
+                                focused,
+                                dim,
+                                drag: grip.then_some(&chrome.drag),
+                            },
+                            cx,
+                        ))
+                    })
+                    // The dots are what a pane is picked up by only while it
+                    // has no header; with one, the header is the grip and a
+                    // second mark would sit on top of the title.
+                    .when(grip && !titled, |d| {
                         d.child(crate::ui::pane_drag::reveal_band(id, &chrome.hovered))
                             .child(crate::ui::pane_drag::handle(
                                 id,

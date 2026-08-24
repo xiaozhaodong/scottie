@@ -889,8 +889,7 @@ impl Tty7App {
                         id: tab.tree_id.get(),
                         index: i,
                         label: self.tab_label(tab, i, None, cx),
-                        named: tab.name.as_deref().is_some_and(|n| !n.trim().is_empty())
-                            || tab.agent(cx).is_some(),
+                        named: tab.names_more_than_its_place(None, cx),
                         path: tab
                             .pane
                             .terminals()
@@ -935,10 +934,7 @@ impl Tty7App {
             .enumerate()
             .map(|(i, v)| TabRow {
                 label: tab_view_label(&v, i, home.as_deref()),
-                // The label only stands in for the path when it came *from* the
-                // path; a name or an agent leaves the location still worth
-                // printing.
-                named: v.name.as_deref().is_some_and(|n| !n.trim().is_empty()) || v.agent.is_some(),
+                named: tab_view_names_more_than_its_place(&v, home.as_deref()),
                 path: v
                     .cwd
                     .as_deref()
@@ -2908,6 +2904,41 @@ impl TabRow {
     }
 }
 
+/// Whether a mirrored row's label says anything a line of its path would not —
+/// [`Tab::names_more_than_its_place`](crate::ui::app::Tab) for the tabs this
+/// window does not own.
+///
+/// Both sides have the same trap, because both rank a terminal's own title
+/// above the directory and a shell's title *is* the directory:
+/// `user@host:~/repo` arrives here as [`TabLabel::Osc`], is drawn as `~/repo`,
+/// and used to keep a `~/repo` subtitle under it. Excluding
+/// [`TabLabel::Cwd`](crate::ui::machine_mirror::TabLabel::Cwd) alone catches
+/// only the half of that where the title was missing altogether, so the title
+/// is put through the same
+/// [`same_place`](crate::ui::path_display::same_place) comparison the live
+/// panes use, against the same host's home.
+///
+/// The ranks that are never a place — a given name, an agent, a process name,
+/// a bare count — keep their subtitle without asking.
+fn tab_view_names_more_than_its_place(
+    view: &crate::ui::machine_mirror::TabView,
+    home: Option<&std::path::Path>,
+) -> bool {
+    use crate::ui::machine_mirror::TabLabel;
+
+    let title = match view.label() {
+        TabLabel::Cwd(_) => return false,
+        TabLabel::Osc(title) => title,
+        TabLabel::Named(_) | TabLabel::Agent(_) | TabLabel::Process(_) | TabLabel::Unknown => {
+            return true;
+        }
+    };
+    let Some(cwd) = view.cwd.as_deref() else {
+        return true;
+    };
+    !crate::ui::path_display::same_place(title, cwd, home)
+}
+
 /// Names a tab of a workspace this window does not own, matching what
 /// `Tty7App::tab_label` shows for local ones.
 ///
@@ -2930,7 +2961,7 @@ fn tab_view_label(
     };
     // A path can shorten away to nothing (a bare "user@host:"), and the process
     // name is still worth more than a number.
-    let shortened = |raw: &str| match crate::ui::tab_strip::short_title(raw, home) {
+    let shortened = |raw: &str| match crate::ui::path_display::short_title(raw, home) {
         shortened if !shortened.trim().is_empty() => shortened,
         _ => match view.title.trim() {
             "" => unnamed(),
@@ -3581,7 +3612,7 @@ mod tests {
         view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
         assert_eq!(
             tab_view_label(&view, 0, None),
-            crate::ui::tab_strip::short_title("user@host:~/repo/025/tty7", None),
+            crate::ui::path_display::short_title("user@host:~/repo/025/tty7", None),
             "a shell's title goes through the shortener the strip uses"
         );
 
@@ -3602,7 +3633,7 @@ mod tests {
         view.agent = None;
         assert_eq!(
             tab_view_label(&view, 0, None),
-            crate::ui::tab_strip::short_title("/Users/x/repo/tty7", None),
+            crate::ui::path_display::short_title("/Users/x/repo/tty7", None),
             "otherwise the directory, put through the same shortener as the strip"
         );
 
@@ -3615,6 +3646,55 @@ mod tests {
 
         view.title = String::new();
         assert!(tab_view_label(&view, 2, None).contains('3'));
+    }
+
+    /// The subtitle gate for mirrored rows. A row draws its directory under
+    /// its label, and the one case that line is wasted is the one where the
+    /// label is already that directory — which a shell integration reaches by
+    /// *titling* the pane with it, not only by leaving the title empty.
+    #[test]
+    fn a_mirrored_row_titled_with_its_own_path_does_not_print_it_twice() {
+        let home = std::path::Path::new("/Users/x");
+        let mut view = crate::ui::machine_mirror::TabView {
+            id: TabId::new(),
+            name: None,
+            title: "zsh".to_string(),
+            osc_title: Some("user@host:~/repo/tty7".to_string()),
+            cwd: Some("/Users/x/repo/tty7".to_string()),
+            agent: None,
+            status: None,
+            live: true,
+            panes: 1,
+        };
+        assert!(
+            !tab_view_names_more_than_its_place(&view, Some(home)),
+            "the shell titled the pane with the very directory the row is about to print"
+        );
+        // The same title against a home that cannot place it. Nothing here can
+        // prove the two are one place, and the honest answer keeps the line.
+        assert!(tab_view_names_more_than_its_place(&view, None));
+
+        view.osc_title = Some("✳ fixing the switcher".to_string());
+        assert!(
+            tab_view_names_more_than_its_place(&view, Some(home)),
+            "an agent's title says something the directory does not"
+        );
+
+        // No title at all: the label falls to the cwd, which is the case the
+        // gate always caught.
+        view.osc_title = None;
+        assert!(!tab_view_names_more_than_its_place(&view, Some(home)));
+
+        // ...unless an agent claims the label first, and then the directory is
+        // new information again.
+        view.agent = Some(crate::core::cli_agent::CLIAgent::Claude);
+        assert!(tab_view_names_more_than_its_place(&view, Some(home)));
+
+        // A tab someone named says what they called it; where it sits is still
+        // worth a line.
+        view.agent = None;
+        view.name = Some("deploy".to_string());
+        assert!(tab_view_names_more_than_its_place(&view, Some(home)));
     }
 }
 

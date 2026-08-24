@@ -7,7 +7,6 @@ use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
-use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::core::actions::{
     CloseActiveTab, CloseOtherTabs, CloseTabsToTheRight, CopyAgentSessionId, CopyWorkingDirectory,
@@ -21,6 +20,13 @@ use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+// The strip draws the same titles and the same paths a pane header, the
+// sidebar and the switcher do, and all of them shorten through these. Kept in
+// `path_display` rather than here so no surface has to reach into the tab
+// strip to name a pane the same way it does.
+use crate::ui::path_display::{
+    abbreviate_home, clusters, join_segments, path_separator, short_title,
+};
 use crate::ui::reorder::{self, Reorder, Surface};
 
 /// One duration and one curve for every transition the app runs, so a fade and
@@ -31,8 +37,6 @@ pub(crate) const REORDER_SLIDE_MS: u64 = TRANSITION_MS;
 const CHIP_GAP: f32 = 6.;
 
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
-
-const KEEP_SEGMENTS: usize = 3;
 
 /// Builds a launch specification without recomputing argument ownership locally.
 /// The inventory may originate from a remote host, so only its transported
@@ -49,96 +53,6 @@ fn shell_spec(shell: &DetectedShell) -> ShellSpec {
 /// workspaces this process does not own and have to cut the same head off the
 /// same titles.
 pub(crate) use tty7_core::core::tab_view::strip_host_prefix;
-
-/// `home` is the home directory of the machine `path` is on, from
-/// [`Tab::leaf_title_and_home`](crate::ui::app::Tab::leaf_title_and_home) or
-/// the workspace's host; `None` leaves the path spelled out (#580).
-pub(crate) fn abbreviate_home<'a>(
-    path: &'a str,
-    home: Option<&std::path::Path>,
-) -> std::borrow::Cow<'a, str> {
-    use std::borrow::Cow;
-    if path.starts_with('~') {
-        return Cow::Borrowed(path);
-    }
-    // The shared comparison: separators normalized, case folded — a Windows
-    // pane whose cwd spells itself `C:/Users/…` shortens under a
-    // `C:\Users\…` home too (#544).
-    crate::ui::path_display::abbreviate_home(path, home)
-}
-
-/// The separator a path spells itself with. A path carrying a single `\` is
-/// a Windows path and has to be put back together with `\`: rejoining it with
-/// `/` would make one tab spell its location two ways, `C:\Users\dev\app`
-/// while it fits and `C:/…/app` once it has to be elided.
-fn path_separator(path: &str) -> char {
-    if path.contains('\\') { '\\' } else { '/' }
-}
-
-fn join_segments(segments: &[&str], sep: char) -> String {
-    segments.join(sep.encode_utf8(&mut [0u8; 4]) as &str)
-}
-
-pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return String::new();
-    }
-    let after_host = strip_host_prefix(raw);
-    let after_host = after_host.trim();
-    if after_host.is_empty() {
-        return String::new();
-    }
-    let abbreviated = abbreviate_home(after_host, home);
-    let path: &str = abbreviated.as_ref();
-
-    enum Kind {
-        Home,
-        Absolute,
-        Relative,
-    }
-    let (kind, body) = if let Some(rest) = path.strip_prefix("~/") {
-        (Kind::Home, rest)
-    } else if path == "~" {
-        return "~".to_string();
-    } else if let Some(rest) = path.strip_prefix('/') {
-        (Kind::Absolute, rest)
-    } else {
-        (Kind::Relative, path)
-    };
-
-    // Both separators: Windows shells report `C:\Users\…` while git and the
-    // terminal integration use `/`, and a path must be cut on either one.
-    let segments: Vec<&str> = body.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() {
-        return match kind {
-            Kind::Home => "~",
-            Kind::Absolute => "/",
-            Kind::Relative => "",
-        }
-        .to_string();
-    }
-
-    let sep = path_separator(path);
-    let depth = segments.len() + usize::from(matches!(kind, Kind::Home));
-    let mut label = if depth > KEEP_SEGMENTS {
-        let tail = &segments[segments.len() - KEEP_SEGMENTS..];
-        format!("…{sep}{}", join_segments(tail, sep))
-    } else {
-        match kind {
-            Kind::Home => format!("~{sep}{}", join_segments(&segments, sep)),
-            Kind::Absolute => format!("/{}", join_segments(&segments, sep)),
-            Kind::Relative => join_segments(&segments, sep),
-        }
-    };
-    // Clamped on cluster boundaries, or a label ending in an emoji comes back
-    // holding half of one.
-    let cells = clusters(&label);
-    if cells.len() > 40 {
-        label = format!("{}…", cells[..40].concat());
-    }
-    label
-}
 
 /// Width of `text` shaped in `font` at `size`, in pixels.
 ///
@@ -254,18 +168,6 @@ pub(crate) fn elide_path_keep_tail(
 /// this also elides labels a human typed — `Backend server logs` — not just
 /// branch names, and a word boundary is the cut a reader forgives.
 const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
-
-/// Splits `text` into grapheme clusters — what a reader counts as one
-/// character, and the only place a label may be cut.
-///
-/// Slicing by `char` passes every width check and still tears the result:
-/// `👨‍👩‍👧` loses the joiner holding it together, `❤️` loses the variation
-/// selector that makes it an emoji (and the orphan then attaches itself to the
-/// ellipsis), and `🇨🇳` leaves behind a lone regional indicator that renders
-/// as a bare letter.
-fn clusters(text: &str) -> Vec<&str> {
-    text.graphemes(true).collect()
-}
 
 /// The head this token would rather keep: six clusters, extended to just past
 /// the next break so the cut lands on a boundary (`window-…` rather than
@@ -1239,7 +1141,7 @@ impl Tty7App {
         if tab.name.as_ref().is_some_and(|n| !n.trim().is_empty()) {
             return None;
         }
-        let (raw, home) = tab.leaf_title_and_home(window, cx);
+        let (raw, home) = tab.leaf_display_name(window, cx);
         let raw = raw.trim();
         if raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
             return None;
@@ -1262,7 +1164,7 @@ impl Tty7App {
                 return trimmed.to_string();
             }
         }
-        let (raw, home) = tab.leaf_title_and_home(window, cx);
+        let (raw, home) = tab.leaf_display_name(window, cx);
         let label = short_title(&raw, home.as_deref());
         if label.trim().is_empty() {
             t_fmt(
@@ -1911,17 +1813,7 @@ impl Tty7App {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
-    use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
-
-    /// Most of these tests are about where a title is *cut*, not about what
-    /// `~` means: the paths they pass either already start with `~` or are
-    /// nowhere near anybody's home. Naming no home keeps the assertions off
-    /// the process environment — and is what a title of unknown provenance
-    /// gets in the app too (#580).
-    fn short_title(raw: &str) -> String {
-        super::short_title(raw, None)
-    }
 
     fn host(name: &str, user: &str, addr: &str) -> crate::core::ssh_profile::SshProfile {
         let mut p = crate::core::ssh_profile::SshProfile::new(name);
@@ -2028,73 +1920,6 @@ mod tests {
         );
         assert!(!needs_edge(codex, light));
         assert!(!needs_edge(claude, dark) && !needs_edge(claude, light));
-    }
-
-    #[test]
-    fn short_title_strips_user_host_and_shows_shallow_path_in_full() {
-        assert_eq!(short_title("user@host:~/projects/app"), "~/projects/app");
-        // Debian's stock bash title, which spaces the path off the colon.
-        assert_eq!(short_title("user@host: ~/projects/app"), "~/projects/app");
-        assert_eq!(short_title("/usr/local/bin"), "/usr/local/bin");
-        assert_eq!(short_title("plain"), "plain");
-    }
-
-    /// A title shortens under the home of the machine it came from, and
-    /// under no other (#580).
-    #[test]
-    fn short_title_shortens_under_the_home_it_was_given() {
-        let server = Path::new("/home/deploy");
-        assert_eq!(
-            super::short_title("/home/deploy/app", Some(server)),
-            "~/app"
-        );
-        // This machine's home is not a stand-in for the server's: the same
-        // path stays whole when the home naming it is somewhere else.
-        assert_eq!(
-            super::short_title("/home/deploy/app", Some(Path::new("/Users/thomas"))),
-            "/home/deploy/app"
-        );
-        // And a pane nothing here can place — no link to its host, or a
-        // shell that has ssh'd on — shortens against nothing.
-        assert_eq!(
-            super::short_title("/home/deploy/app", None),
-            "/home/deploy/app"
-        );
-    }
-
-    /// The name a freshly dialled SSH pane wears until the remote shell says
-    /// otherwise. Cutting at the colon left the tab reading "2222" (#438).
-    #[test]
-    fn short_title_keeps_an_ssh_address_whole() {
-        assert_eq!(short_title("deploy@10.0.0.5:2222"), "deploy@10.0.0.5:2222");
-        assert_eq!(short_title("root@prod"), "root@prod");
-        assert_eq!(short_title("prod-web"), "prod-web");
-        // Only a port stops the cut: a drive letter is still a path, and this
-        // is the title tty7's own pwsh integration writes on Windows.
-        assert_eq!(short_title(r"ann@BOX:C:/Users/app"), r"C:/Users/app");
-    }
-
-    #[test]
-    fn short_title_truncates_deep_paths_to_trailing_segments() {
-        assert_eq!(short_title("user@host:~/repo/025/tty7"), "…/repo/025/tty7");
-        assert_eq!(short_title("/usr/local/share/man"), "…/local/share/man");
-        assert_eq!(short_title("a/b/c/d"), "…/b/c/d");
-    }
-
-    #[test]
-    fn short_title_keeps_home_tilde_and_normalizes_trailing_slash() {
-        assert_eq!(short_title("user@host:~"), "~");
-        assert_eq!(short_title("~"), "~");
-        assert_eq!(short_title("a/b/c/"), "a/b/c");
-    }
-
-    #[test]
-    fn short_title_blank_input_is_empty_and_long_names_are_clamped() {
-        assert_eq!(short_title("   "), "");
-        let long = "a".repeat(50);
-        let out = short_title(&long);
-        assert_eq!(out.chars().count(), 41);
-        assert!(out.ends_with('…'));
     }
 
     /// `TestAppContext` shapes through gpui's `NoopTextSystem`, where every
@@ -2320,20 +2145,6 @@ mod tests {
         assert!(out.ends_with("tab_sidebar.rs"), "leaf survives: {out}");
     }
 
-    #[test]
-    fn short_title_cuts_windows_paths_on_backslashes() {
-        assert_eq!(
-            short_title(r"C:\Users\dev\projects\app"),
-            r"…\dev\projects\app"
-        );
-        assert_eq!(
-            short_title(r"C:\Users\dev\repo\deep\path\src\ui"),
-            r"…\path\src\ui"
-        );
-        // A shallow Windows path keeps its drive and its backslashes.
-        assert_eq!(short_title(r"C:\Users\app"), r"C:\Users\app");
-    }
-
     /// Every way of slicing `text` that lands on a grapheme-cluster boundary.
     fn cluster_prefixes(text: &str) -> Vec<String> {
         let clusters: Vec<&str> = text.graphemes(true).collect();
@@ -2420,24 +2231,6 @@ mod tests {
                     );
                 }
                 max += 2.;
-            }
-        }
-    }
-
-    /// `short_title`'s 40-glyph clamp is the other `char`-indexed cut.
-    #[test]
-    fn short_title_clamps_on_cluster_boundaries() {
-        for tail in ["\u{1F1E8}\u{1F1F3}-suffix", "\u{2764}\u{fe0f}-suffix"] {
-            for pad in 37..=41 {
-                let name = format!("{}{tail}", "a".repeat(pad));
-                let out = short_title(&name);
-                let Some(body) = out.strip_suffix('…') else {
-                    continue;
-                };
-                assert!(
-                    cluster_prefixes(&name).iter().any(|p| p == body),
-                    "clamped to {body:?}, not a cluster-aligned prefix of {name:?}"
-                );
             }
         }
     }

@@ -142,6 +142,17 @@ pub struct Config {
     pub window_backdrop: WindowBackdrop,
     #[serde(default = "default_true")]
     pub dim_inactive_panes: bool,
+    /// Whether a pane in a split tab wears its own name along its top edge.
+    ///
+    /// On by default: a window of splits where each pane is running something
+    /// different is unreadable without it, and the tab strip can only ever
+    /// name one of them. A tab holding a single pane draws no header whatever
+    /// this says — there is nothing there to tell it apart from, and the
+    /// window title and tab strip already name it. The strip it costs is real
+    /// — roughly a line and a half of grid — which is why it can be turned off
+    /// by anyone who would rather spend that height on output.
+    #[serde(default = "default_true")]
+    pub show_pane_title: bool,
     pub keybindings: HashMap<String, String>,
     #[serde(default = "default_preset")]
     pub keybinding_preset: String,
@@ -581,6 +592,7 @@ impl Default for Config {
             window_blur: None,
             window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
+            show_pane_title: true,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
             prefix: default_prefix(),
@@ -1329,6 +1341,22 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    #[test]
+    fn show_pane_title_defaults_on_and_round_trips() {
+        assert!(Config::default().show_pane_title);
+
+        // A config written before the key existed keeps the header, rather
+        // than silently opting an upgrading user out of it.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(old.show_pane_title);
+
+        let off: Config = serde_json::from_str(r#"{"show_pane_title": false}"#).unwrap();
+        assert!(!off.show_pane_title);
+        let json = serde_json::to_string(&off).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(!back.show_pane_title);
     }
 
     #[test]

@@ -138,6 +138,48 @@ pub struct NativeSshParts {
 /// What a pane is called when nothing running in it has said otherwise.
 pub(crate) const DEFAULT_TITLE: &str = "Scottie";
 
+/// Which of a pane's facts its name was taken from.
+///
+/// The live-window twin of
+/// [`TabLabel`](tty7_core::core::tab_view::TabLabel), carrying the ranks a
+/// running pane can answer. Typed rather than a bare `String` because one
+/// caller needs the rank and not just the text: the switcher prints a tab's
+/// path under its label, and doing that under a label *made of* that path
+/// writes the same place twice.
+///
+/// The rank is not the whole of that answer — see
+/// [`TerminalView::named_by_its_place`], which a title that *is* a path has to
+/// be put through as well.
+pub enum PaneName {
+    /// What the program running in the pane called itself.
+    Title(String),
+    /// The agent working in it, for a pane that has not titled itself.
+    Agent(String),
+    /// The directory it sits in — nothing here named it, so its place has to.
+    Cwd(String),
+}
+
+impl PaneName {
+    pub fn into_text(self) -> String {
+        match self {
+            Self::Title(s) | Self::Agent(s) | Self::Cwd(s) => s,
+        }
+    }
+}
+
+/// A pane's name, as its header draws it and as it came in.
+///
+/// The two differ on exactly the panes that need the difference: a long path
+/// loses its head to fit in a narrow split, and the grip's tooltip is where
+/// the part that was cut goes. See [`TerminalView::header_title`].
+pub struct HeaderTitle {
+    /// Normalized and shortened — what the header draws.
+    pub label: String,
+    /// What `label` was made from: the name the program wears, or the
+    /// directory standing in for one.
+    pub source: String,
+}
+
 pub struct ShellParts {
     terminal: RemoteTerminal,
     pub(crate) pane_id: u64,
@@ -1382,6 +1424,116 @@ impl TerminalView {
 
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         self.terminal.foreground_cwd()
+    }
+
+    /// Which of this pane's facts names it, before anybody shortens it.
+    ///
+    /// The one place that *choice* is made, as
+    /// [`short_title`](crate::ui::path_display::short_title) is the one place
+    /// the shortening is. A header, a tab chip and a sidebar row cut the same
+    /// name to three different widths and that is fine — picking three
+    /// different names is not, and is exactly what a header falling back to
+    /// the directory beside a tab reading `title` raw produced: `~/repo` on
+    /// the pane and `Scottie` on the tab above it.
+    ///
+    /// The ranking below is the one the daemon's mirror uses for tabs this
+    /// process does not own (`tty7_core::core::tab_view::TabView::label`):
+    ///
+    /// 1. Whatever runs in the pane, once it has said anything.
+    ///    [`DEFAULT_TITLE`] is this app talking rather than the program, so it
+    ///    does not count; neither does a bare `user@host:`, which names
+    ///    nothing once the head comes off. An SSH pane's host *does* count —
+    ///    #438 puts it in `title` and puts it back there on `ResetTitle`,
+    ///    which is why the test is against the generic default and not against
+    ///    `default_title`.
+    /// 2. The agent working in it, when one is and it has not said anything
+    ///    yet. Its directory answers a worse question than its name does: the
+    ///    shell that launched it was already sitting there, and so is the pane
+    ///    beside it. `TabLabel::Agent` ranks it here for the same reason, and
+    ///    a local pane that ranked it lower put `~/repo` on one switcher row
+    ///    and `Claude Code` on the mirrored row under it.
+    /// 3. The directory it sits in.
+    ///
+    /// **The ranking is shared; which pane it is asked of is not.** This is
+    /// one pane answering about itself. A tab picks the pane to ask — the
+    /// focused one, through `Tab::title_leaf` — while the mirror cannot: the
+    /// daemon is not told which pane has the keyboard, so `tab_views_of`
+    /// substitutes a heuristic, taking the agent's pane for the title and the
+    /// leading pane for the cwd. A split whose focused shell has said nothing
+    /// while an agent works beside it therefore reads `~/repo` on a local
+    /// switcher row and `Claude Code` on a mirrored one, and both are true of
+    /// a pane in that tab. Matching the mirror exactly would mean throwing
+    /// away the one thing this side knows and the other cannot.
+    ///
+    /// `None` when none of them has anything to say. What to draw then belongs
+    /// to the caller: a header has a strip to fill and spells the app's own
+    /// name, a tab row counts ("Shell 2").
+    pub fn display_source(&self) -> Option<PaneName> {
+        let title = self.title.trim();
+        if title != DEFAULT_TITLE && crate::ui::path_display::names_something(title) {
+            return Some(PaneName::Title(title.to_string()));
+        }
+        if let Some(agent) = self.agent() {
+            return Some(PaneName::Agent(agent.display_name().to_string()));
+        }
+        self.cwd()
+            .map(|cwd| cwd.to_string_lossy().into_owned())
+            .filter(|cwd| crate::ui::path_display::names_something(cwd))
+            .map(PaneName::Cwd)
+    }
+
+    /// What the pane's header calls it: [`Self::display_source`] shortened the
+    /// way every other surface naming this pane shortens it.
+    /// A shell titles itself `user@host:~/work/tty7/src`, which reads the same
+    /// in every pane and is too long to take in at a glance; the cut has to
+    /// come off the *front*, because the tail is what tells three panes apart.
+    pub fn header_title(&self, cx: &gpui::App) -> HeaderTitle {
+        let home = self.display_home(cx);
+        self.display_source()
+            .and_then(|source| {
+                let source = source.into_text();
+                let label = crate::ui::path_display::short_title(&source, home.as_deref());
+                (!label.trim().is_empty()).then_some(HeaderTitle { label, source })
+            })
+            .unwrap_or_else(|| HeaderTitle {
+                label: DEFAULT_TITLE.to_string(),
+                source: DEFAULT_TITLE.to_string(),
+            })
+    }
+
+    /// Whether this pane's name already says where the pane is.
+    ///
+    /// Asked by a row that draws the pane's directory on a second line under
+    /// its name: the line is worth having right up until it repeats the one
+    /// above it.
+    ///
+    /// **Not the same question as "did [`Self::display_source`] fall through
+    /// to the cwd".** That was the first answer and it was half of one. A
+    /// shell integration titles its pane `user@host:~/repo` — a
+    /// [`PaneName::Title`] by provenance, and the working directory in fact,
+    /// which [`short_title`](crate::ui::path_display::short_title) then draws
+    /// as `~/repo` directly above a `~/repo` of its own. So the two are
+    /// compared as *places*, under this pane's own host and home (#580),
+    /// rather than trusted on which rank the name arrived by.
+    ///
+    /// An agent's name is never a place, and a pane with nothing to go on has
+    /// no name to repeat: both come back `false`, which leaves the line drawn.
+    /// Failing that way costs a redundant row; failing the other way loses one
+    /// that was carrying something.
+    pub fn named_by_its_place(&self, cx: &gpui::App) -> bool {
+        let title = match self.display_source() {
+            Some(PaneName::Cwd(_)) => return true,
+            Some(PaneName::Title(title)) => title,
+            Some(PaneName::Agent(_)) | None => return false,
+        };
+        let Some(cwd) = self.cwd() else {
+            return false;
+        };
+        crate::ui::path_display::same_place(
+            &title,
+            &cwd.to_string_lossy(),
+            self.display_home(cx).as_deref(),
+        )
     }
 
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
@@ -9332,6 +9484,182 @@ mod gpui_tests {
                 );
             })
             .unwrap();
+    }
+
+    /// Pins the pane's directory the way the daemon reports one, and waits for
+    /// the reader thread to have taken it — `header_title` reads it straight
+    /// off that lock, so a test that raced it would name the wrong thing.
+    fn seed_cwd(
+        cx: &mut TestAppContext,
+        window: &gpui::WindowHandle<TerminalView>,
+        daemon: &mut UnixStream,
+        dir: &str,
+    ) {
+        let want = std::path::PathBuf::from(dir);
+        DaemonMsg::Cwd(want.clone()).encode(daemon).unwrap();
+        for _ in 0..200 {
+            let arrived = window
+                .update(cx, |view, _, _| {
+                    view.cwd().as_deref() == Some(want.as_path())
+                })
+                .unwrap();
+            if arrived {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the pane never took the cwd {dir:?}");
+    }
+
+    /// The same wait for the agent report, which rides the same thread.
+    fn seed_agent(
+        cx: &mut TestAppContext,
+        window: &gpui::WindowHandle<TerminalView>,
+        daemon: &mut UnixStream,
+        agent: crate::core::cli_agent::CLIAgent,
+    ) {
+        DaemonMsg::Agent(Some(agent)).encode(daemon).unwrap();
+        for _ in 0..200 {
+            if window.update(cx, |view, _, _| view.agent()).unwrap() == Some(agent) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the pane never took the agent {agent:?}");
+    }
+
+    fn header(cx: &mut TestAppContext, window: &gpui::WindowHandle<TerminalView>) -> String {
+        window
+            .update(cx, |view, _, cx| view.header_title(cx).label)
+            .unwrap()
+    }
+
+    /// The whole reason a split pane pays for a header: three shells idling at
+    /// their prompts all title themselves `user@host:…`, and the part that
+    /// tells them apart is the end of the path. A header that showed the raw
+    /// title would be cut by the *tail* on the narrow panes this is for, which
+    /// keeps the identical head and throws the answer away.
+    #[gpui::test]
+    fn a_shell_title_keeps_the_path_tail_that_tells_panes_apart(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.title = "me@mac:~/work/tty7/src".into();
+            })
+            .unwrap();
+        let named = window
+            .update(cx, |view, _, cx| view.header_title(cx))
+            .unwrap();
+        assert_eq!(named.label, "…/work/tty7/src");
+        assert_eq!(
+            named.source, "me@mac:~/work/tty7/src",
+            "and the grip's tooltip can still hand back the whole of it"
+        );
+    }
+
+    /// A name that is not a path is not a path: nothing is cut off the front
+    /// of it, because there is no shared head to cut.
+    #[gpui::test]
+    fn a_program_that_names_itself_keeps_that_name(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| view.title = "vim — main.rs".into())
+            .unwrap();
+        assert_eq!(header(cx, &window), "vim — main.rs");
+    }
+
+    #[gpui::test]
+    fn a_pane_that_has_said_nothing_falls_back_to_its_directory(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        seed_cwd(cx, &window, &mut daemon, "/srv/deploy/app");
+        assert_eq!(header(cx, &window), "/srv/deploy/app");
+    }
+
+    /// The gap between launching `claude` and its first OSC title — and the
+    /// whole life of an agent that never writes one. The directory it works in
+    /// is the same directory the shell in the next pane is sitting in, so a
+    /// header naming it after that has named nothing; the agent is the answer.
+    ///
+    /// The mirror already ranks them this way (`TabLabel::Agent` sits above
+    /// `TabLabel::Cwd`), and the switcher draws local workspaces and mirrored
+    /// ones into one list — so a local pane that preferred the directory put
+    /// two names for the same situation on adjacent rows.
+    #[gpui::test]
+    fn an_agent_outranks_the_directory_it_is_working_in(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        let (window, mut daemon) = harness(cx);
+        seed_cwd(cx, &window, &mut daemon, "/srv/deploy/app");
+        seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+        assert_eq!(header(cx, &window), "Claude Code");
+    }
+
+    /// And gives the strip straight back the moment the agent says something
+    /// of its own — which is what the tab above the pane is already showing.
+    #[gpui::test]
+    fn an_agent_that_names_its_work_is_named_by_it(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        let (window, mut daemon) = harness(cx);
+        seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+        window
+            .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
+            .unwrap();
+        assert_eq!(header(cx, &window), "✳ fixing the switcher");
+    }
+
+    /// The #438 regression this header nearly undid. An SSH pane settles back
+    /// to the host it dialled, so `title == default_title` there means "named
+    /// after its host", not "nothing has spoken" — and reading it the second
+    /// way left three panes on three machines, all sitting in `~/app`, wearing
+    /// the same name.
+    #[gpui::test]
+    fn an_ssh_host_outranks_the_directory_it_is_sitting_in(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.default_title = "prod-web".into();
+                view.title = "prod-web".into();
+            })
+            .unwrap();
+        seed_cwd(cx, &window, &mut daemon, "/srv/app");
+        assert_eq!(header(cx, &window), "prod-web");
+    }
+
+    /// A pane on a Windows host read from a Mac. `Path::file_name` finds no
+    /// separator in `C:\Users\dev\repo` off Windows and hands back the whole
+    /// string, which is the one thing the header must never show.
+    #[gpui::test]
+    fn a_windows_cwd_read_from_another_os_still_loses_its_head(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        seed_cwd(cx, &window, &mut daemon, r"C:\Users\dev\repo");
+        assert_eq!(header(cx, &window), r"…\Users\dev\repo");
+    }
+
+    #[gpui::test]
+    fn a_title_that_shortens_away_to_nothing_falls_through(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| view.title = "user@host:".into())
+            .unwrap();
+        seed_cwd(cx, &window, &mut daemon, "/srv/deploy/app");
+        assert_eq!(
+            header(cx, &window),
+            "/srv/deploy/app",
+            "a bare host prefix says less than the directory under it"
+        );
+    }
+
+    /// Nothing to go on at all — no name, no directory. The header still has a
+    /// strip to fill, and an empty one reads as a broken pane.
+    #[gpui::test]
+    fn a_pane_with_neither_a_name_nor_a_directory_wears_the_default(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        assert_eq!(header(cx, &window), DEFAULT_TITLE);
+        window
+            .update(cx, |view, _, _| view.title = "   ".into())
+            .unwrap();
+        assert_eq!(header(cx, &window), DEFAULT_TITLE);
     }
 
     fn next_input(daemon: &mut UnixStream) -> Vec<u8> {

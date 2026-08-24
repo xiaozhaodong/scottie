@@ -1,9 +1,17 @@
-//! The one place a path is shortened to start from `~`.
+//! The one place a path is shortened for display.
 //!
-//! Three rows shorten a path for display — the Info panel's cwd, the tab
-//! strip's title, the home picker's recent list — and all three used to spell
-//! the check their own way: read `HOME`, compare byte prefixes. On Windows
-//! that missed twice over. `HOME` is often unset there (the variable is
+//! Two jobs live here, and both are here because every surface that draws a
+//! path has to answer them the same way or the window contradicts itself:
+//! shortening a path to start from `~` ([`abbreviate_home`]), and cutting a
+//! raw pane title down to the part that identifies it ([`short_title`]). The
+//! tab strip, the sidebar, the workspace switcher and a pane's own header all
+//! draw the *same* title, so a second rule anywhere means one of them spells
+//! the pane's identity differently from the others.
+//!
+//! Four rows shorten a path for display — the Info panel's cwd, the tab
+//! strip's title, the home picker's recent list, a split pane's header — and
+//! they used to spell the check their own way: read `HOME`, compare byte
+//! prefixes. On Windows that missed twice over. `HOME` is often unset there (the variable is
 //! `USERPROFILE`), and even a set home never matched a pane cwd that spells
 //! itself with the other separator or different case — a PowerShell pane
 //! reports `C:/Users/x/…` while `USERPROFILE` is `C:\Users\x` (#544).
@@ -28,6 +36,7 @@ use crate::ui::host_ops::HostId;
 use gpui::App;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+use unicode_segmentation::UnicodeSegmentation as _;
 
 /// The directory `~` stands for on the machine tty7 is running on, or `None`
 /// when it won't say.
@@ -134,7 +143,14 @@ pub(crate) fn native_separators(path: &Path) -> Cow<'_, Path> {
 /// but its case and component spelling are the path's own. A path that is
 /// exactly home shortens to `~`, and one whose next character is not a
 /// separator (`/home/xavier` under `/home/xa`) does not match at all.
+///
+/// A path already spelled from `~` is handed straight back: the shell wrote
+/// it that way, and measuring it against a home directory spelled in full can
+/// only fail to match.
 pub(crate) fn abbreviate_home<'a>(path: &'a str, home: Option<&Path>) -> Cow<'a, str> {
+    if path.starts_with('~') {
+        return Cow::Borrowed(path);
+    }
     let Some(home) = home else {
         return Cow::Borrowed(path);
     };
@@ -171,9 +187,187 @@ fn abbreviate_under<'a>(path: &'a str, home: &str) -> Cow<'a, str> {
     Cow::Owned(format!("~/{}", path[boundary + 1..].replace('\\', "/")))
 }
 
+/// How many trailing segments a path too deep to show whole keeps. Three is
+/// what tells `~/work/tty7/src` from `~/work/other/src` without spending a
+/// whole tab chip on the part they share.
+const KEEP_SEGMENTS: usize = 3;
+
+/// The separator a path spells itself with. A path carrying a single `\` is
+/// a Windows path and has to be put back together with `\`: rejoining it with
+/// `/` would make one label spell its location two ways, `C:\Users\dev\app`
+/// while it fits and `C:/…/app` once it has to be elided.
+pub(crate) fn path_separator(path: &str) -> char {
+    if path.contains('\\') { '\\' } else { '/' }
+}
+
+pub(crate) fn join_segments(segments: &[&str], sep: char) -> String {
+    segments.join(sep.encode_utf8(&mut [0u8; 4]) as &str)
+}
+
+/// Splits `text` into grapheme clusters — what a reader counts as one
+/// character, and the only place a label may be cut.
+///
+/// Slicing by `char` passes every width check and still tears the result:
+/// `👨‍👩‍👧` loses the joiner holding it together, `❤️` loses the variation
+/// selector that makes it an emoji (and the orphan then attaches itself to the
+/// ellipsis), and `🇨🇳` leaves behind a lone regional indicator that renders
+/// as a bare letter.
+pub(crate) fn clusters(text: &str) -> Vec<&str> {
+    text.graphemes(true).collect()
+}
+
+/// Whether [`short_title`] could make anything of `raw` — that is, whether it
+/// names something at all.
+///
+/// One shape does not: a bare `user@host:`, which a shell integration writes
+/// for the fraction of a second it has a host but not yet a directory. The
+/// head comes off and nothing is left, so whatever the caller was going to
+/// fall back to says more than this does.
+///
+/// Asked *before* shortening rather than by testing the result for emptiness,
+/// so a caller choosing between two candidate names does not have to shorten
+/// the loser to find out it lost.
+pub(crate) fn names_something(raw: &str) -> bool {
+    !tty7_core::core::tab_view::strip_host_prefix(raw.trim())
+        .trim()
+        .is_empty()
+}
+
+/// Whether two names point at the same directory, as a reader would see them.
+///
+/// Asked by the surfaces that draw a row's location *under* its name: that
+/// second line is worth having until it repeats the first, and provenance
+/// alone cannot say when it does. A shell integration titles its pane
+/// `user@host:~/repo`, which is a title by provenance and a path in fact, so
+/// the row ends up printing `~/repo` over `~/repo`.
+///
+/// Both sides go through the same three normalizations the rest of this module
+/// draws with — the `user@host:` head off, `~` for the home the names belong
+/// to, `/`-spelled and case-folded — so the comparison is between what a
+/// reader would have read, not between two spellings of it. `home` is the home
+/// of the machine *these* names are on, the same borrow every other function
+/// here takes (#580).
+///
+/// A `None` home means nothing here can place either name, and an empty name
+/// places nothing at all: both come back `false`. That is the direction to
+/// fail in — a caller that wrongly hears "different" prints a line it did not
+/// need, while one that wrongly hears "same" throws a line away.
+pub(crate) fn same_place(a: &str, b: &str, home: Option<&Path>) -> bool {
+    let (a, b) = (place_key(a, home), place_key(b, home));
+    !a.is_empty() && a == b
+}
+
+/// One name reduced to the form [`same_place`] compares in.
+fn place_key(raw: &str, home: Option<&Path>) -> String {
+    let bare = tty7_core::core::tab_view::strip_host_prefix(raw.trim()).trim();
+    match bare.is_empty() {
+        true => String::new(),
+        false => normalized(&abbreviate_home(bare, home)),
+    }
+}
+
+/// A raw pane title cut down to the part that identifies it.
+///
+/// This is the one normalization every surface that names a pane runs: the
+/// tab strip, the sidebar, the workspace switcher and the pane's own header.
+/// A second rule anywhere would let one row spell a pane's identity
+/// differently from the next, which is the whole thing a name is for.
+///
+/// What it does, in order:
+///
+/// 1. Drops the `user@host:` a shell integration prefixes its title with —
+///    identical across every pane in the window, so it distinguishes nothing.
+///    An SSH address with no path after it (`deploy@10.0.0.5:2222`) is kept
+///    whole; there the host *is* the identity (#438).
+/// 2. Shortens the path under `home` — the home of the machine the title came
+///    from, never this one's (#580).
+/// 3. Keeps the last [`KEEP_SEGMENTS`] segments of a deep path, cutting on
+///    either separator so a Windows path read on a Mac still loses its head
+///    rather than its tail.
+/// 4. Clamps an absurd single name on a cluster boundary.
+///
+/// Everything it drops comes off the *front*, because the tail is what tells
+/// two panes apart. Anything drawing the result must elide the same way —
+/// `text_ellipsis_start`, not `truncate`.
+pub(crate) fn short_title(raw: &str, home: Option<&Path>) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    let after_host = tty7_core::core::tab_view::strip_host_prefix(raw);
+    let after_host = after_host.trim();
+    if after_host.is_empty() {
+        return String::new();
+    }
+    let abbreviated = abbreviate_home(after_host, home);
+    let path: &str = abbreviated.as_ref();
+
+    enum Kind {
+        Home,
+        Absolute,
+        Relative,
+    }
+    let (kind, body) = if let Some(rest) = path.strip_prefix("~/") {
+        (Kind::Home, rest)
+    } else if path == "~" {
+        return "~".to_string();
+    } else if let Some(rest) = path.strip_prefix('/') {
+        (Kind::Absolute, rest)
+    } else {
+        (Kind::Relative, path)
+    };
+
+    // Both separators: Windows shells report `C:\Users\…` while git and the
+    // terminal integration use `/`, and a path must be cut on either one.
+    let segments: Vec<&str> = body.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return match kind {
+            Kind::Home => "~",
+            Kind::Absolute => "/",
+            Kind::Relative => "",
+        }
+        .to_string();
+    }
+
+    let sep = path_separator(path);
+    let depth = segments.len() + usize::from(matches!(kind, Kind::Home));
+    let mut label = if depth > KEEP_SEGMENTS {
+        let tail = &segments[segments.len() - KEEP_SEGMENTS..];
+        format!("…{sep}{}", join_segments(tail, sep))
+    } else {
+        match kind {
+            Kind::Home => format!("~{sep}{}", join_segments(&segments, sep)),
+            Kind::Absolute => format!("/{}", join_segments(&segments, sep)),
+            Kind::Relative => join_segments(&segments, sep),
+        }
+    };
+    // Clamped on cluster boundaries, or a label ending in an emoji comes back
+    // holding half of one.
+    let cells = clusters(&label);
+    if cells.len() > 40 {
+        label = format!("{}…", cells[..40].concat());
+    }
+    label
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Most of the `short_title` tests are about where a title is *cut*, not
+    /// about what `~` means: the paths they pass either already start with `~`
+    /// or are nowhere near anybody's home. Naming no home keeps the assertions
+    /// off the process environment — and is what a title of unknown provenance
+    /// gets in the app too (#580).
+    fn short(raw: &str) -> String {
+        short_title(raw, None)
+    }
+
+    /// Every way of slicing `text` that lands on a grapheme-cluster boundary.
+    fn cluster_prefixes(text: &str) -> Vec<String> {
+        let cells = clusters(text);
+        (0..=cells.len()).map(|n| cells[..n].concat()).collect()
+    }
 
     #[test]
     fn a_path_under_home_shortens_to_tilde() {
@@ -320,6 +514,140 @@ mod tests {
             let got = native_separators(Path::new(p));
             assert_eq!(got.as_ref(), Path::new(p), "{p:?}");
             assert!(matches!(got, Cow::Borrowed(_)));
+        }
+    }
+
+    /// The comparison behind every "would this row say the same thing twice".
+    #[test]
+    fn same_place_sees_through_the_spellings_of_one_directory() {
+        let home = Path::new("/Users/x");
+
+        // The shape this exists for: a shell integration's title against the
+        // cwd it was written from.
+        assert!(same_place(
+            "user@host:~/repo/tty7",
+            "/Users/x/repo/tty7",
+            Some(home)
+        ));
+        // Debian's stock bash spaces the path off the colon.
+        assert!(same_place("user@host: ~/repo", "/Users/x/repo", Some(home)));
+        // Windows spells one directory both ways and in either case (#544).
+        assert!(same_place(
+            r"ann@BOX:C:\Users\App",
+            "C:/Users/app",
+            Some(Path::new(r"C:\Users\ann"))
+        ));
+        // A trailing separator is not a different place.
+        assert!(same_place("~/repo/", "/Users/x/repo", Some(home)));
+
+        // Neighbours are not the same place, and neither is a prefix of one.
+        assert!(!same_place("~/repo", "/Users/x/repo/tty7", Some(home)));
+        assert!(!same_place(
+            "✳ fixing the switcher",
+            "/Users/x/repo",
+            Some(home)
+        ));
+
+        // Nothing here can place a `~` against a full path with no home to
+        // measure by, and the answer that keeps a row's second line is the one
+        // to give (#580).
+        assert!(!same_place("~/repo", "/Users/x/repo", None));
+        // The same two paths spelled in full need no home at all.
+        assert!(same_place("/srv/app", "/srv/app", None));
+
+        // A name that is nothing once the head is off places nothing, so it
+        // matches nothing — not even another one of itself.
+        assert!(!same_place("user@host:", "user@host:", Some(home)));
+        assert!(!same_place("   ", "", None));
+    }
+
+    #[test]
+    fn short_title_strips_user_host_and_shows_shallow_path_in_full() {
+        assert_eq!(short("user@host:~/projects/app"), "~/projects/app");
+        // Debian's stock bash title, which spaces the path off the colon.
+        assert_eq!(short("user@host: ~/projects/app"), "~/projects/app");
+        assert_eq!(short("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(short("plain"), "plain");
+    }
+
+    /// A title shortens under the home of the machine it came from, and
+    /// under no other (#580).
+    #[test]
+    fn short_title_shortens_under_the_home_it_was_given() {
+        let server = Path::new("/home/deploy");
+        assert_eq!(short_title("/home/deploy/app", Some(server)), "~/app");
+        // This machine's home is not a stand-in for the server's: the same
+        // path stays whole when the home naming it is somewhere else.
+        assert_eq!(
+            short_title("/home/deploy/app", Some(Path::new("/Users/thomas"))),
+            "/home/deploy/app"
+        );
+        // And a pane nothing here can place — no link to its host, or a
+        // shell that has ssh'd on — shortens against nothing.
+        assert_eq!(short_title("/home/deploy/app", None), "/home/deploy/app");
+    }
+
+    /// The name a freshly dialled SSH pane wears until the remote shell says
+    /// otherwise. Cutting at the colon left the tab reading "2222" (#438).
+    #[test]
+    fn short_title_keeps_an_ssh_address_whole() {
+        assert_eq!(short("deploy@10.0.0.5:2222"), "deploy@10.0.0.5:2222");
+        assert_eq!(short("root@prod"), "root@prod");
+        assert_eq!(short("prod-web"), "prod-web");
+        // Only a port stops the cut: a drive letter is still a path, and this
+        // is the title tty7's own pwsh integration writes on Windows.
+        assert_eq!(short(r"ann@BOX:C:/Users/app"), r"C:/Users/app");
+    }
+
+    #[test]
+    fn short_title_truncates_deep_paths_to_trailing_segments() {
+        assert_eq!(short("user@host:~/repo/025/tty7"), "…/repo/025/tty7");
+        assert_eq!(short("/usr/local/share/man"), "…/local/share/man");
+        assert_eq!(short("a/b/c/d"), "…/b/c/d");
+    }
+
+    #[test]
+    fn short_title_keeps_home_tilde_and_normalizes_trailing_slash() {
+        assert_eq!(short("user@host:~"), "~");
+        assert_eq!(short("~"), "~");
+        assert_eq!(short("a/b/c/"), "a/b/c");
+    }
+
+    #[test]
+    fn short_title_blank_input_is_empty_and_long_names_are_clamped() {
+        assert_eq!(short("   "), "");
+        let long = "a".repeat(50);
+        let out = short(&long);
+        assert_eq!(out.chars().count(), 41);
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn short_title_cuts_windows_paths_on_backslashes() {
+        assert_eq!(short(r"C:\Users\dev\projects\app"), r"…\dev\projects\app");
+        assert_eq!(
+            short(r"C:\Users\dev\repo\deep\path\src\ui"),
+            r"…\path\src\ui"
+        );
+        // A shallow Windows path keeps its drive and its backslashes.
+        assert_eq!(short(r"C:\Users\app"), r"C:\Users\app");
+    }
+
+    /// `short_title`'s 40-glyph clamp is a `char`-indexed cut in disguise.
+    #[test]
+    fn short_title_clamps_on_cluster_boundaries() {
+        for tail in ["\u{1F1E8}\u{1F1F3}-suffix", "\u{2764}\u{fe0f}-suffix"] {
+            for pad in 37..=41 {
+                let name = format!("{}{tail}", "a".repeat(pad));
+                let out = short(&name);
+                let Some(body) = out.strip_suffix('…') else {
+                    continue;
+                };
+                assert!(
+                    cluster_prefixes(&name).iter().any(|p| p == body),
+                    "clamped to {body:?}, not a cluster-aligned prefix of {name:?}"
+                );
+            }
         }
     }
 }

@@ -400,6 +400,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsShowPaneTitle,
+            keywords: SettingsSearchShowPaneTitleKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsFontSize,
             keywords: SettingsSearchFontSizeKeywords,
         },
@@ -2451,6 +2456,7 @@ impl Tty7App {
         let config = cx.global::<Config>();
         let overridden = window_overrides_active(config, cfg!(target_os = "windows"));
         let dim_inactive_panes = config.dim_inactive_panes;
+        let show_pane_title = config.show_pane_title;
         let opacity = Tty7App::effective_window_opacity(cx);
 
         let opacity_control = h_flex()
@@ -2538,6 +2544,10 @@ impl Tty7App {
             .checked(dim_inactive_panes)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_dim_inactive_panes(*on, cx)))
             .into_any_element();
+        let pane_title_switch = crate::ui::theme::switch("show-pane-title", cx)
+            .checked(show_pane_title)
+            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_show_pane_title(*on, cx)))
+            .into_any_element();
 
         v_flex()
             .child(self.section_header(t(L10nKey::SettingsTransparency), cx))
@@ -2578,6 +2588,12 @@ impl Tty7App {
                 t(L10nKey::SettingsDimInactivePanes),
                 t(L10nKey::SettingsDimInactivePanesDesc),
                 dim_switch,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsShowPaneTitle),
+                t(L10nKey::SettingsShowPaneTitleDesc),
+                pane_title_switch,
                 cx,
             ))
             .into_any_element()

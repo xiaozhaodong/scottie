@@ -17,11 +17,12 @@ use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::path_display::abbreviate_home;
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 use crate::ui::tab_strip::{
-    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_keep_edges, elide_label,
-    elide_path_keep_tail, measure_text, strip_host_prefix,
+    DragTab, REORDER_SLIDE_MS, elide_keep_edges, elide_label, elide_path_keep_tail, measure_text,
+    strip_host_prefix,
 };
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
@@ -326,7 +327,7 @@ impl Tty7App {
                         );
                         (shown, Some(full))
                     } else {
-                        let (raw_title, home) = tab.leaf_title_and_home(Some(window), cx);
+                        let (raw_title, home) = tab.leaf_display_name(Some(window), cx);
                         let title = strip_host_prefix(raw_title.trim());
                         let raw = abbreviate_home(title, home.as_deref());
                         if raw.trim().is_empty() {
