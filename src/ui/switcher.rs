@@ -3701,6 +3701,10 @@ mod tests {
             "the display option can put the current activity marker back"
         );
 
+        // The shared label contract gives a detected agent first chance to
+        // name a tab. Exercise shell-title shortening with an unclaimed pane;
+        // the core contract covers the agent-plus-shell fallback separately.
+        view.agent = None;
         view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
         assert_eq!(
             tab_view_label(&view, 0, None, false),
@@ -3715,6 +3719,7 @@ mod tests {
             "a title that shortens away to nothing falls through"
         );
 
+        view.agent = Some(crate::core::cli_agent::CLIAgent::Claude);
         view.osc_title = None;
         assert_eq!(
             tab_view_label(&view, 0, None, false),
