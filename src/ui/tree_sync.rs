@@ -168,6 +168,8 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                     session_id: session.as_ref().and_then(|s| s.session_id.clone()),
                     launch_argv: session.as_ref().and_then(|s| s.launch_argv.clone()),
                     status: None,
+                    last_task_title: session.as_ref().and_then(|s| s.last_task_title.clone()),
+                    explicit_task_title: session.and_then(|s| s.explicit_task_title),
                 }
             });
             Some(DesiredNode::Leaf {
@@ -195,6 +197,8 @@ fn desired_node(pane: &Pane, remote_window: bool, cx: &App) -> Option<DesiredNod
                 session_id: spawn.agent_session_id.clone(),
                 launch_argv: spawn.agent_launch_argv.clone(),
                 status: None,
+                last_task_title: None,
+                explicit_task_title: None,
             });
             Some(DesiredNode::Leaf {
                 pane,
@@ -4643,6 +4647,8 @@ mod tests {
                     session_id: Some("sid".into()),
                     launch_argv: Some(vec!["claude".into()]),
                     status: None,
+                    last_task_title: None,
+                    explicit_task_title: None,
                 }),
                 ..PaneRecord::new(2)
             },

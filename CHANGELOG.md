@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Agent tabs keep their last meaningful task title.** Claude Code activity
+  glyphs (`✳`, `◐`, `◑`), bare agent names and session UUIDs are separated from
+  the semantic title instead of becoming the label. A later `claude` reset or
+  `Stop` therefore leaves the task readable, while Codex without a text title
+  falls back to `Codex` rather than its UUID. **Settings → Agents → Show
+  activity symbol in agent titles** (`show_agent_title_activity_prefix`, off by
+  default) can put the current glyph back without storing it in the title.
+
 - **Documents dock beside the terminal** (#625). Opening a file, toggling the
   code panel or opening a diff no longer covers the workspace: the document
   takes a column to the right of the terminal — half the space between the

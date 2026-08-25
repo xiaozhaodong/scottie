@@ -305,12 +305,13 @@ segment (`group` in the JSON is the whole value). Read-only from here: with the
 default repo grouping the GUI recomputes it from the tab's working directory,
 so anything written from outside would be overwritten on the next render.
 
-Almost no tab has a `name`: the GUI's tab strip reads OSC titles, which the
-machine tree never sees. So the NAME column — and `label` in the JSON — falls
-back through the best evidence there is: the name if someone set one, else the
-agent running in the tab ("Claude Code"), else the last segment of its cwd,
-else the foreground process. `name` in the JSON stays literal, so a script can
-still tell a real name from a stand-in.
+Almost no tab has a `name`, so the NAME column — and `label` in the JSON —
+falls back through the best evidence there is: the name if someone set one,
+else the agent's current or last validated task title, else the agent running
+in the tab ("Claude Code"), else the last segment of its cwd, else the
+foreground process. Activity glyphs and session UUIDs are not task titles.
+`name` in the JSON stays literal, so a script can still tell a real name from
+a stand-in.
 
 ## `pane` — panes
 

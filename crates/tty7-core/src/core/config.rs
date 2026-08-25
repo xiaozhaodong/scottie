@@ -160,6 +160,12 @@ pub struct Config {
     /// setting is retained under its historical name for config compatibility.
     #[serde(default = "default_true")]
     pub show_pane_title: bool,
+    /// Whether an agent title keeps the transient activity glyph it reported
+    /// (`✳`, `◐`, `◑`). The semantic title is always cached without it; this
+    /// setting affects presentation only and is off because agent avatars
+    /// already carry the same state as a coloured dot.
+    #[serde(default)]
+    pub show_agent_title_activity_prefix: bool,
     pub keybindings: HashMap<String, String>,
     #[serde(default = "default_preset")]
     pub keybinding_preset: String,
@@ -602,6 +608,7 @@ impl Default for Config {
             window_backdrop: WindowBackdrop::default(),
             dim_inactive_panes: true,
             show_pane_title: true,
+            show_agent_title_activity_prefix: false,
             keybindings: HashMap::new(),
             keybinding_preset: default_preset(),
             prefix: default_prefix(),
@@ -1410,6 +1417,21 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.show_pane_title);
+    }
+
+    #[test]
+    fn agent_title_activity_prefix_defaults_off_and_round_trips() {
+        assert!(!Config::default().show_agent_title_activity_prefix);
+
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(!old.show_agent_title_activity_prefix);
+
+        let on: Config =
+            serde_json::from_str(r#"{"show_agent_title_activity_prefix": true}"#).unwrap();
+        assert!(on.show_agent_title_activity_prefix);
+        let json = serde_json::to_string(&on).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.show_agent_title_activity_prefix);
     }
 
     #[test]

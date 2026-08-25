@@ -161,6 +161,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Show the visible pane's name in the window's top chrome. Split panes \
              use a hover grip instead of a persistent header."
         }
+        L10nKey::SettingsShowAgentTitleActivityPrefix => "Show activity symbol in agent titles",
+        L10nKey::SettingsShowAgentTitleActivityPrefixDesc => {
+            "Keep symbols such as ✳, ◐ and ◑ before an agent's task title. The avatar status dot remains visible either way."
+        }
         L10nKey::SettingsOpenThemesFolder => "Open themes folder",
         L10nKey::SettingsChangeThemeImage => "Change…",
         L10nKey::SettingsChooseThemeImage => "Choose…",
@@ -785,6 +789,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchShowPaneTitleKeywords => {
             "pane title header name label top edge split folder directory osc caption"
+        }
+        L10nKey::SettingsSearchShowAgentTitleActivityPrefixKeywords => {
+            "agent title activity symbol prefix spinner status claude osc"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => "pane hover activate",
         L10nKey::SettingsSearchFontFamilyKeywords => "typeface monospace typography",

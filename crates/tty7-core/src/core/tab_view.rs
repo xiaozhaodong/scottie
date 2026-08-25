@@ -6,6 +6,8 @@
 //! the machine tree. This is the reading of that tree, kept in one place so
 //! the CLI and the GUI name a tab the same way.
 
+use std::borrow::Cow;
+
 use crate::core::cli_agent::{AgentStatus, CLIAgent};
 use crate::core::machine::{PaneRecord, TabId, Workspace};
 
@@ -24,6 +26,9 @@ pub struct TabView {
     pub osc_title: Option<String>,
     pub cwd: Option<String>,
     pub agent: Option<CLIAgent>,
+    pub session_id: Option<String>,
+    pub last_task_title: Option<String>,
+    pub explicit_task_title: Option<String>,
     pub status: Option<AgentStatus>,
     pub live: bool,
     pub panes: usize,
@@ -33,23 +38,23 @@ pub struct TabView {
 /// render it themselves: a path is abbreviated one way in a 20-column tab
 /// strip and another way in a terminal table, and only the GUI has a
 /// translated string for a tab with nothing to say.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TabLabel<'a> {
     /// Someone named this tab, so nothing else gets a say.
     Named(&'a str),
-    /// The terminal's own title. Second only to a given name because it is what
-    /// the window owning the tab is showing: a shell writes where it is, an
-    /// agent writes what it is doing, and either way disagreeing with the tab
-    /// strip would be worse than any ranking of our own.
+    /// A non-agent terminal's own title. Second only to a given name because it
+    /// is what the window owning the tab is showing: a shell writes where it
+    /// is, and disagreeing with the tab strip would be worse than any ranking
+    /// of our own. Agent titles go through [`Task`](Self::Task) instead.
     ///
     /// It may well be a path (`user@host:~/dir` is what the shell integration
     /// sets), so a caller that abbreviates [`Cwd`](Self::Cwd) has to abbreviate
     /// this too.
     ///
-    /// One title does not reach here: the one an agent writes that is only its
-    /// own name. That says nothing [`Agent`](Self::Agent) does not say better,
-    /// so it gives way — see [`CLIAgent::is_own_name`].
     Osc(&'a str),
+    /// A validated agent task title. Owned when it was parsed from the current
+    /// raw OSC title, borrowed when the daemon's cached last title won.
+    Task(Cow<'a, str>),
     /// No name and no title, but an agent is running in it — which is what
     /// anyone scanning a list of tabs is looking for.
     Agent(CLIAgent),
@@ -97,6 +102,10 @@ pub fn strip_host_prefix(raw: &str) -> &str {
 
 impl TabView {
     pub fn label(&self) -> TabLabel<'_> {
+        self.label_with_activity(false)
+    }
+
+    pub fn label_with_activity(&self, show_activity_prefix: bool) -> TabLabel<'_> {
         if let Some(name) = self
             .name
             .as_deref()
@@ -105,22 +114,26 @@ impl TabView {
         {
             return TabLabel::Named(name);
         }
-        // An agent that titles its pane with its own name has not said
-        // anything the ranking below does not already say, and says it better:
-        // `Claude Code` rather than `claude`. So a title like that does not
-        // count as the terminal having spoken, and the agent arm takes it.
-        // See [`CLIAgent::is_own_name`].
+        if let Some(agent) = self.agent {
+            if let Some(title) = crate::core::agent_title::resolve_agent_title(
+                agent,
+                self.session_id.as_deref(),
+                self.osc_title.as_deref(),
+                self.explicit_task_title.as_deref(),
+                self.last_task_title.as_deref(),
+                show_activity_prefix,
+            ) {
+                return TabLabel::Task(title);
+            }
+            return TabLabel::Agent(agent);
+        }
         if let Some(title) = self
             .osc_title
             .as_deref()
             .map(str::trim)
             .filter(|t| !t.is_empty())
-            .filter(|t| !self.agent.is_some_and(|agent| agent.is_own_name(t)))
         {
             return TabLabel::Osc(title);
-        }
-        if let Some(agent) = self.agent {
-            return TabLabel::Agent(agent);
         }
         if let Some(cwd) = self.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
             return TabLabel::Cwd(cwd);
@@ -159,6 +172,9 @@ pub fn tab_views_of(ws: &Workspace, panes: &[PaneRecord]) -> Vec<TabView> {
                 osc_title: titled.and_then(|p| p.osc_title.clone()),
                 cwd: head.and_then(|p| p.cwd.clone()),
                 agent: facts.map(|f| f.agent),
+                session_id: facts.and_then(|f| f.session_id.clone()),
+                last_task_title: facts.and_then(|f| f.last_task_title.clone()),
+                explicit_task_title: facts.and_then(|f| f.explicit_task_title.clone()),
                 status: facts.and_then(|f| f.status),
                 live: records.iter().any(|p| p.live),
                 panes: ids.len(),
@@ -180,6 +196,9 @@ mod tests {
             osc_title: None,
             cwd: None,
             agent: None,
+            session_id: None,
+            last_task_title: None,
+            explicit_task_title: None,
             status: None,
             live: true,
             panes: 1,
@@ -206,7 +225,14 @@ mod tests {
             cwd: Some("/work".into()),
             ..view()
         };
-        assert_eq!(titled.label(), TabLabel::Osc("✳ fixing the switcher"));
+        assert_eq!(
+            titled.label(),
+            TabLabel::Task(Cow::Borrowed("fixing the switcher"))
+        );
+        assert_eq!(
+            titled.label_with_activity(true),
+            TabLabel::Task(Cow::Borrowed("✳ fixing the switcher"))
+        );
 
         let blank_title = TabView {
             osc_title: Some("   ".into()),
@@ -260,7 +286,10 @@ mod tests {
             agent: Some(CLIAgent::Claude),
             ..view()
         };
-        assert_eq!(working.label(), TabLabel::Osc("claude-patcher"));
+        assert_eq!(
+            working.label(),
+            TabLabel::Task(Cow::Borrowed("claude-patcher"))
+        );
 
         // With no agent detected there is nothing better to fall through to,
         // so the title stands as the only thing anybody said about the tab.
@@ -279,6 +308,27 @@ mod tests {
             ..view()
         };
         assert_eq!(named.label(), TabLabel::Named("deploy"));
+    }
+
+    #[test]
+    fn an_invalid_current_title_falls_back_to_the_cached_task_then_the_brand() {
+        let cached = TabView {
+            osc_title: Some("claude".into()),
+            agent: Some(CLIAgent::Claude),
+            last_task_title: Some("武汉明天天气查询".into()),
+            ..view()
+        };
+        assert_eq!(
+            cached.label(),
+            TabLabel::Task(Cow::Borrowed("武汉明天天气查询"))
+        );
+
+        let uuid = TabView {
+            osc_title: Some("01a0368e-41d6-7ec2-9543-315d193d1d64".into()),
+            agent: Some(CLIAgent::Codex),
+            ..view()
+        };
+        assert_eq!(uuid.label(), TabLabel::Agent(CLIAgent::Codex));
     }
 
     #[test]
@@ -319,6 +369,8 @@ mod tests {
                     session_id: None,
                     launch_argv: None,
                     status: None,
+                    last_task_title: Some("fixing the switcher".into()),
+                    explicit_task_title: None,
                 }),
                 ..PaneRecord::new(2)
             },

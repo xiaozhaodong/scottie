@@ -168,6 +168,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "現在表示しているペインの名前をウィンドウ上部のクロームに表示します。分割ペインは\
              常駐ヘッダーの代わりにホバー時のグリップを使います。"
         }
+        L10nKey::SettingsShowAgentTitleActivityPrefix => "エージェントのタイトルに動作記号を表示",
+        L10nKey::SettingsShowAgentTitleActivityPrefixDesc => {
+            "タスク名の前に ✳、◐、◑ などの記号を残します。設定にかかわらずアバターの状態ドットは表示されます。"
+        }
         L10nKey::SettingsOpenThemesFolder => "テーマフォルダを開く",
         L10nKey::SettingsChangeThemeImage => "変更…",
         L10nKey::SettingsChooseThemeImage => "選択…",
@@ -812,6 +816,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowPaneTitleKeywords => {
             "ペイン タイトル ヘッダー 名前 上端 分割 ディレクトリ pane title header name folder osc"
+        }
+        L10nKey::SettingsSearchShowAgentTitleActivityPrefixKeywords => {
+            "エージェント タイトル 動作 記号 接頭辞 スピナー 状態 claude osc"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "ペイン ホバー アクティブ focus follows mouse pane hover activate"

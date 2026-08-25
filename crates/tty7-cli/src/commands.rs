@@ -266,9 +266,11 @@ fn resolve_ws(explicit: Option<&str>, ctx: &Context, machine: &Machine) -> Resul
 fn ws_tree(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let machine = fetch_machine(backend)?;
     let id = resolve_ws(explicit, ctx, &machine)?;
+    let show_activity_prefix =
+        tty7_core::core::config::Config::load().show_agent_title_activity_prefix;
     match backend.control(ControlRequest::WorkspaceTree { workspace: id })? {
         ReplyOk::WorkspaceTree(ws) => report(
-            output::workspace_tree(&ws, &machine),
+            output::workspace_tree_with_activity(&ws, &machine, show_activity_prefix),
             serde_json::to_value(&*ws)?,
         ),
         other => bail!("the server answered WorkspaceTree with {other:?}"),
@@ -622,6 +624,8 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
         .find(|ws| ws.id == id)
         .expect("resolve_ws returned an id straight out of this machine");
     let views = tab_views_of(ws, &machine.panes);
+    let show_activity_prefix =
+        tty7_core::core::config::Config::load().show_agent_title_activity_prefix;
     let rows: Vec<Vec<String>> = ws
         .tabs
         .iter()
@@ -629,7 +633,7 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
         .map(|(tab, view)| {
             vec![
                 format!("@{}", resolve::ordinal_of(&machine, tab.id).unwrap_or(0)),
-                output::tab_label(view),
+                output::tab_label_with_activity(view, show_activity_prefix),
                 // The GUI files tabs under a directory and shows its last
                 // segment as the heading; the full path would be the widest
                 // column in the table for no gain.
@@ -652,7 +656,7 @@ fn tab_ls(explicit: Option<&str>, ctx: &Context, backend: &mut dyn Backend) -> R
                 // `name` stays what someone actually named the tab — usually
                 // nothing. `label` is what the table prints.
                 "name": tab.name,
-                "label": output::tab_label(view),
+                "label": output::tab_label_with_activity(view, show_activity_prefix),
                 "agent": view.agent.map(|a| a.display_name()),
                 "group": tab.sidebar_group,
                 "panes": tab.root.pane_ids(),
@@ -2942,6 +2946,8 @@ mod tests {
             session_id: None,
             launch_argv: None,
             status: None,
+            last_task_title: None,
+            explicit_task_title: None,
         });
     }
 

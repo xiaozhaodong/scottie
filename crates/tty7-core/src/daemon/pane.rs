@@ -1895,6 +1895,13 @@ impl DaemonPane {
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
                             st.ring.append(bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
+                            // The OSC in this same output batch may be the
+                            // agent's first semantic title. Establish the
+                            // foreground identity before parsing it so the
+                            // title is cached rather than merely mirrored raw.
+                            if let Some(agent) = agent {
+                                apply_agent(&mut st, agent);
+                            }
                             apply_signals(&mut st, signals);
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
@@ -1904,9 +1911,6 @@ impl DaemonPane {
                             // must stop us honoring host-local object names. Cheap
                             // and only meaningful when a probe follows.
                             graphics.set_local(st.remote.is_none());
-                            if let Some(agent) = agent {
-                                apply_agent(&mut st, agent);
-                            }
                             apply_probed_cwd(&mut st, probed_cwd);
                             if let Some(tr1) = tr1 {
                                 tr_disp_t += tr1.elapsed();
@@ -2506,6 +2510,14 @@ fn observed_facts(st: &PaneState) -> ObservedFacts {
             .and_then(|s| s.launch_argv.clone())
             .or_else(|| st.agent_argv.clone()),
         status: st.agent_session.as_ref().map(|s| s.status),
+        last_task_title: st
+            .agent_session
+            .as_ref()
+            .and_then(|s| s.last_task_title.clone()),
+        explicit_task_title: st
+            .agent_session
+            .as_ref()
+            .and_then(|s| s.explicit_task_title.clone()),
     });
     ObservedFacts {
         cwd,
@@ -2533,12 +2545,32 @@ fn agent_facts_changed(
                 || a.session_id != b.session_id
                 || a.launch_argv != b.launch_argv
                 || a.status != b.status
+                || a.last_task_title != b.last_task_title
+                || a.explicit_task_title != b.explicit_task_title
         }
         _ => true,
     }
 }
 
 fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
+    let title_reported = signals.title.is_some();
+    let valid_explicit_agent_title = signals.agent_events.iter().any(|event| {
+        let Some(agent) = event.agent else {
+            return false;
+        };
+        event.session_title.as_deref().is_some_and(|title| {
+            crate::core::agent_title::parse_agent_title(
+                agent,
+                event.session_id.as_deref().or_else(|| {
+                    st.agent_session
+                        .as_ref()
+                        .and_then(|session| session.session_id.as_deref())
+                }),
+                title,
+            )
+            .is_some()
+        })
+    });
     if let Some(cwd) = signals.cwd {
         if st.cwd.as_ref() != Some(&cwd) {
             notify(st, DaemonMsg::Cwd(cwd.clone()));
@@ -2569,6 +2601,37 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
         );
     }
     apply_agent_signals(st, signals.agent_events, signals.notification);
+    if title_reported && !valid_explicit_agent_title {
+        apply_agent_title(st);
+    }
+}
+
+/// Caches only the semantic half of an agent's latest OSC title. The raw OSC
+/// value stays in `st.osc_title` so a viewer may put its activity glyph back;
+/// an empty/self-named/UUID reset leaves the previous task intact.
+fn apply_agent_title(st: &mut PaneState) {
+    let (Some(agent), Some(raw)) = (st.agent, st.osc_title.as_deref()) else {
+        return;
+    };
+    let session_id = st
+        .agent_session
+        .as_ref()
+        .and_then(|session| session.session_id.as_deref());
+    let Some(parsed) = crate::core::agent_title::parse_agent_title(agent, session_id, raw) else {
+        return;
+    };
+    if st.agent_session.as_ref().is_some_and(|session| {
+        session.last_task_title.as_deref() == Some(parsed.title.as_str())
+            && session.explicit_task_title.is_none()
+    }) {
+        return;
+    }
+    let session = st
+        .agent_session
+        .get_or_insert_with(crate::core::cli_agent::AgentSessionState::default);
+    session.explicit_task_title = None;
+    session.last_task_title = Some(parsed.title);
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -2673,13 +2736,11 @@ fn apply_agent(
         stamp_launch_argv(st, argv);
         return;
     }
-    if agent.is_none() && st.agent_session.is_some() {
+    if st.agent_session.is_some() {
         st.agent_session = None;
         notify(st, DaemonMsg::AgentStatus(None));
     }
-    if agent.is_none() {
-        st.agent_argv = None;
-    }
+    st.agent_argv = None;
     notify(st, DaemonMsg::Agent(agent));
     st.agent = agent;
     stamp_launch_argv(st, argv);
@@ -4262,6 +4323,8 @@ mod tests {
                         session_id: Some("sess-1".to_string()),
                         launch_argv: Some(vec!["claude".to_string()]),
                         status: None,
+                        last_task_title: None,
+                        explicit_task_title: None,
                     }),
                     shell: None,
                 },
@@ -4428,6 +4491,89 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_osc_title_updates_the_cache_and_a_self_name_does_not_clear_it() {
+        use crate::core::cli_agent::CLIAgent;
+
+        let mut st = test_state(true);
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_session = Some(Default::default());
+        let mut sniffer = OscSniffer::new();
+
+        apply_signals(
+            &mut st,
+            sniffer.feed("\x1b]2;✳ 武汉明天天气查询\x07".as_bytes()),
+        );
+        assert_eq!(
+            st.agent_session
+                .as_ref()
+                .and_then(|session| session.last_task_title.as_deref()),
+            Some("武汉明天天气查询")
+        );
+        assert_eq!(st.osc_title.as_deref(), Some("✳ 武汉明天天气查询"));
+
+        apply_signals(&mut st, sniffer.feed(b"\x1b]2;claude\x07"));
+        assert_eq!(
+            st.agent_session
+                .as_ref()
+                .and_then(|session| session.last_task_title.as_deref()),
+            Some("武汉明天天气查询"),
+            "an agent returning to its own name must not erase the last task"
+        );
+    }
+
+    #[test]
+    fn switching_agents_clears_the_previous_agents_session_and_title() {
+        use crate::core::cli_agent::{AgentSessionState, CLIAgent};
+
+        let mut st = test_state(true);
+        let (tx, rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_argv = Some(vec!["claude".into()]);
+        st.agent_session = Some(AgentSessionState {
+            session_id: Some("claude-session".into()),
+            last_task_title: Some("fix title routing".into()),
+            ..Default::default()
+        });
+
+        apply_agent(&mut st, Some((CLIAgent::Codex, vec!["codex".into()])));
+
+        assert_eq!(st.agent, Some(CLIAgent::Codex));
+        assert_eq!(st.agent_argv, Some(vec!["codex".into()]));
+        assert!(st.agent_session.is_none());
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(None))));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(DaemonMsg::Agent(Some(CLIAgent::Codex)))
+        ));
+    }
+
+    #[test]
+    fn an_explicit_hook_title_wins_over_an_osc_from_the_same_read() {
+        use crate::core::cli_agent::CLIAgent;
+
+        let mut st = test_state(true);
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_session = Some(Default::default());
+        let mut sniffer = OscSniffer::new();
+        let output = concat!(
+            "\x1b]2;✳ stale osc title\x07",
+            "\x1b]777;notify;tty7://cli-agent;",
+            r#"{"v":1,"agent":"claude","event":"session-start","session_id":"sid-1","session_title":"fresh hook title"}"#,
+            "\x07"
+        );
+
+        apply_signals(&mut st, sniffer.feed(output.as_bytes()));
+        assert_eq!(
+            st.agent_session
+                .as_ref()
+                .and_then(|session| session.last_task_title.as_deref()),
+            Some("fresh hook title")
+        );
+        assert_eq!(st.osc_title.as_deref(), Some("✳ stale osc title"));
+    }
+
+    #[test]
     fn opaque_notifications_only_fall_back_when_no_rich_state() {
         use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
 
@@ -4453,6 +4599,8 @@ mod tests {
             rich: true,
             cwd: None,
             activity: 0,
+            last_task_title: None,
+            explicit_task_title: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(

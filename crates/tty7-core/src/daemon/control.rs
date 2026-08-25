@@ -1546,6 +1546,8 @@ mod tests {
                     rich: true,
                     cwd: Some("/work/api".into()),
                     activity: 3,
+                    last_task_title: Some("repair deploy".into()),
+                    explicit_task_title: Some("repair deploy".into()),
                 },
             }])),
             ControlReply::Ok(ReplyOk::AgentStates(Vec::new())),

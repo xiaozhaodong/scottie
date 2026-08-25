@@ -325,6 +325,14 @@ pub struct AgentFacts {
     pub launch_argv: Option<Vec<String>>,
     #[serde(default)]
     pub status: Option<crate::core::cli_agent::AgentStatus>,
+    /// Last validated semantic task title. Additive/defaulted so an older
+    /// daemon and a newer viewer remain wire-compatible in either direction.
+    #[serde(default)]
+    pub last_task_title: Option<String>,
+    /// Current title supplied explicitly by a hook. It is separate from the
+    /// fallback cache so a stale OSC cannot hide it on another viewer.
+    #[serde(default)]
+    pub explicit_task_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2577,5 +2585,13 @@ mod tests {
         assert_eq!(machine.workspaces.len(), 1);
         assert_eq!(machine.workspaces[0].tabs[0].root.pane_ids(), vec![3]);
         assert!(machine.panes.is_empty());
+    }
+
+    #[test]
+    fn agent_facts_accept_an_older_payload_without_a_cached_title() {
+        let facts: AgentFacts = serde_json::from_str(r#"{"agent":"Claude"}"#).unwrap();
+        assert_eq!(facts.agent, crate::core::cli_agent::CLIAgent::Claude);
+        assert_eq!(facts.last_task_title, None);
+        assert_eq!(facts.explicit_task_title, None);
     }
 }

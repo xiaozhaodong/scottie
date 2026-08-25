@@ -1,4 +1,5 @@
 pub mod agent_hooks;
+pub mod agent_title;
 pub mod cli_agent;
 pub mod codename;
 pub mod config;

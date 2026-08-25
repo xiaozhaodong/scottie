@@ -64,6 +64,7 @@ fn build_hook_sequence(agent: &str, event: &str, stdin_json: &str) -> Vec<u8> {
     });
     for (key, alias) in [
         ("session_id", "sessionId"),
+        ("session_title", "sessionTitle"),
         ("message", "message"),
         ("cwd", "cwd"),
         // Goose spells the working directory its own way.
@@ -1447,6 +1448,16 @@ mod tests {
         assert_eq!(ev.agent, Some(CLIAgent::Grok));
         assert_eq!(ev.session_id.as_deref(), Some("g-42"));
         assert_eq!(ev.cwd.as_deref(), Some(std::path::Path::new("/w")));
+    }
+
+    #[test]
+    fn an_explicit_session_title_rides_the_hook_event() {
+        let ev = round_trip(
+            "claude",
+            "session-start",
+            r#"{"session_id":"s-1","sessionTitle":"✳ 武汉明天天气查询"}"#,
+        );
+        assert_eq!(ev.session_title.as_deref(), Some("✳ 武汉明天天气查询"));
     }
 
     /// Parses a built sequence back the way the terminal's scanner does.

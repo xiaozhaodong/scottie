@@ -550,8 +550,9 @@ impl Tab {
             return (String::new(), None);
         };
         let leaf = leaf.read(cx);
+        let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
         (
-            leaf.display_source()
+            leaf.display_source_with_activity(show_activity_prefix)
                 .map(crate::terminal::view::PaneName::into_text)
                 .unwrap_or_default(),
             leaf.display_home(cx),
@@ -2960,6 +2961,14 @@ impl Tty7App {
     /// write simply adds or removes the title from the top bar.
     pub(crate) fn set_show_pane_title(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.show_pane_title = on);
+    }
+
+    pub(crate) fn set_show_agent_title_activity_prefix(
+        &mut self,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.show_agent_title_activity_prefix = on);
     }
 
     pub(crate) fn set_cursor_blink(&mut self, on: bool, cx: &mut Context<Self>) {

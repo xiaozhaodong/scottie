@@ -1439,16 +1439,15 @@ impl TerminalView {
     /// The ranking below is the one the daemon's mirror uses for tabs this
     /// process does not own (`tty7_core::core::tab_view::TabView::label`):
     ///
-    /// 1. Whatever runs in the pane, once it has said anything.
+    /// 1. Whatever runs in the pane, once it has said something semantic.
     ///    [`DEFAULT_TITLE`] is this app talking rather than the program, so it
     ///    does not count; neither does a bare `user@host:`, which names
     ///    nothing once the head comes off. An SSH pane's host *does* count —
     ///    #438 puts it in `title` and puts it back there on `ResetTitle`,
     ///    which is why the test is against the generic default and not against
-    ///    `default_title`. Nor does an agent writing nothing but its own name
-    ///    count: `claude` says only what rank 2 says, and says it worse, so it
-    ///    falls through to be spelled `Claude Code` there
-    ///    ([`crate::core::cli_agent::CLIAgent::is_own_name`]).
+    ///    `default_title`. Agent activity prefixes are presentation metadata;
+    ///    bare self-names and session UUIDs do not count, and a previous valid
+    ///    task title survives those resets.
     /// 2. The agent working in it, when one is and it has not said anything
     ///    yet. Its directory answers a worse question than its name does: the
     ///    shell that launched it was already sitting there, and so is the pane
@@ -1472,16 +1471,34 @@ impl TerminalView {
     /// to the caller: a header has a strip to fill and spells the app's own
     /// name, a tab row counts ("Shell 2").
     pub fn display_source(&self) -> Option<PaneName> {
+        self.display_source_with_activity(false)
+    }
+
+    pub fn display_source_with_activity(&self, show_activity_prefix: bool) -> Option<PaneName> {
         let title = self.title.trim();
         let agent = self.agent();
-        if title != DEFAULT_TITLE
-            && crate::ui::path_display::names_something(title)
-            && !agent.is_some_and(|agent| agent.is_own_name(title))
-        {
-            return Some(PaneName::Title(title.to_string()));
-        }
         if let Some(agent) = agent {
+            let session = self.agent_session();
+            if let Some(title) = crate::core::agent_title::resolve_agent_title(
+                agent,
+                session
+                    .as_ref()
+                    .and_then(|state| state.session_id.as_deref()),
+                (title != DEFAULT_TITLE).then_some(title),
+                session
+                    .as_ref()
+                    .and_then(|state| state.explicit_task_title.as_deref()),
+                session
+                    .as_ref()
+                    .and_then(|state| state.last_task_title.as_deref()),
+                show_activity_prefix,
+            ) {
+                return Some(PaneName::Title(title.into_owned()));
+            }
             return Some(PaneName::Agent(agent.display_name().to_string()));
+        }
+        if title != DEFAULT_TITLE && crate::ui::path_display::names_something(title) {
+            return Some(PaneName::Title(title.to_string()));
         }
         self.cwd()
             .map(|cwd| cwd.to_string_lossy().into_owned())
@@ -1496,7 +1513,10 @@ impl TerminalView {
     /// come off the *front*, because the tail is what tells three panes apart.
     pub fn header_title(&self, cx: &gpui::App) -> HeaderTitle {
         let home = self.display_home(cx);
-        self.display_source()
+        let show_activity_prefix = cx
+            .global::<crate::core::config::Config>()
+            .show_agent_title_activity_prefix;
+        self.display_source_with_activity(show_activity_prefix)
             .and_then(|source| {
                 let source = source.into_text();
                 let label = crate::ui::path_display::short_title(&source, home.as_deref());
@@ -8861,6 +8881,8 @@ mod gpui_tests {
                 rich: true,
                 cwd: None,
                 activity: 0,
+                last_task_title: None,
+                explicit_task_title: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -8916,6 +8938,8 @@ mod gpui_tests {
             rich: true,
             cwd: None,
             activity: 0,
+            last_task_title: None,
+            explicit_task_title: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -8975,6 +8999,8 @@ mod gpui_tests {
             rich: true,
             cwd: Some(working_in.clone()),
             activity: 0,
+            last_task_title: None,
+            explicit_task_title: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -9602,7 +9628,7 @@ mod gpui_tests {
     }
 
     /// And gives the strip straight back the moment the agent says something
-    /// of its own — which is what the tab above the pane is already showing.
+    /// of its own, with its activity metadata hidden by default.
     #[gpui::test]
     fn an_agent_that_names_its_work_is_named_by_it(cx: &mut TestAppContext) {
         use crate::core::cli_agent::CLIAgent;
@@ -9612,6 +9638,19 @@ mod gpui_tests {
         window
             .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
             .unwrap();
+        assert_eq!(header(cx, &window), "fixing the switcher");
+    }
+
+    #[gpui::test]
+    fn the_activity_prefix_can_be_shown_without_polluting_the_task(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        let (window, mut daemon) = harness(cx);
+        seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+        window
+            .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
+            .unwrap();
+        cx.update(|cx| cx.global_mut::<Config>().show_agent_title_activity_prefix = true);
         assert_eq!(header(cx, &window), "✳ fixing the switcher");
     }
 
@@ -9649,7 +9688,45 @@ mod gpui_tests {
         window
             .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
             .unwrap();
-        assert_eq!(header(cx, &window), "✳ fixing the switcher");
+        assert_eq!(header(cx, &window), "fixing the switcher");
+    }
+
+    #[gpui::test]
+    fn a_cached_task_survives_an_agent_self_name_reset(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+
+        let (window, mut daemon) = harness(cx);
+        seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Done,
+            session_id: Some("sid-1".into()),
+            last_task_title: Some("武汉明天天气查询".into()),
+            explicit_task_title: None,
+            ..Default::default()
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        let mut cached = false;
+        for _ in 0..200 {
+            cached = window
+                .update(cx, |view, _, _| {
+                    view.agent_session()
+                        .and_then(|session| session.last_task_title)
+                        .as_deref()
+                        == Some("武汉明天天气查询")
+                })
+                .unwrap();
+            if cached {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(cached, "the cached task title never reached the pane");
+        window
+            .update(cx, |view, _, _| view.title = "claude".into())
+            .unwrap();
+
+        assert_eq!(header(cx, &window), "武汉明天天气查询");
     }
 
     /// The #438 regression this header nearly undid. An SSH pane settles back

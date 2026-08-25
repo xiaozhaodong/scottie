@@ -4393,6 +4393,8 @@ mod tests {
             rich: true,
             cwd: None,
             activity: 0,
+            last_task_title: Some("fix title routing".into()),
+            explicit_task_title: Some("fix title routing".into()),
         }))
         .encode(&mut daemon_side)
         .unwrap();
@@ -4400,6 +4402,8 @@ mod tests {
         assert!(
             poll(&|s| s.is_some_and(|s| s.status == AgentStatus::Waiting
                 && s.session_id.as_deref() == Some("sid-1")
+                && s.last_task_title.as_deref() == Some("fix title routing")
+                && s.explicit_task_title.as_deref() == Some("fix title routing")
                 && s.rich)),
             "status report should surface with message + session id"
         );

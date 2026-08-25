@@ -422,14 +422,14 @@ mod tests {
 
     #[test]
     fn panes_cross_the_blob_with_their_descriptors_and_their_screens() {
-        let staged = stage(
-            &[
-                carried(7, 31, b"first pane"),
-                carried(9, 32, b"second pane"),
-            ],
-            10,
-        )
-        .expect("stage the blob");
+        let mut first = carried(7, 31, b"first pane");
+        first.agent = Some(crate::core::cli_agent::CLIAgent::Claude);
+        first.agent_session = Some(crate::core::cli_agent::AgentSessionState {
+            last_task_title: Some("fix title routing".into()),
+            explicit_task_title: Some("fix title routing".into()),
+            ..Default::default()
+        });
+        let staged = stage(&[first, carried(9, 32, b"second pane")], 10).expect("stage the blob");
 
         let adopted = adopt(std::os::fd::IntoRawFd::into_raw_fd(staged)).expect("read it back");
         assert_eq!(adopted.next_pane_id, 10, "ids must not be handed out twice");
@@ -444,6 +444,21 @@ mod tests {
         assert_eq!(adopted.panes[0].ring[0].bytes, b"first pane");
         assert_eq!(adopted.panes[0].cwd, Some(PathBuf::from("/work")));
         assert!(adopted.panes[0].at_prompt);
+        assert_eq!(
+            adopted.panes[0]
+                .agent_session
+                .as_ref()
+                .and_then(|session| session.last_task_title.as_deref()),
+            Some("fix title routing"),
+            "a daemon handoff must not reduce an agent tab to its brand name"
+        );
+        assert_eq!(
+            adopted.panes[0]
+                .agent_session
+                .as_ref()
+                .and_then(|session| session.explicit_task_title.as_deref()),
+            Some("fix title routing")
+        );
         assert_eq!(
             adopted.panes[1].ring[0].bytes, b"second pane",
             "each pane's ring has to be read back at its own offset, not the first one's"

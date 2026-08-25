@@ -13,7 +13,11 @@ use crate::resolve;
 /// `tab.name` alone comes out empty for a window full of work. The evidence
 /// ranking is shared with the GUI; only the rendering is ours.
 pub fn tab_label(view: &TabView) -> String {
-    match view.label() {
+    tab_label_with_activity(view, false)
+}
+
+pub fn tab_label_with_activity(view: &TabView, show_activity_prefix: bool) -> String {
+    match view.label_with_activity(show_activity_prefix) {
         TabLabel::Named(name) => name.to_string(),
         TabLabel::Osc(title) => {
             let title = strip_host_prefix(title);
@@ -27,6 +31,7 @@ pub fn tab_label(view: &TabView) -> String {
                 false => clamp(title, 40),
             }
         }
+        TabLabel::Task(title) => clamp(title.as_ref(), 40),
         TabLabel::Agent(agent) => agent.display_name().to_string(),
         // The tree prints every pane's full cwd right underneath, and a table
         // has no room for one anyway: the leaf is what tells tabs apart.
@@ -194,6 +199,14 @@ pub fn registry_table(panes: &[PaneInfo], held: &dyn Fn(u64) -> Option<String>) 
 }
 
 pub fn workspace_tree(ws: &Workspace, machine: &Machine) -> String {
+    workspace_tree_with_activity(ws, machine, false)
+}
+
+pub fn workspace_tree_with_activity(
+    ws: &Workspace,
+    machine: &Machine,
+    show_activity_prefix: bool,
+) -> String {
     let mut out = format!(
         "{} ({})\n",
         ws.name.as_deref().unwrap_or("-"),
@@ -203,7 +216,10 @@ pub fn workspace_tree(ws: &Workspace, machine: &Machine) -> String {
         let ordinal = resolve::ordinal_of(machine, tab.id).unwrap_or(0);
         match view.label() {
             TabLabel::Unknown => out.push_str(&format!("  @{ordinal}\n")),
-            _ => out.push_str(&format!("  @{ordinal}  {}\n", tab_label(&view))),
+            _ => out.push_str(&format!(
+                "  @{ordinal}  {}\n",
+                tab_label_with_activity(&view, show_activity_prefix)
+            )),
         }
         render_node(&mut out, &tab.root, machine, 2);
     }
@@ -477,6 +493,9 @@ mod tests {
                 osc_title: None,
                 cwd: None,
                 agent: None,
+                session_id: None,
+                last_task_title: None,
+                explicit_task_title: None,
                 status: None,
                 live: true,
                 panes: 1,
@@ -501,7 +520,24 @@ mod tests {
                 v.osc_title = Some("✳ fixing the switcher".into());
                 v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Claude);
             })),
+            "fixing the switcher"
+        );
+        assert_eq!(
+            tab_label_with_activity(
+                &view(&|v| {
+                    v.osc_title = Some("✳ fixing the switcher".into());
+                    v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Claude);
+                }),
+                true,
+            ),
             "✳ fixing the switcher"
+        );
+        assert_eq!(
+            tab_label(&view(&|v| {
+                v.osc_title = Some("01a0368e-41d6-7ec2-9543-315d193d1d64".into());
+                v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Codex);
+            })),
+            "Codex"
         );
         assert_eq!(
             tab_label(&view(

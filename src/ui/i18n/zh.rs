@@ -147,6 +147,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsShowPaneTitleDesc => {
             "在窗口顶部栏显示当前可见窗格的名称。分屏使用悬停拖拽柄，不显示常驻标题。"
         }
+        L10nKey::SettingsShowAgentTitleActivityPrefix => "在 Agent 标题中显示活动符号",
+        L10nKey::SettingsShowAgentTitleActivityPrefixDesc => {
+            "在任务标题前保留 ✳、◐、◑ 等活动符号；无论是否开启，头像状态小点都会继续显示。"
+        }
         L10nKey::SettingsOpenThemesFolder => "打开主题文件夹",
         L10nKey::SettingsChangeThemeImage => "更改…",
         L10nKey::SettingsChooseThemeImage => "选择…",
@@ -720,6 +724,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchShowPaneTitleKeywords => {
             "窗格标题 标题栏 名称 顶部 分屏 目录名 pane title header name folder osc"
+        }
+        L10nKey::SettingsSearchShowAgentTitleActivityPrefixKeywords => {
+            "Agent 标题 活动符号 前缀 动画 状态 Claude OSC spinner activity"
         }
         L10nKey::SettingsSearchFocusFollowsMouseKeywords => {
             "焦点跟随鼠标 悬停 激活 窗格 focus follows mouse hover activate pane"

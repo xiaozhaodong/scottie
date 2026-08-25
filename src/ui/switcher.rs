@@ -929,11 +929,14 @@ impl Tty7App {
         // These rows describe a workspace on `host`, and the cwds they carry
         // are that machine's. Only its home may shorten them (#580).
         let home = host.and_then(|host| crate::ui::path_display::home_for_host(cx, host));
+        let show_activity_prefix = cx
+            .global::<crate::core::config::Config>()
+            .show_agent_title_activity_prefix;
         views
             .into_iter()
             .enumerate()
             .map(|(i, v)| TabRow {
-                label: tab_view_label(&v, i, home.as_deref()),
+                label: tab_view_label(&v, i, home.as_deref(), show_activity_prefix),
                 named: tab_view_names_more_than_its_place(&v, home.as_deref()),
                 path: v
                     .cwd
@@ -2929,7 +2932,11 @@ fn tab_view_names_more_than_its_place(
     let title = match view.label() {
         TabLabel::Cwd(_) => return false,
         TabLabel::Osc(title) => title,
-        TabLabel::Named(_) | TabLabel::Agent(_) | TabLabel::Process(_) | TabLabel::Unknown => {
+        TabLabel::Named(_)
+        | TabLabel::Task(_)
+        | TabLabel::Agent(_)
+        | TabLabel::Process(_)
+        | TabLabel::Unknown => {
             return true;
         }
     };
@@ -2952,6 +2959,7 @@ fn tab_view_label(
     view: &crate::ui::machine_mirror::TabView,
     index: usize,
     home: Option<&std::path::Path>,
+    show_activity_prefix: bool,
 ) -> String {
     let unnamed = || {
         t_fmt(
@@ -2968,13 +2976,14 @@ fn tab_view_label(
             title => title.to_string(),
         },
     };
-    match view.label() {
+    match view.label_with_activity(show_activity_prefix) {
         crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
         // Through `short_title` because the local strip puts its own titles
         // through it too: the shell integration writes `user@host:~/dir`, and a
         // tab that spelled that out in full where the strip says "…/dir" would
         // be the same disagreement in a new place.
         crate::ui::machine_mirror::TabLabel::Osc(title) => shortened(title),
+        crate::ui::machine_mirror::TabLabel::Task(title) => shortened(title.as_ref()),
         crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
         crate::ui::machine_mirror::TabLabel::Cwd(cwd) => shortened(cwd),
         crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),
@@ -3596,56 +3605,68 @@ mod tests {
             osc_title: Some("✳ 修复 workspace switcher".to_string()),
             cwd: Some("/Users/x/repo/tty7".to_string()),
             agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+            session_id: None,
+            last_task_title: None,
+            explicit_task_title: None,
             status: None,
             live: true,
             panes: 1,
         };
-        assert_eq!(tab_view_label(&view, 0, None), "build", "a given name wins");
+        assert_eq!(
+            tab_view_label(&view, 0, None, false),
+            "build",
+            "a given name wins"
+        );
 
         view.name = None;
         assert_eq!(
-            tab_view_label(&view, 0, None),
+            tab_view_label(&view, 0, None, false),
+            "修复 workspace switcher",
+            "activity is hidden by default"
+        );
+        assert_eq!(
+            tab_view_label(&view, 0, None, true),
             "✳ 修复 workspace switcher",
-            "then the title the local strip would be showing, verbatim"
+            "the display option can put the current activity marker back"
         );
 
         view.osc_title = Some("user@host:~/repo/025/tty7".to_string());
         assert_eq!(
-            tab_view_label(&view, 0, None),
+            tab_view_label(&view, 0, None, false),
             crate::ui::path_display::short_title("user@host:~/repo/025/tty7", None),
             "a shell's title goes through the shortener the strip uses"
         );
 
         view.osc_title = Some("user@host:".to_string());
         assert_eq!(
-            tab_view_label(&view, 0, None),
+            tab_view_label(&view, 0, None, false),
             "zsh",
             "a title that shortens away to nothing falls through"
         );
 
         view.osc_title = None;
         assert_eq!(
-            tab_view_label(&view, 0, None),
+            tab_view_label(&view, 0, None, false),
             "Claude Code",
             "an agent names a tab that has told us nothing else"
         );
 
         view.agent = None;
         assert_eq!(
-            tab_view_label(&view, 0, None),
+            tab_view_label(&view, 0, None, false),
             crate::ui::path_display::short_title("/Users/x/repo/tty7", None),
             "otherwise the directory, put through the same shortener as the strip"
         );
 
         view.cwd = None;
         assert_eq!(
-            tab_view_label(&view, 0, None),
+            tab_view_label(&view, 0, None, false),
             "zsh",
             "process name is last"
         );
 
         view.title = String::new();
-        assert!(tab_view_label(&view, 2, None).contains('3'));
+        assert!(tab_view_label(&view, 2, None, false).contains('3'));
     }
 
     /// The subtitle gate for mirrored rows. A row draws its directory under
@@ -3662,6 +3683,9 @@ mod tests {
             osc_title: Some("user@host:~/repo/tty7".to_string()),
             cwd: Some("/Users/x/repo/tty7".to_string()),
             agent: None,
+            session_id: None,
+            last_task_title: None,
+            explicit_task_title: None,
             status: None,
             live: true,
             panes: 1,

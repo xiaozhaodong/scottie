@@ -658,6 +658,14 @@ pub struct AgentSessionState {
     pub cwd: Option<std::path::PathBuf>,
     #[serde(default)]
     pub activity: u64,
+    /// The last semantic title this session reported, with activity glyphs,
+    /// self-names and session identifiers removed.
+    #[serde(default)]
+    pub last_task_title: Option<String>,
+    /// The current semantic title came explicitly from an agent hook. It wins
+    /// over an older OSC until a newer valid OSC title takes over.
+    #[serde(default)]
+    pub explicit_task_title: Option<String>,
 }
 
 impl AgentStatus {
@@ -679,10 +687,28 @@ impl AgentSessionState {
     pub fn apply_event(&mut self, ev: &AgentEvent) {
         self.rich = true;
         if let Some(id) = &ev.session_id {
+            if self
+                .session_id
+                .as_deref()
+                .is_some_and(|previous| previous != id)
+            {
+                self.last_task_title = None;
+                self.explicit_task_title = None;
+            }
             self.session_id = Some(id.clone());
         }
         if let Some(cwd) = &ev.cwd {
             self.cwd = Some(cwd.clone());
+        }
+        if let (Some(agent), Some(title)) = (ev.agent, ev.session_title.as_deref())
+            && let Some(parsed) = crate::core::agent_title::parse_agent_title(
+                agent,
+                self.session_id.as_deref(),
+                title,
+            )
+        {
+            self.explicit_task_title = Some(parsed.title.clone());
+            self.last_task_title = Some(parsed.title);
         }
         match ev.kind {
             AgentEventKind::SessionStart => {
@@ -750,6 +776,10 @@ pub struct AgentEvent {
     /// Separate from `message`, which carries what the *agent* said and is
     /// deliberately cleared when a turn starts.
     pub prompt: Option<String>,
+    /// A semantic session title supplied explicitly by an agent hook. Unlike
+    /// `prompt`, this is eligible to become the pane's task title after the
+    /// same validation applied to an OSC title.
+    pub session_title: Option<String>,
 }
 
 pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
@@ -773,6 +803,8 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         cwd: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(default)]
+        session_title: Option<String>,
     }
 
     let w: Wire = serde_json::from_slice(json).ok()?;
@@ -785,6 +817,7 @@ pub fn parse_agent_event(payload: &[u8]) -> Option<AgentEvent> {
         message: nonempty(w.message),
         cwd: nonempty(w.cwd).map(std::path::PathBuf::from),
         prompt: nonempty(w.prompt),
+        session_title: nonempty(w.session_title),
     })
 }
 
@@ -1158,6 +1191,7 @@ mod tests {
             message: msg.map(String::from),
             cwd: None,
             prompt: None,
+            session_title: None,
         };
 
         s.apply_event(&ev(AgentEventKind::SessionStart, None, Some("sid-1")));
@@ -1206,6 +1240,56 @@ mod tests {
     }
 
     #[test]
+    fn explicit_titles_survive_stop_but_not_a_different_session() {
+        let event = |id: &str, title: Option<&str>, kind| AgentEvent {
+            agent: Some(CLIAgent::Claude),
+            kind,
+            session_id: Some(id.into()),
+            message: None,
+            cwd: None,
+            prompt: None,
+            session_title: title.map(str::to_string),
+        };
+        let mut state = AgentSessionState::default();
+        state.apply_event(&event(
+            "sid-1",
+            Some("✳ 武汉明天天气查询"),
+            AgentEventKind::SessionStart,
+        ));
+        assert_eq!(state.last_task_title.as_deref(), Some("武汉明天天气查询"));
+        assert_eq!(
+            state.explicit_task_title.as_deref(),
+            Some("武汉明天天气查询")
+        );
+
+        state.apply_event(&event("sid-1", None, AgentEventKind::Stop));
+        assert_eq!(state.last_task_title.as_deref(), Some("武汉明天天气查询"));
+        assert_eq!(
+            state.explicit_task_title.as_deref(),
+            Some("武汉明天天气查询")
+        );
+
+        state.apply_event(&event("sid-2", None, AgentEventKind::SessionStart));
+        assert_eq!(state.last_task_title, None);
+        assert_eq!(state.explicit_task_title, None);
+    }
+
+    #[test]
+    fn the_cached_title_is_an_additive_wire_field() {
+        let legacy: AgentSessionState = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.last_task_title, None);
+
+        let state = AgentSessionState {
+            last_task_title: Some("fix title routing".into()),
+            explicit_task_title: Some("fix title routing".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"last_task_title\":\"fix title routing\""));
+        assert!(json.contains("\"explicit_task_title\":\"fix title routing\""));
+    }
+
+    #[test]
     fn tool_completions_count_even_when_the_status_holds_still() {
         let ev = |kind| AgentEvent {
             agent: Some(CLIAgent::Claude),
@@ -1214,6 +1298,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            session_title: None,
         };
 
         let mut s = AgentSessionState::default();
@@ -1250,6 +1335,7 @@ mod tests {
             message: None,
             cwd: cwd.map(PathBuf::from),
             prompt: None,
+            session_title: None,
         };
 
         let mut s = AgentSessionState::default();

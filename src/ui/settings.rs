@@ -580,6 +580,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Agents,
+            title: SettingsShowAgentTitleActivityPrefix,
+            keywords: SettingsSearchShowAgentTitleActivityPrefixKeywords,
+        },
+        SearchEntry {
+            section: Agents,
             title: SettingsAgentClaudeCode,
             keywords: SettingsSearchClaudeCodeKeywords,
         },
@@ -5669,11 +5674,28 @@ impl Tty7App {
             None => (AgentHooksView::Loading, None, HostId::LOCAL),
         };
         let stacked = self.settings_row_under(STACK_ROW_BELOW, cx);
+        let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
+        let activity_prefix_switch =
+            crate::ui::theme::switch("show-agent-title-activity-prefix", cx)
+                .checked(show_activity_prefix)
+                .on_click(cx.listener(|this, on: &bool, _window, cx| {
+                    this.set_show_agent_title_activity_prefix(*on, cx)
+                }))
+                .into_any_element();
         let mut page = v_flex().child(self.section_intro(
             t(L10nKey::SettingsAgentsIntro),
             t(L10nKey::SettingsAgentsIntroDesc),
             cx,
         ));
+
+        page = page
+            .child(self.settings_row(
+                t(L10nKey::SettingsShowAgentTitleActivityPrefix),
+                t(L10nKey::SettingsShowAgentTitleActivityPrefixDesc),
+                activity_prefix_switch,
+                cx,
+            ))
+            .child(self.section_rule(cx));
 
         page = page.children(self.agent_hooks_machine_picker(selected_host, cx));
 
