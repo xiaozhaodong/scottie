@@ -41,7 +41,7 @@ pub fn parse_agent_title(
     raw: &str,
 ) -> Option<AgentTitle> {
     let folded = fold_one_line(raw);
-    let mut title = folded.trim();
+    let mut title = folded.as_str();
     let activity_prefix = title
         .chars()
         .next()
@@ -49,7 +49,10 @@ pub fn parse_agent_title(
     if let Some(prefix) = activity_prefix {
         title = title[prefix.len_utf8()..].trim_start();
     }
+    let after_host = crate::core::tab_view::strip_host_prefix(title);
     if title.is_empty()
+        || after_host != title
+        || after_host.trim().is_empty()
         || agent.is_own_name(title)
         || session_id.is_some_and(|id| id.trim() == title)
         || uuid::Uuid::parse_str(title).is_ok()
@@ -89,9 +92,17 @@ pub fn resolve_agent_title<'a>(
     if let Some(current) = current {
         return Some(Cow::Owned(current.display(show_activity_prefix)));
     }
+    // The cache is re-checked for a shell location rather than trusted, because
+    // it can predate this rule: a daemon built before it cached whatever the
+    // shell had titled the pane during the handoff into the agent, and an
+    // `execve` self-upgrade deliberately carries that cache across. Reading it
+    // back is what makes the fix retroactive on a machine that upgraded in
+    // place. Hook titles are not re-checked — those come from the agent's own
+    // structured field, so an address in one was meant.
     if let Some(cached) = last_task_title
         .map(str::trim)
         .filter(|title| !title.is_empty())
+        .filter(|title| crate::core::tab_view::strip_host_prefix(title) == *title)
     {
         return Some(Cow::Borrowed(cached));
     }
@@ -116,6 +127,9 @@ fn fold_one_line(raw: &str) -> String {
 }
 
 fn clamp(title: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     if title.chars().count() <= max {
         return title.to_string();
     }
@@ -160,6 +174,31 @@ mod tests {
     }
 
     #[test]
+    fn shell_titles_are_not_agent_tasks() {
+        for title in ["user@host:", "user@host:~/repo/tty7", "user@host: /srv/app"] {
+            assert_eq!(
+                parse_agent_title(CLIAgent::Claude, None, title),
+                None,
+                "{title:?} is a shell location, not an agent task"
+            );
+        }
+        assert!(
+            parse_agent_title(CLIAgent::Claude, None, "deploy@10.0.0.5:2222").is_some(),
+            "a port-only address is intentionally not stripped by the shared helper"
+        );
+        // And the cost of borrowing that helper's idea of a head: it asks only
+        // whether an `@` appears before the first colon, so prose carrying an
+        // address mid-sentence is refused too. Rejecting it loses a title the
+        // agent could have shown; accepting the shapes above would put a shell's
+        // location in the daemon's cache, where it outlives the shell. Falling
+        // back to `Claude Code` is the cheaper of the two mistakes.
+        assert_eq!(
+            parse_agent_title(CLIAgent::Claude, None, "fix user@host: routing"),
+            None
+        );
+    }
+
+    #[test]
     fn prose_is_folded_and_clamped_without_breaking_unicode() {
         let parsed =
             parse_agent_title(CLIAgent::Claude, None, "  修复标题\n\t并补充测试\u{0007}  ")
@@ -175,6 +214,28 @@ mod tests {
     #[test]
     fn a_prefix_without_a_task_is_empty() {
         assert_eq!(parse_agent_title(CLIAgent::Claude, None, " ◐  "), None);
+    }
+
+    #[test]
+    fn a_zero_clamp_limit_is_safe() {
+        assert_eq!(clamp("title", 0), "");
+    }
+
+    #[test]
+    fn a_shell_location_cached_by_an_older_daemon_is_not_shown() {
+        assert_eq!(
+            resolve_agent_title(
+                CLIAgent::Claude,
+                None,
+                Some("claude"),
+                None,
+                Some("user@host:~/repo/tty7"),
+                false,
+            )
+            .as_deref(),
+            None,
+            "the cache is re-read under this rule, so an in-place upgrade heals"
+        );
     }
 
     #[test]

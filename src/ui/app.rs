@@ -26,7 +26,7 @@ use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::daemon::spawn::DaemonMismatch;
-use crate::terminal::view::{ChildExited, TerminalView};
+use crate::terminal::view::{ChildExited, PaneName, TerminalView};
 use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
 use crate::ui::host_registry::HostId;
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt, t_plural};
@@ -534,27 +534,27 @@ impl Tab {
     ///
     /// The name itself is [`TerminalView::display_source`], the same choice
     /// the window chrome makes, so a chip and the chrome cannot disagree about
-    /// what they are naming. Only the *width* differs after this: the strip
-    /// shortens through `short_title`, the sidebar elides against real glyphs,
-    /// and the chrome elides from the front.
+    /// what they are naming. It comes back *ranked* rather than as bare text
+    /// because the rank decides how it may be cut: prose loses its tail and a
+    /// path loses its head, which is what [`PaneName::label`] applies. Only the
+    /// width differs after that — the strip caps it, the sidebar elides against
+    /// real glyphs, and the chrome elides from the front.
     ///
-    /// Empty when the pane has said nothing and has no directory either. Each
+    /// `None` when the pane has said nothing and has no directory either. Each
     /// caller spells its own placeholder for that — a tab counts, while the
     /// window chrome falls back to the app's name.
     pub(crate) fn leaf_display_name(
         &self,
         window: Option<&Window>,
         cx: &App,
-    ) -> (String, Option<std::path::PathBuf>) {
+    ) -> (Option<PaneName>, Option<std::path::PathBuf>) {
         let Some(leaf) = self.title_leaf(window, cx) else {
-            return (String::new(), None);
+            return (None, None);
         };
         let leaf = leaf.read(cx);
         let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
         (
-            leaf.display_source_with_activity(show_activity_prefix)
-                .map(crate::terminal::view::PaneName::into_text)
-                .unwrap_or_default(),
+            leaf.display_source_with_activity(show_activity_prefix),
             leaf.display_home(cx),
         )
     }
@@ -10068,7 +10068,7 @@ mod pane_name_gpui_tests {
 
     use crate::core::cli_agent::CLIAgent;
     use crate::daemon::protocol::DaemonMsg;
-    use crate::terminal::view::TerminalView;
+    use crate::terminal::view::{PaneName, TerminalView};
     use crate::ui::app::test_window::{harness_with_pane, harness_with_split};
 
     /// The tab's nth pane, in the order a split lays them out.
@@ -10146,7 +10146,8 @@ mod pane_name_gpui_tests {
             );
             let (shown, _) = tab.leaf_display_name(None, cx);
             assert_eq!(
-                shown, header.source,
+                shown.map(PaneName::into_text).unwrap_or_default(),
+                header.source,
                 "both start from the one source the sidebar elides too"
             );
         });
@@ -10190,7 +10191,10 @@ mod pane_name_gpui_tests {
             );
             assert_eq!(app.tab_label(tab, 0, None, cx), header.label);
             let (shown, _) = tab.leaf_display_name(None, cx);
-            assert_eq!(shown, header.source);
+            assert_eq!(
+                shown.map(PaneName::into_text).unwrap_or_default(),
+                header.source
+            );
         });
     }
 

@@ -17,6 +17,7 @@ use crate::core::actions::{
 use crate::core::config::RightPanelTab;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
+use crate::terminal::view::PaneName;
 use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -24,9 +25,7 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 // switcher, and all of them shorten through these helpers. Kept in
 // `path_display` rather than here so no surface has to reach into the tab
 // strip to name a pane the same way it does.
-use crate::ui::path_display::{
-    abbreviate_home, clusters, join_segments, path_separator, short_title,
-};
+use crate::ui::path_display::{abbreviate_home, clusters, join_segments, path_separator};
 use crate::ui::reorder::{self, Reorder, Surface};
 
 /// One duration and one curve for every transition the app runs, so a fade and
@@ -1141,14 +1140,19 @@ impl Tty7App {
         if tab.name.as_ref().is_some_and(|n| !n.trim().is_empty()) {
             return None;
         }
-        let (raw, home) = tab.leaf_display_name(window, cx);
-        let raw = raw.trim();
+        let (source, home) = tab.leaf_display_name(window, cx);
+        let source = source?;
+        let raw = source.text().trim();
         if raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
             return None;
         }
-        Some(SharedString::from(
-            abbreviate_home(raw, home.as_deref()).into_owned(),
-        ))
+        // A task title is prose and already whole: there is no `user@host:` head
+        // on it and no `~` in it to spell back out.
+        let full = match &source {
+            PaneName::Task(_) => raw.to_string(),
+            _ => abbreviate_home(raw, home.as_deref()).into_owned(),
+        };
+        Some(SharedString::from(full))
     }
 
     pub(crate) fn tab_label(
@@ -1164,8 +1168,10 @@ impl Tty7App {
                 return trimmed.to_string();
             }
         }
-        let (raw, home) = tab.leaf_display_name(window, cx);
-        let label = short_title(&raw, home.as_deref());
+        let (source, home) = tab.leaf_display_name(window, cx);
+        let label = source
+            .map(|source| source.label(home.as_deref()))
+            .unwrap_or_default();
         if label.trim().is_empty() {
             t_fmt(
                 L10nKey::TabUnnamedShell,

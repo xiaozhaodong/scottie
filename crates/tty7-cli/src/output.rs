@@ -2,7 +2,7 @@ use unicode_width::UnicodeWidthStr;
 
 use tty7_core::core::machine::{Machine, PaneNode, Workspace};
 use tty7_core::core::session::WorkspaceId;
-use tty7_core::core::tab_view::{TabLabel, TabView, strip_host_prefix, tab_views_of};
+use tty7_core::core::tab_view::{LABEL_MAX, TabLabel, TabView, strip_host_prefix, tab_views_of};
 use tty7_core::daemon::control::{PaneAgentState, RouteInfo, ServerStatus};
 use tty7_core::daemon::protocol::{PaneInfo, PaneProcs};
 
@@ -28,10 +28,10 @@ pub fn tab_label_with_activity(view: &TabView, show_activity_prefix: bool) -> St
             // talkative tab cannot widen every column in the table.
             match title.starts_with(['/', '~']) {
                 true => path_leaf(title).to_string(),
-                false => clamp(title, 40),
+                false => clamp(title, LABEL_MAX),
             }
         }
-        TabLabel::Task(title) => clamp(title.as_ref(), 40),
+        TabLabel::Task(title) => clamp(title.as_ref(), LABEL_MAX),
         TabLabel::Agent(agent) => agent.display_name().to_string(),
         // The tree prints every pane's full cwd right underneath, and a table
         // has no room for one anyway: the leaf is what tells tabs apart.
@@ -41,8 +41,12 @@ pub fn tab_label_with_activity(view: &TabView, show_activity_prefix: bool) -> St
     }
 }
 
-/// `max` characters at most, with an ellipsis in place of what was dropped.
+/// `max` characters at most, ellipsis included — see [`LABEL_MAX`] for why the
+/// GUI counts the same limit in grapheme clusters instead.
 fn clamp(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
     match s.chars().count() > max {
         true => s.chars().take(max - 1).chain(['…']).collect(),
         false => s.to_string(),
@@ -214,7 +218,7 @@ pub fn workspace_tree_with_activity(
     );
     for (tab, view) in ws.tabs.iter().zip(tab_views_of(ws, &machine.panes)) {
         let ordinal = resolve::ordinal_of(machine, tab.id).unwrap_or(0);
-        match view.label() {
+        match view.label_with_activity(show_activity_prefix) {
             TabLabel::Unknown => out.push_str(&format!("  @{ordinal}\n")),
             _ => out.push_str(&format!(
                 "  @{ordinal}  {}\n",
@@ -545,6 +549,14 @@ mod tests {
             )),
             "tty7",
             "a shell's title is a path and is cut down like one"
+        );
+        assert_eq!(
+            tab_label(&view(&|v| {
+                v.osc_title = Some("user@host:~/repo/tty7".into());
+                v.agent = Some(tty7_core::core::cli_agent::CLIAgent::Claude);
+            })),
+            "Claude Code",
+            "an agent's shell handoff title must fall back to the agent"
         );
         let long = "wondering ".repeat(8);
         let clamped = tab_label(&view(&|v| v.osc_title = Some(long.clone())));

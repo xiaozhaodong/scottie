@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::config::{Config, SidebarGrouping};
 use crate::terminal::git_status::GitStatusCache;
+use crate::terminal::view::PaneName;
 use crate::ui::app::{TITLE_BAR_HEIGHT, Tty7App};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -313,11 +314,42 @@ impl Tty7App {
                 // `full_title` is the unelided string the card can expand
                 // back to; `None` means the row is showing a placeholder that
                 // no card can improve on.
-                let (shown_title, full_title) =
-                    if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
-                        // A renamed tab is elided like anything else — and so
-                        // the card has to be able to spell the name back out.
-                        let full = SharedString::from(name.trim().to_string());
+                let (shown_title, full_title) = if let Some(name) =
+                    tab.name.as_ref().filter(|n| !n.trim().is_empty())
+                {
+                    // A renamed tab is elided like anything else — and so
+                    // the card has to be able to spell the name back out.
+                    let full = SharedString::from(name.trim().to_string());
+                    let shown = elide_label(
+                        &window.text_system(),
+                        title_font,
+                        title_size,
+                        &full,
+                        label_avail,
+                    );
+                    (shown, Some(full))
+                } else {
+                    let (source, home) = tab.leaf_display_name(Some(window), cx);
+                    // A task title is prose: no `user@host:` head to cut and
+                    // no path under `home` to spell as `~`. Everything else
+                    // is a place and gets both.
+                    let raw = match &source {
+                        Some(PaneName::Task(title)) => std::borrow::Cow::Borrowed(title.trim()),
+                        Some(other) => {
+                            abbreviate_home(strip_host_prefix(other.text().trim()), home.as_deref())
+                        }
+                        None => std::borrow::Cow::Borrowed(""),
+                    };
+                    if raw.trim().is_empty() {
+                        // Nothing to expand: the row is naming an unnamed
+                        // shell, not hiding a title behind an ellipsis.
+                        let placeholder = SharedString::from(t_fmt(
+                            L10nKey::TabUnnamedShell,
+                            &[("n", &((i + 1).to_string()))],
+                        ));
+                        (placeholder, None)
+                    } else {
+                        let full = SharedString::from(raw.as_ref());
                         let shown = elide_label(
                             &window.text_system(),
                             title_font,
@@ -326,30 +358,8 @@ impl Tty7App {
                             label_avail,
                         );
                         (shown, Some(full))
-                    } else {
-                        let (raw_title, home) = tab.leaf_display_name(Some(window), cx);
-                        let title = strip_host_prefix(raw_title.trim());
-                        let raw = abbreviate_home(title, home.as_deref());
-                        if raw.trim().is_empty() {
-                            // Nothing to expand: the row is naming an unnamed
-                            // shell, not hiding a title behind an ellipsis.
-                            let placeholder = SharedString::from(t_fmt(
-                                L10nKey::TabUnnamedShell,
-                                &[("n", &((i + 1).to_string()))],
-                            ));
-                            (placeholder, None)
-                        } else {
-                            let full = SharedString::from(raw.as_ref());
-                            let shown = elide_label(
-                                &window.text_system(),
-                                title_font,
-                                title_size,
-                                &full,
-                                label_avail,
-                            );
-                            (shown, Some(full))
-                        }
-                    };
+                    }
+                };
                 let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
                 let mut cwd_shown: Option<(SharedString, SharedString)> = None;
                 let git_line = tab.git_status(Some(window), cx).map(|g| {

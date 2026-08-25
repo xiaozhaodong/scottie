@@ -192,6 +192,17 @@ fn abbreviate_under<'a>(path: &'a str, home: &str) -> Cow<'a, str> {
 /// whole tab chip on the part they share.
 const KEEP_SEGMENTS: usize = 3;
 
+/// The backstop for a path that is too long without being deep — one absurd
+/// directory name, which segment-keeping cannot shorten.
+///
+/// Counted *before* the ellipsis, so a label that hits it comes back one cell
+/// longer than the prose limit of
+/// [`LABEL_MAX`](tty7_core::core::tab_view::LABEL_MAX). The two are not aligned
+/// on purpose: this is a rarely-reached backstop with existing output pinned to
+/// it, and moving it by one cell to match a limit it does not share would be a
+/// behaviour change smuggled in under a rename.
+const PATH_MAX_CELLS: usize = 40;
+
 /// The separator a path spells itself with. A path carrying a single `\` is
 /// a Windows path and has to be put back together with `\`: rejoining it with
 /// `/` would make one label spell its location two ways, `C:\Users\dev\app`
@@ -231,6 +242,25 @@ pub(crate) fn names_something(raw: &str) -> bool {
     !tty7_core::core::tab_view::strip_host_prefix(raw.trim())
         .trim()
         .is_empty()
+}
+
+/// Clamps prose to `max` cells, ellipsis included, without applying any of the
+/// path-specific shortening [`short_title`] does.
+///
+/// What an agent's task title needs: it reads as a sentence, so the front of it
+/// is the part that says anything ("refactor …" over "…/src/core/config.rs"),
+/// and a `/` in it is punctuation rather than a boundary to cut on. Cells, not
+/// characters, so a title ending in an emoji does not come back holding half of
+/// one.
+pub(crate) fn clamp_text(raw: &str, max: usize) -> String {
+    let cells = clusters(raw);
+    if cells.len() <= max {
+        return raw.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    format!("{}…", cells[..max.saturating_sub(1)].concat())
 }
 
 /// Whether two names point at the same directory, as a reader would see them.
@@ -344,8 +374,8 @@ pub(crate) fn short_title(raw: &str, home: Option<&Path>) -> String {
     // Clamped on cluster boundaries, or a label ending in an emoji comes back
     // holding half of one.
     let cells = clusters(&label);
-    if cells.len() > 40 {
-        label = format!("{}…", cells[..40].concat());
+    if cells.len() > PATH_MAX_CELLS {
+        label = format!("{}…", cells[..PATH_MAX_CELLS].concat());
     }
     label
 }
@@ -618,8 +648,18 @@ mod tests {
         assert_eq!(short("   "), "");
         let long = "a".repeat(50);
         let out = short(&long);
-        assert_eq!(out.chars().count(), 41);
+        // The cells kept, plus the ellipsis that says the rest was cut.
+        assert_eq!(out.chars().count(), PATH_MAX_CELLS + 1);
         assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn clamp_text_keeps_prose_and_does_not_drop_path_like_prefixes() {
+        assert_eq!(
+            clamp_text("refactor crates/tty7-core/src/core/config.rs", 40),
+            "refactor crates/tty7-core/src/core/conf…"
+        );
+        assert_eq!(clamp_text("title", 0), "");
     }
 
     #[test]

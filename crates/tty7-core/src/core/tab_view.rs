@@ -34,6 +34,23 @@ pub struct TabView {
     pub panes: usize,
 }
 
+/// How long a label made of *prose* may be, ellipsis included.
+///
+/// Here rather than in either renderer because a task title is the one label
+/// every surface clamps the same way — the strip, the pane header, the
+/// switcher and `tty7 tab ls` — and a second spelling of the number would let
+/// one of them cut a title where another kept it.
+///
+/// Only prose. A label that is a *path* is cut by each side's path shortener
+/// instead, which drops whole segments off the front before it ever reaches a
+/// character count, so the two are not the same limit and cannot share one.
+///
+/// The count is in characters on the CLI side and in grapheme clusters in the
+/// GUI: the GUI has `unicode-segmentation` and must not leave half an emoji
+/// against a glyph run, while the CLI would need a new dependency to tell the
+/// difference and lays its columns out by display width anyway.
+pub const LABEL_MAX: usize = 40;
+
 /// Where a tab's displayed name comes from, best evidence first. Callers
 /// render it themselves: a path is abbreviated one way in a 20-column tab
 /// strip and another way in a terminal table, and only the GUI has a
@@ -240,6 +257,17 @@ mod tests {
             ..view()
         };
         assert_eq!(blank_title.label(), TabLabel::Agent(CLIAgent::Claude));
+
+        let shell_title = TabView {
+            osc_title: Some("user@host:~/repo/tty7".into()),
+            agent: Some(CLIAgent::Claude),
+            ..view()
+        };
+        assert_eq!(
+            shell_title.label(),
+            TabLabel::Agent(CLIAgent::Claude),
+            "a shell location is not an agent task"
+        );
 
         let working = TabView {
             agent: Some(CLIAgent::Claude),

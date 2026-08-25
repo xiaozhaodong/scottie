@@ -1895,14 +1895,21 @@ impl DaemonPane {
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
                             st.ring.append(bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
-                            // The OSC in this same output batch may be the
-                            // agent's first semantic title. Establish the
-                            // foreground identity before parsing it so the
-                            // title is cached rather than merely mirrored raw.
-                            if let Some(agent) = agent {
-                                apply_agent(&mut st, agent);
+                            // A positive foreground probe establishes the
+                            // identity before parsing this batch's OSC/hook
+                            // signals, so a first task title is cached. A
+                            // negative one is just as authoritative but must
+                            // run *after* the hooks, or a stale event in the
+                            // same batch briefly resurrects the agent — read
+                            // which kind it is before the value is consumed.
+                            let agent_gone = matches!(&agent, Some(None));
+                            if let Some(Some(detected)) = agent {
+                                apply_agent(&mut st, Some(detected));
                             }
                             apply_signals(&mut st, signals);
+                            if agent_gone {
+                                apply_agent(&mut st, None);
+                            }
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
                             }
@@ -2620,10 +2627,11 @@ fn apply_agent_title(st: &mut PaneState) {
     let Some(parsed) = crate::core::agent_title::parse_agent_title(agent, session_id, raw) else {
         return;
     };
-    if st.agent_session.as_ref().is_some_and(|session| {
-        session.last_task_title.as_deref() == Some(parsed.title.as_str())
-            && session.explicit_task_title.is_none()
-    }) {
+    if st
+        .agent_session
+        .as_ref()
+        .is_some_and(|session| session.last_task_title.as_deref() == Some(parsed.title.as_str()))
+    {
         return;
     }
     let session = st
@@ -4519,6 +4527,15 @@ mod tests {
             Some("武汉明天天气查询"),
             "an agent returning to its own name must not erase the last task"
         );
+
+        apply_signals(&mut st, sniffer.feed(b"\x1b]2;user@host:\x07"));
+        assert_eq!(
+            st.agent_session
+                .as_ref()
+                .and_then(|session| session.last_task_title.as_deref()),
+            Some("武汉明天天气查询"),
+            "a shell host-only title must not become a cached task"
+        );
     }
 
     #[test]
@@ -4571,6 +4588,32 @@ mod tests {
             Some("fresh hook title")
         );
         assert_eq!(st.osc_title.as_deref(), Some("✳ stale osc title"));
+    }
+
+    #[test]
+    fn an_osc_title_matching_the_cached_hook_title_does_not_clear_explicit_state() {
+        use crate::core::cli_agent::{AgentSessionState, CLIAgent};
+
+        let mut st = test_state(true);
+        st.agent = Some(CLIAgent::Claude);
+        st.agent_session = Some(AgentSessionState {
+            last_task_title: Some("same task".into()),
+            explicit_task_title: Some("same task".into()),
+            ..Default::default()
+        });
+        let mut sniffer = OscSniffer::new();
+        let (tx, rx) = mpsc::channel();
+        st.subscriber = Some(tx);
+
+        apply_signals(&mut st, sniffer.feed(b"\x1b]2;same task\x07"));
+
+        let session = st.agent_session.as_ref().unwrap();
+        assert_eq!(session.last_task_title.as_deref(), Some("same task"));
+        assert_eq!(session.explicit_task_title.as_deref(), Some("same task"));
+        assert!(
+            rx.try_recv().is_err(),
+            "same semantic title must not notify"
+        );
     }
 
     #[test]

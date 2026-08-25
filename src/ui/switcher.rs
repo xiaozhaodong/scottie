@@ -2978,12 +2978,14 @@ fn tab_view_label(
     };
     match view.label_with_activity(show_activity_prefix) {
         crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
-        // Through `short_title` because the local strip puts its own titles
-        // through it too: the shell integration writes `user@host:~/dir`, and a
-        // tab that spelled that out in full where the strip says "…/dir" would
-        // be the same disagreement in a new place.
+        // OSC titles go through `short_title` because the local strip puts its
+        // own titles through it too: the shell integration writes
+        // `user@host:~/dir`, and a tab that spelled that out in full where the
+        // strip says "…/dir" would be the same disagreement in a new place.
         crate::ui::machine_mirror::TabLabel::Osc(title) => shortened(title),
-        crate::ui::machine_mirror::TabLabel::Task(title) => shortened(title.as_ref()),
+        crate::ui::machine_mirror::TabLabel::Task(title) => {
+            crate::ui::path_display::clamp_text(title.as_ref(), crate::core::tab_view::LABEL_MAX)
+        }
         crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
         crate::ui::machine_mirror::TabLabel::Cwd(cwd) => shortened(cwd),
         crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),

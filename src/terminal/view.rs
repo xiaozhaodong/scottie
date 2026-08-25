@@ -153,6 +153,9 @@ pub(crate) const DEFAULT_TITLE: &str = "Scottie";
 pub enum PaneName {
     /// What the program running in the pane called itself.
     Title(String),
+    /// A validated Agent task title. Unlike a terminal title, this is prose,
+    /// not a path, so callers must clamp it without path abbreviation.
+    Task(String),
     /// The agent working in it, for a pane that has not titled itself.
     Agent(String),
     /// The directory it sits in — nothing here named it, so its place has to.
@@ -160,9 +163,39 @@ pub enum PaneName {
 }
 
 impl PaneName {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Title(s) | Self::Task(s) | Self::Agent(s) | Self::Cwd(s) => s,
+        }
+    }
+
     pub fn into_text(self) -> String {
         match self {
-            Self::Title(s) | Self::Agent(s) | Self::Cwd(s) => s,
+            Self::Title(s) | Self::Task(s) | Self::Agent(s) | Self::Cwd(s) => s,
+        }
+    }
+
+    /// This name cut down to a label, by the rule its *rank* calls for.
+    ///
+    /// Here rather than at each surface because the rule is not the surface's
+    /// to pick: a task title is prose and loses its tail
+    /// ([`clamp_text`](crate::ui::path_display::clamp_text)), while everything
+    /// else may be a path and loses its head
+    /// ([`short_title`](crate::ui::path_display::short_title)). Three places
+    /// draw this — the strip, the pane header, the mirrored switcher — and one
+    /// of them choosing differently is exactly the disagreement `PaneName`
+    /// exists to prevent.
+    ///
+    /// Whatever draws the result still has to elide it the same way: from the
+    /// front for a path, from the end for prose.
+    pub fn label(&self, home: Option<&std::path::Path>) -> String {
+        match self {
+            Self::Task(title) => {
+                crate::ui::path_display::clamp_text(title, crate::core::tab_view::LABEL_MAX)
+            }
+            Self::Title(s) | Self::Agent(s) | Self::Cwd(s) => {
+                crate::ui::path_display::short_title(s, home)
+            }
         }
     }
 }
@@ -1493,7 +1526,7 @@ impl TerminalView {
                     .and_then(|state| state.last_task_title.as_deref()),
                 show_activity_prefix,
             ) {
-                return Some(PaneName::Title(title.into_owned()));
+                return Some(PaneName::Task(title.into_owned()));
             }
             return Some(PaneName::Agent(agent.display_name().to_string()));
         }
@@ -1518,9 +1551,14 @@ impl TerminalView {
             .show_agent_title_activity_prefix;
         self.display_source_with_activity(show_activity_prefix)
             .and_then(|source| {
-                let source = source.into_text();
-                let label = crate::ui::path_display::short_title(&source, home.as_deref());
-                (!label.trim().is_empty()).then_some(HeaderTitle { label, source })
+                let label = source.label(home.as_deref());
+                if label.trim().is_empty() {
+                    return None;
+                }
+                Some(HeaderTitle {
+                    label,
+                    source: source.into_text(),
+                })
             })
             .unwrap_or_else(|| HeaderTitle {
                 label: DEFAULT_TITLE.to_string(),
@@ -1551,7 +1589,7 @@ impl TerminalView {
         let title = match self.display_source() {
             Some(PaneName::Cwd(_)) => return true,
             Some(PaneName::Title(title)) => title,
-            Some(PaneName::Agent(_)) | None => return false,
+            Some(PaneName::Task(_)) | Some(PaneName::Agent(_)) | None => return false,
         };
         let Some(cwd) = self.cwd() else {
             return false;
@@ -9639,6 +9677,30 @@ mod gpui_tests {
             .update(cx, |view, _, _| view.title = "✳ fixing the switcher".into())
             .unwrap();
         assert_eq!(header(cx, &window), "fixing the switcher");
+    }
+
+    /// A task title is prose even when it is full of slashes, so the path
+    /// shortener never gets to it.
+    ///
+    /// `short_title` keeps a path's last three segments, which on a title like
+    /// this one throws away the verb — the only word saying what the agent is
+    /// *doing* — and keeps the file it is doing it to. A task title is cut from
+    /// the end instead, and only to fit.
+    #[gpui::test]
+    fn a_task_title_full_of_slashes_is_still_prose(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+
+        let (window, mut daemon) = harness(cx);
+        seed_agent(cx, &window, &mut daemon, CLIAgent::Claude);
+        window
+            .update(cx, |view, _, _| {
+                view.title = "refactor crates/tty7-core/src/core/config.rs".into()
+            })
+            .unwrap();
+        assert_eq!(
+            header(cx, &window),
+            "refactor crates/tty7-core/src/core/conf…"
+        );
     }
 
     #[gpui::test]
