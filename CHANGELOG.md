@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.8.6] - 2026-08-26
+
 ### Added
 
 - **Agent tabs keep their last meaningful task title.** Claude Code activity
@@ -160,6 +162,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the pane too (`tty7 send %5 83 --enter`) (#538).
 
 ### Fixed
+
+- **A tab restored after a daemon restart keeps its name** (#725). A tab's
+  title exists only as live terminal state, and the OSC that set it was usually
+  emitted screens ago — well outside the 256 KiB the snapshot is capped at — so
+  replaying the segments brought the screen back under the default `tty7`. The
+  pane's last OSC title now travels beside those segments as a trailing field
+  that old readers skip and old files simply lack, replayed as a
+  BEL-terminated OSC 0 ahead of the restore preamble with control bytes
+  stripped, so a stored title cannot end the sequence early and leak the rest
+  into the terminal as input. The new pane's daemon record inherits the title
+  too, so the switcher and the CLI agree on it.
+
+- **An emoji wider than its cell is given room instead of being shaved flat**
+  (#707). A segment could borrow the cell after it whenever that cell was blank
+  with no background and no selection. A blank carrying an underline, a
+  strikethrough or a link hover is none of those, yet it becomes a run of its
+  own painted after the segment beside it — so an emoji leaning into it had
+  that stroke drawn straight across its face. The loan now reuses the
+  `draws_on_blanks` predicate `segment_row` already uses to decide such a blank
+  is worth painting at all.
 
 - **In-app updates work again on macOS** (#708). Every "Update and Relaunch"
   failed with `codesign did not report a designated requirement`, on every
@@ -4162,6 +4184,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.8.6]: https://github.com/xiaozhaodong/scottie/compare/v26.8.5...v26.8.6
 [26.8.3]: https://github.com/l0ng-ai/tty7/compare/v26.8.2...v26.8.3
 [26.8.2]: https://github.com/l0ng-ai/tty7/compare/v26.8.1...v26.8.2
 [26.8.1]: https://github.com/l0ng-ai/tty7/compare/v26.8.0...v26.8.1
