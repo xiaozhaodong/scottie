@@ -9190,6 +9190,8 @@ mod gpui_tests {
             rich: true,
             cwd: None,
             activity: 0,
+            last_task_title: None,
+            explicit_task_title: None,
         }))
         .encode(daemon)
         .unwrap();
