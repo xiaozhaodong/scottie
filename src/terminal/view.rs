@@ -37,6 +37,31 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 const GRID_PAD_X: f32 = 8.;
 const GRID_PAD_Y: f32 = 4.;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputCaretPaint {
+    Outline,
+    Bar,
+    Block,
+    Underline,
+}
+
+fn input_caret_paint(
+    focused: bool,
+    blink_on: bool,
+    style: crate::core::config::CursorStyle,
+) -> Option<InputCaretPaint> {
+    use crate::core::config::CursorStyle;
+
+    if !focused {
+        return Some(InputCaretPaint::Outline);
+    }
+    blink_on.then_some(match style {
+        CursorStyle::Bar => InputCaretPaint::Bar,
+        CursorStyle::Block => InputCaretPaint::Block,
+        CursorStyle::Underline => InputCaretPaint::Underline,
+    })
+}
+
 /// Which panes are on screen right now, readable without touching the entity
 /// map. The chrome (tab strip, sidebar, switcher) reads every pane entity
 /// while the window draws, so gpui tracks them all and `notify()` from a
@@ -308,8 +333,21 @@ pub struct TerminalView {
     /// What the pane is called before anything running in it says otherwise —
     /// and what it goes back to when the program resets the title or the
     /// session ends. "Scottie" for a local shell; for an SSH pane it is the host
-    /// it dialled, so a window full of them is still readable (#438).
+    /// it dialled, so a window full of them is still readable (#438); for a
+    /// workspace pane it is the workspace's name, set in `set_workspace`.
     pub(super) default_title: String,
+    /// The link supervisor asked this pane's machine for a relink and was
+    /// refused — the pane is gone at the far end, and asking again can only
+    /// repeat the answer. Cleared when a relink is adopted anyway (the manual
+    /// reconnect path), which is the one thing that changes the question.
+    relink_abandoned: bool,
+    /// A relink for this pane is already on the wire. Both askers set it —
+    /// the machine-level reconnect and the pump's own sweep — because the
+    /// daemon keeps exactly one subscriber per pane and a second `Attach`
+    /// kicks the first. Without this the pump would join a dial still in
+    /// flight every 250 ms, and a dial can sit for fifteen seconds waiting
+    /// for the far end's verdict.
+    relink_inflight: bool,
     pub marked_text: String,
     last_mouse_cell: Option<(usize, usize)>,
     last_hover_cell: Option<(usize, usize)>,
@@ -341,7 +379,6 @@ pub struct TerminalView {
     pub(super) scroll_handle: TerminalScrollHandle,
     pub search: Option<SearchState>,
     pub cursor_visible: bool,
-    pub focused: bool,
     pub(super) search_focused: bool,
     pub(super) search_case_sensitive: bool,
     pub(super) search_regex: bool,
@@ -1218,7 +1255,6 @@ impl TerminalView {
 
         let focus_subs = vec![
             cx.on_focus_in(&focus_handle, window, |view, _window, cx| {
-                view.focused = true;
                 view.cursor_visible = true;
                 if view.keep_unread_on_focus {
                     view.keep_unread_on_focus = false;
@@ -1229,7 +1265,6 @@ impl TerminalView {
                 cx.notify();
             }),
             cx.on_blur(&focus_handle, window, |view, _window, cx| {
-                view.focused = false;
                 view.report_focus_change(false);
                 cx.notify();
             }),
@@ -1241,8 +1276,14 @@ impl TerminalView {
                     .timer(std::time::Duration::from_millis(530))
                     .await;
                 if this
-                    .update(cx, |view, cx| {
-                        if view.focused {
+                    .update_in(cx, |view, window, cx| {
+                        // A pane can be focused once while it is being built, before
+                        // its leaf is attached to the window. Moving focus away in
+                        // that interval does not deliver the leaf a blur callback,
+                        // so no flag a callback maintains can be trusted to say
+                        // which pane the reader is on. The window's handle is
+                        // authoritative here, just as it is in the paint path.
+                        if view.focus_handle.is_focused(window) {
                             if cx.global::<Config>().cursor_blink {
                                 view.cursor_visible = !view.cursor_visible;
                                 cx.notify();
@@ -1335,6 +1376,8 @@ impl TerminalView {
             title: DEFAULT_TITLE.to_string(),
             pending_title: None,
             default_title: DEFAULT_TITLE.to_string(),
+            relink_abandoned: false,
+            relink_inflight: false,
             marked_text: String::new(),
             last_mouse_cell: None,
             report_mouse,
@@ -1350,7 +1393,6 @@ impl TerminalView {
             scroll_handle: TerminalScrollHandle::default(),
             search: None,
             cursor_visible: true,
-            focused: true,
             dim: 1.,
             search_focused: false,
             search_case_sensitive: false,
@@ -1659,6 +1701,15 @@ impl TerminalView {
         self.host_id = workspace
             .as_ref()
             .map_or(crate::ui::host_ops::HostId::LOCAL, |w| w.target.host_id());
+        // The pane answers to its workspace's name from here on: untitled tabs
+        // show it, and a dead link's "— disconnected" suffix hangs off it
+        // instead of the bare app name.
+        if let Some(label) = workspace.as_ref().and_then(|w| w.label.clone()) {
+            if self.title == self.default_title {
+                self.title = label.clone();
+            }
+            self.default_title = label;
+        }
         self.workspace = workspace;
     }
 
@@ -1685,6 +1736,7 @@ impl TerminalView {
     pub fn adopt_relink(
         &mut self,
         stream: crate::daemon::transport::Stream,
+        buffered: Vec<u8>,
         route: &crate::terminal::PaneRoute,
         size: TermSize,
         cell_w: u16,
@@ -1692,7 +1744,9 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
         self.terminal
-            .adopt_relink(stream, route, size, cell_w, cell_h)?;
+            .adopt_relink(stream, buffered, route, size, cell_w, cell_h)?;
+        self.relink_abandoned = false;
+        self.relink_inflight = false;
         self.title = self.default_title.clone();
         cx.notify();
         Ok(())
@@ -1896,6 +1950,40 @@ impl TerminalView {
 
     pub fn ssh_disconnected(&self) -> bool {
         self.ssh_spec.is_some() && self.terminal.exited
+    }
+
+    /// Whether this pane is a workspace pane whose link died under it — the
+    /// far-end session should still be alive, so the link supervisor keeps
+    /// asking for it back. A child that exited is over, not disconnected, and
+    /// a pane whose machine already refused the relink is past asking.
+    pub fn wants_relink(&self) -> bool {
+        self.workspace.is_some()
+            && self.terminal.exited
+            && !self.terminal.child_exited()
+            && !self.relink_abandoned
+            && !self.relink_inflight
+    }
+
+    /// Claims this pane for one relink attempt. Every path that dials for a
+    /// pane calls this first, so the other paths leave it alone until the
+    /// attempt reports back through `relink_settled` or `adopt_relink`.
+    pub fn mark_relinking(&mut self) {
+        self.relink_inflight = true;
+    }
+
+    /// Releases the claim `mark_relinking` took, for the attempts that end
+    /// without a stream to adopt. A pane freed this way is up for asking
+    /// again on the next sweep.
+    pub fn relink_settled(&mut self) {
+        self.relink_inflight = false;
+    }
+
+    /// Records that this pane's machine refused to give the pane back — it is
+    /// gone at the far end — so the link supervisor stops asking. The pane
+    /// keeps its disconnected face; only the retrying stops.
+    pub fn abandon_relink(&mut self) {
+        self.relink_abandoned = true;
+        self.relink_inflight = false;
     }
 
     /// Takes a title the program set, and gives it to the tab only once it has
@@ -3426,7 +3514,7 @@ impl TerminalView {
             _ => {}
         }
 
-        let turn_finished = self.poll_agent_status(notify_allowed, cx);
+        let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
 
         let session = self.terminal.agent_session();
         let tool_activity = match session.as_ref().map(|s| s.activity) {
@@ -3636,7 +3724,12 @@ impl TerminalView {
         );
     }
 
-    fn poll_agent_status(&mut self, notify_allowed: bool, cx: &mut Context<Self>) -> bool {
+    fn poll_agent_status(
+        &mut self,
+        notify_allowed: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         use crate::core::cli_agent::AgentStatus;
 
         let session = self.terminal.agent_session();
@@ -3665,7 +3758,13 @@ impl TerminalView {
 
         match status {
             Some(AgentStatus::Done) if prev != Some(AgentStatus::Done) => {
-                self.agent_result_unread = !self.focused;
+                // Whether the reader saw the result is a question about the
+                // window's live focus, not about the last focus callback this
+                // pane happened to receive. A pane focused while it was being
+                // built, before its leaf was attached, never gets the blur that
+                // would clear `self.focused` — trusting the cached flag there
+                // drops the badge on the one pane the reader is not looking at.
+                self.agent_result_unread = !self.focus_handle.is_focused(window);
                 self.keep_unread_on_focus = false;
             }
             Some(AgentStatus::Done) => {}
@@ -3912,7 +4011,7 @@ impl TerminalView {
         !self.prompt_editor || self.shell_vi_prompt() || self.handoff_active()
     }
 
-    fn on_alt_screen(&self) -> bool {
+    pub(crate) fn on_alt_screen(&self) -> bool {
         self.terminal
             .term
             .lock()
@@ -5701,7 +5800,7 @@ impl TerminalView {
         );
     }
 
-    fn render_input_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_input_bar(&self, focused: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let (crow, ccol) = self.cursor_cell().unwrap_or((0, 0));
         let cx_left = px(GRID_PAD_X) + self.cell_width * (ccol as f32);
         let shift = self.input_scroll_rows();
@@ -5765,22 +5864,30 @@ impl TerminalView {
             }
         }
 
-        let cursor_on = self.cursor_visible;
         let cursor_style = cx.global::<Config>().cursor_style;
-        let block_cursor = cursor_style == crate::core::config::CursorStyle::Block;
+        let cursor_paint = input_caret_paint(focused, self.cursor_visible, cursor_style);
+        let cursor_on = cursor_paint.is_some();
+        let block_cursor = cursor_paint == Some(InputCaretPaint::Block);
         // A block caret is drawn as reverse video on the cell it covers, not as
         // a translucent tint over it — the way every other terminal draws one,
         // and the only way the caret keeps the contrast the theme gave it.
         let caret_ink = crate::ui::presets::caret_ink(caret_col, theme.background, fg);
         let caret_bar = move || {
-            use crate::core::config::CursorStyle;
-            let base = div().absolute().left_0().bg(caret_col);
-            match cursor_style {
-                CursorStyle::Bar => base.top(caret_top).w(px(1.5)).h(caret_h),
-                CursorStyle::Block => base.top(px(0.)).w_full().h(lh),
-                CursorStyle::Underline => {
+            let base = div().absolute().left_0();
+            match cursor_paint.expect("caret is only rendered when it has a paint style") {
+                // An inactive terminal keeps a steady hollow block, independent
+                // of the configured focused-caret shape and current blink phase.
+                InputCaretPaint::Outline => base
+                    .top(px(0.))
+                    .w_full()
+                    .h(lh)
+                    .border_1()
+                    .border_color(caret_col),
+                InputCaretPaint::Block => base.top(px(0.)).w_full().h(lh).bg(caret_col),
+                InputCaretPaint::Bar => base.top(caret_top).w(px(1.5)).h(caret_h).bg(caret_col),
+                InputCaretPaint::Underline => {
                     let uh = px(2.);
-                    base.top(lh - uh).w_full().h(uh)
+                    base.top(lh - uh).w_full().h(uh).bg(caret_col)
                 }
             }
         };
@@ -6328,7 +6435,10 @@ impl Render for TerminalView {
             .as_ref()
             .map(|s| self.render_search_bar(s, window, cx));
 
-        let input_bar = self.input_active().then(|| self.render_input_bar(cx));
+        let focused = self.focus_handle.is_focused(window);
+        let input_bar = self
+            .input_active()
+            .then(|| self.render_input_bar(focused, cx));
         let completion_menu = self
             .input_active()
             .then(|| self.render_completion_menu(cx))
@@ -7210,6 +7320,41 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 mod tests {
 
     #[test]
+    fn an_unfocused_input_caret_is_always_a_steady_outline() {
+        use super::{InputCaretPaint, input_caret_paint};
+        use crate::core::config::CursorStyle;
+
+        for blink_on in [false, true] {
+            for style in [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline] {
+                assert_eq!(
+                    input_caret_paint(false, blink_on, style),
+                    Some(InputCaretPaint::Outline),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_focused_input_caret_keeps_its_configured_shape_and_blink_phase() {
+        use super::{InputCaretPaint, input_caret_paint};
+        use crate::core::config::CursorStyle;
+
+        assert_eq!(input_caret_paint(true, false, CursorStyle::Block), None);
+        assert_eq!(
+            input_caret_paint(true, true, CursorStyle::Bar),
+            Some(InputCaretPaint::Bar),
+        );
+        assert_eq!(
+            input_caret_paint(true, true, CursorStyle::Block),
+            Some(InputCaretPaint::Block),
+        );
+        assert_eq!(
+            input_caret_paint(true, true, CursorStyle::Underline),
+            Some(InputCaretPaint::Underline),
+        );
+    }
+
+    #[test]
     fn a_busy_command_name_undoes_the_shell_escaping() {
         use super::unescape_mark_text;
         // The integration escapes % and the four bytes that would break OSC
@@ -7438,6 +7583,7 @@ mod tests {
                     .unwrap(),
                 )
             }),
+            label: None,
             resize_echo: false,
         }
     }
@@ -8737,6 +8883,7 @@ mod tests {
             workspace: WorkspaceId::new(),
             target: target.clone(),
             spec: None,
+            label: None,
             resize_echo: false,
         };
 
@@ -8753,21 +8900,31 @@ mod tests {
             workspace: WorkspaceId::new(),
             target,
             spec: None,
+            label: None,
             resize_echo: false,
         };
         assert_eq!(sibling.target.host_id(), remote);
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn quiet_test_pane(
     pane_id: u64,
     window: &mut Window,
     cx: &mut gpui::App,
-) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    #[cfg(unix)]
     let (client_side, daemon_side) = std::os::unix::net::UnixStream::pair().unwrap();
+    #[cfg(windows)]
+    let (client_side, daemon_side) = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_side = std::net::TcpStream::connect(addr).unwrap();
+        let (daemon_side, _) = listener.accept().unwrap();
+        (client_side, daemon_side)
+    };
     let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
-        .expect("socketpair-backed terminal");
+        .expect("quiet test terminal");
     let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
     (view, daemon_side)
 }
@@ -8992,7 +9149,9 @@ mod gpui_tests {
         }
 
         window
-            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .update(cx, |view, window, cx| {
+                view.poll_agent_status(false, window, cx)
+            })
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -9002,7 +9161,9 @@ mod gpui_tests {
         );
 
         window
-            .update(cx, |view, _, cx| view.poll_agent_status(false, cx))
+            .update(cx, |view, window, cx| {
+                view.poll_agent_status(false, window, cx)
+            })
             .unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -9010,6 +9171,109 @@ mod gpui_tests {
             1,
             "an unchanged session must not re-save on every poll"
         );
+    }
+
+    /// Report a session in `status` on `daemon` and wait for `pane` to see it.
+    fn report_agent_status(
+        status: crate::core::cli_agent::AgentStatus,
+        pane: &gpui::Entity<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut UnixStream,
+    ) {
+        use crate::core::cli_agent::AgentSessionState;
+
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            message: None,
+            session_id: Some("sid-abc".into()),
+            launch_argv: Some(vec!["claude".into()]),
+            rich: true,
+            cwd: None,
+            activity: 0,
+        }))
+        .encode(daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if cx.update(|cx| pane.read(cx).terminal.agent_session().map(|s| s.status))
+                == Some(status)
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the agent status never reached the pane");
+    }
+
+    /// The badge answers "did the reader see this?", so it has to read the
+    /// window's live focus rather than anything a focus callback left behind.
+    ///
+    /// A second pane built into the same window is the case that goes wrong:
+    /// it holds no focus and was never told it lost any, so a flag a callback
+    /// maintains says whatever it was born saying — and the badge lands on
+    /// exactly the pane nobody is looking at.
+    #[gpui::test]
+    fn a_finished_turn_on_an_unfocused_pane_is_unread(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let (pane, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(2, window, cx))
+            .unwrap();
+        // Building a pane takes the window's focus (`with_terminal`), and the
+        // reader's next click hands it back. The new pane is not in the element
+        // tree, so nothing delivers it the blur that goes with losing it.
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    !pane.read(cx).focus_handle.is_focused(window),
+                    "the focus went back to the pane the reader is on"
+                );
+            })
+            .unwrap();
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(pane.agent_result_unread(), "nobody was looking at the pane");
+                });
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_finished_turn_on_the_focused_pane_is_already_read(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        let pane = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(view.focus_handle.is_focused(window));
+                view.poll_agent_status(false, window, cx);
+                assert!(
+                    !view.agent_result_unread(),
+                    "the reader watched the turn finish"
+                );
+            })
+            .unwrap();
     }
 
     /// An agent that moves into a git worktree does not `chdir` — the process
@@ -12075,6 +12339,7 @@ mod gpui_tests {
                 )
                 .unwrap(),
             )),
+            label: None,
             resize_echo: false,
         }));
         id
@@ -12313,6 +12578,71 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// A workspace pane answers to its workspace's name: untitled tabs show
+    /// it, and a dead link's suffix hangs off it — not off the bare app name,
+    /// which read "tty7 — disconnected" no matter whose link died.
+    #[gpui::test]
+    fn a_workspace_pane_answers_to_its_workspaces_name(cx: &mut TestAppContext) {
+        use crate::core::session::{RemoteTarget, WorkspaceId};
+        use crate::terminal::PaneWorkspace;
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.set_workspace(Some(PaneWorkspace {
+                    workspace: WorkspaceId::new(),
+                    target: RemoteTarget::direct("me", "build-box", 22),
+                    spec: None,
+                    label: Some("hummingbot".into()),
+                    resize_echo: false,
+                }));
+                assert_eq!(view.title, "hummingbot", "an untitled tab shows the name");
+                view.handle_event(AlacEvent::Exit, cx);
+                assert_eq!(view.title, "hummingbot — disconnected");
+            })
+            .unwrap();
+    }
+
+    /// What the link supervisor's relink sweep keys off: a workspace pane
+    /// whose link died asks to come back, until its machine refuses.
+    #[gpui::test]
+    fn only_a_dead_workspace_pane_wants_a_relink(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                assert!(!view.wants_relink(), "a live pane asks for nothing");
+                view.handle_event(AlacEvent::Exit, cx);
+                assert!(view.wants_relink());
+                view.abandon_relink();
+                assert!(!view.wants_relink(), "a refusal is final");
+            })
+            .unwrap();
+    }
+
+    /// The daemon keeps one subscriber per pane, so a second `Attach` for a
+    /// pane already being dialled for kicks the first off. A pane claimed for
+    /// an attempt therefore asks for nothing until that attempt reports back —
+    /// otherwise the pump, which sweeps every 250 ms, would join a dial that
+    /// can sit fifteen seconds waiting for the far end's verdict.
+    #[gpui::test]
+    fn a_pane_already_being_dialled_for_asks_for_nothing(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                view.handle_event(AlacEvent::Exit, cx);
+                assert!(view.wants_relink());
+                view.mark_relinking();
+                assert!(!view.wants_relink(), "the attempt on the wire owns it");
+                view.relink_settled();
+                assert!(
+                    view.wants_relink(),
+                    "an attempt that came back wrong frees it"
+                );
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn an_exited_local_pane_still_swallows_every_key(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
@@ -12389,6 +12719,7 @@ mod gpui_tests {
             .update(cx, |view, _, cx| {
                 view.adopt_relink(
                     new_client,
+                    Vec::new(),
                     &crate::terminal::PaneRoute::Local,
                     TermSize::new(100, 30),
                     8,

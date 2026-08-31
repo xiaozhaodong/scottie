@@ -774,6 +774,8 @@ l10n_keys! {
     PanelMoreChangedFiles,
     PanelSessionSubtitle,
     PanelConversationSubtitle,
+    PanelTurnAltScreenNow,
+    PanelTurnNoScrollback,
     PanelProcessesSubtitle,
     PanelPortsSubtitle,
     PanelCwd,

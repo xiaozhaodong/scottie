@@ -445,6 +445,13 @@ impl Tty7App {
                                         MouseButton::Left,
                                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                                             cx.stop_propagation();
+                                            // Swallowing the press also swallows the
+                                            // row's click, the only thing that
+                                            // activates a tab — so this row has to
+                                            // activate itself, or the overlay lands
+                                            // in whichever tab was already on
+                                            // screen, carrying this row's repo (#706).
+                                            this.activate(i, window, cx);
                                             this.toggle_diff_overlay(host, cwd.clone(), window, cx);
                                         }),
                                     )

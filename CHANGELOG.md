@@ -163,6 +163,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A conversation row no longer offers a jump the pane cannot make.** Clicking
+  one under a full-screen agent did nothing at all: no scroll, no message,
+  nothing. The row had an anchor, so the panel drew it as a link — pointer,
+  hover fill and all — while the view refused the jump, because a pane on the
+  alternate screen has no scrollback to land in. Switching Claude Code into
+  `/tui fullscreen` mid-session is enough to produce it: the turns recorded
+  under the classic renderer keep their anchors, and every one of them goes
+  quiet at once. The two conditions now live in one predicate both sides read,
+  and a row that goes nowhere says why on hover rather than leaving grey text
+  to carry a meaning grey does not have. Jumping is still off while an agent
+  renders full-screen — there is genuinely nothing behind it — but the panel no
+  longer pretends otherwise.
+
 - **A tab restored after a daemon restart keeps its name** (#725). A tab's
   title exists only as live terminal state, and the OSC that set it was usually
   emitted screens ago — well outside the 256 KiB the snapshot is capped at — so

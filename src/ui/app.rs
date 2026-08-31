@@ -1617,6 +1617,14 @@ impl Tty7App {
         let claimed = WorkspaceStore::claim(cx, id);
         crate::ui::windows::WindowRegistry::rebind(cx, previous, claimed);
         crate::ui::remote_workspace::RemoteLinks::supervise(cx, claimed);
+        // Forgotten on the way in as well as on the way out. `adopt_workspace`
+        // puts the empty session up before the pull below orders the real one,
+        // and it saves what it put up: a window showing nothing, syncing
+        // against whatever this workspace was left Primed and informed with
+        // the last time it was visited, which is a Full diff that closes every
+        // tab on the machine (#716). Arriving speaks for nothing until a pull
+        // says otherwise.
+        crate::ui::tree_sync::forget(cx, claimed);
         self.adopt_workspace(claimed, Session::default(), window, cx);
         // This method runs under the app's own update lease, so the tabs the
         // pull must see are the ones just adopted here — reading the app back
@@ -9576,6 +9584,61 @@ pub(crate) mod test_window {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_blink_gpui_tests {
+    use super::test_window::harness;
+    use crate::core::config::Config;
+    use crate::terminal::view::quiet_test_pane;
+    use crate::ui::pane::{Pane, PaneSlot};
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn only_the_focused_pane_advances_its_blink_phase(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.cursor_blink = true;
+            cx.set_global(cfg);
+        });
+
+        let (left, right, _streams) = app.update_in(&mut vcx, |app, window, cx| {
+            let (left, left_stream) = quiet_test_pane(1, window, cx);
+            let (right, right_stream) = quiet_test_pane(2, window, cx);
+            app.tabs.push(super::Tab::new(Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(PaneSlot::Ready(left.clone())),
+                Pane::leaf(PaneSlot::Ready(right.clone())),
+            )));
+            app.active = 0;
+            let left_focus = left.read(cx).focus_handle.clone();
+            left_focus.focus(window, cx);
+            cx.notify();
+            (left, right, (left_stream, right_stream))
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |_, window, cx| {
+            assert!(left.read(cx).focus_handle.is_focused(window));
+            assert!(!right.read(cx).focus_handle.is_focused(window));
+            assert!(left.read(cx).cursor_visible);
+            assert!(right.read(cx).cursor_visible);
+        });
+
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(530));
+        vcx.background_executor.run_until_parked();
+
+        app.update(&mut vcx, |_, cx| {
+            assert!(!left.read(cx).cursor_visible, "the focused cursor blinks");
+            assert!(
+                right.read(cx).cursor_visible,
+                "the unfocused cursor must keep a steady phase"
+            );
+        });
     }
 }
 
