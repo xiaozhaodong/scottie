@@ -27,6 +27,12 @@ around it — which is what makes a path a build tool printed from the workspace
 root resolve while the shell sits in a member directory. A path that matches
 nothing under either says so rather than doing nothing.
 
+A path does not have to stand on its own to be found. A prefix glued to its
+front is looked past — a flag (`--config=/etc/app.conf`), a shell assignment,
+or a command echoed inside a call the line ends before closing, which is what a
+coding agent prints on every tool call. The word as written is still tried
+first, because `=` and `(` are legal in a filename.
+
 Paths in a pane connected to another machine are resolved *on that machine*,
 so the underline appears a moment after the pointer settles rather than
 instantly. A pane running `ssh` typed into a local shell has no host that can

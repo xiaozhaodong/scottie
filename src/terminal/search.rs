@@ -939,17 +939,22 @@ fn is_path_shaped(token: &str) -> bool {
 
 /// Every reading of the token under `col`, most conservative first.
 ///
-/// A token with no CJK in it yields exactly one, off a single scan: the three
-/// edge sets agree character for character on such a token, so the ordinary
-/// hover neither probes twice nor tokenises the line three times. Only a token
-/// that mixes prose with a path produces more, and there the order is what
-/// decides the answer — [`TokenEdge::CjkPunct`] comes first because it keeps
-/// `docs/设计文档.md` whole, and [`TokenEdge::Cjk`] follows to rescue the lines
-/// where nothing but a han character separates the prose from the path.
+/// Two things widen a token into several readings. Where it *ends* is a
+/// question only on a CJK line, because prose written with no spaces in it
+/// leaves the path nothing to stop at — [`TokenEdge::CjkPunct`] comes first
+/// because it keeps `docs/设计文档.md` whole, and [`TokenEdge::Cjk`] follows to
+/// rescue the lines where nothing but a han character separates the prose from
+/// the path. Where it *starts* is a question on any line, and
+/// [`push_readings`] answers it.
+///
+/// A token with no CJK in it is tokenised once rather than three times: the
+/// three edge sets agree character for character on such a token, so the other
+/// two scans can only repeat the first.
 pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
     let Some((start, end, widest)) = token_at(text, col, TokenEdge::Whitespace) else {
         return Vec::new();
     };
+    let mut out: Vec<FileCandidate> = Vec::new();
     // The fast path, and the one nearly every hover takes: a token with no CJK
     // character anywhere in it reads the same under all three edge sets, so
     // the other two scans can only repeat this one. The CJK arms of
@@ -957,20 +962,78 @@ pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
     // half-width rule needs CJK on the far side of the mark — which, at this
     // token's own edges, is the whitespace that ended it.
     if !widest.chars().any(super::smart_select::is_cjk) {
-        return file_candidate_from(start, end, widest, col)
-            .into_iter()
-            .collect();
+        push_readings(&mut out, start, end, &widest, col);
+        return out;
     }
 
-    let mut out: Vec<FileCandidate> = Vec::new();
     for edge in [TokenEdge::CjkPunct, TokenEdge::Cjk] {
         let Some((start, end, token)) = token_at(text, col, edge) else {
             continue;
         };
-        push_candidate(&mut out, file_candidate_from(start, end, token, col));
+        push_readings(&mut out, start, end, &token, col);
     }
-    push_candidate(&mut out, file_candidate_from(start, end, widest, col));
+    push_readings(&mut out, start, end, &widest, col);
     out
+}
+
+/// The token as it stands, then the same token read again from after each
+/// prefix something glued onto the path.
+///
+/// The whole token goes first and the anchored readings are the fallback,
+/// because `=`, `(` and the rest of [`is_prefix_boundary`] are all legal in a
+/// Unix filename: a file really called `my=notes.txt` has to answer for itself
+/// before anything reads it as an assignment. An anchored reading that lands
+/// on a span already here costs nothing — an emitter that closed the call it
+/// opened has been unwrapped by [`trim_file_token`] already, and
+/// [`push_candidate`] drops the duplicate.
+fn push_readings(out: &mut Vec<FileCandidate>, start: usize, end: usize, token: &str, col: usize) {
+    push_candidate(out, file_candidate_from(start, end, token.to_string(), col));
+    for (offset, rest) in prefix_anchors(token) {
+        let start = start + token[..offset].chars().count();
+        push_candidate(out, file_candidate_from(start, end, rest.to_string(), col));
+    }
+}
+
+/// Where inside `token` a path starts over, as a byte offset and the rest of
+/// the token from there.
+///
+/// [`trim_file_token`] walks wrappers off the *front*, which is enough for
+/// `(src/main.rs)` and useless for `Bash(D=/tmp/x.md`: the shell assignment
+/// and the call that never closes on this line each leave a *name* in front of
+/// the path, and no amount of front-trimming reaches past a name. A coding
+/// agent echoing the command it is about to run prints exactly that shape, on
+/// every tool call it makes.
+///
+/// Two things hold the readings down to the ones worth a probe. The rest has
+/// to be path-shaped, which is what keeps `foo(bar)` and `src/foo(bar.txt` —
+/// filenames that are legally called that — from being quietly re-read as
+/// `bar`. And an anchor whose rest opens at another boundary is skipped, so
+/// `Bash(D=/tmp/x` yields the one reading that matters rather than one per
+/// boundary crossed.
+fn prefix_anchors(token: &str) -> impl Iterator<Item = (usize, &str)> {
+    token.char_indices().filter_map(move |(i, c)| {
+        if !is_prefix_boundary(c) {
+            return None;
+        }
+        let offset = i + c.len_utf8();
+        let rest = &token[offset..];
+        let starts_over = rest.chars().next().is_some_and(|c| !is_prefix_boundary(c));
+        (starts_over && is_path_shaped(rest)).then_some((offset, rest))
+    })
+}
+
+/// The characters that glue a prefix onto a path rather than standing inside
+/// one: a shell assignment (`D=/tmp/x`), a flag (`--config=/etc/app.conf`), a
+/// wrapper the emitter opens and does not close on this line (`Bash(/tmp/x`),
+/// and the marks a list of paths is separated with.
+///
+/// Two neighbours are deliberately absent. `|` and `&&` are followed by a
+/// *command*, not by a path, so an anchor there buys nothing and costs a probe.
+/// And `@` would read `user@host:/tmp/x` — a path on another machine — out of
+/// this filesystem, which is how a click opens somebody else's file; the same
+/// judgement [`home_dir`] makes about `~`.
+fn is_prefix_boundary(c: char) -> bool {
+    matches!(c, '=' | '(' | '[' | '{' | '<' | ',' | ';' | '`')
 }
 
 /// Adds a reading unless one covering the same span is already there.
@@ -2035,6 +2098,107 @@ mod tests {
         }
     }
 
+    /// The shape a coding agent prints on every tool call: the command it is
+    /// about to run, echoed inside a call that opens on this line and closes
+    /// on the next. Neither prefix is a wrapper — `Bash` and `D` are names —
+    /// so the front-trim in [`trim_file_token`] cannot reach past them, and
+    /// the call-wrapper rule wants a `)` this line does not have. The token
+    /// stayed `Bash(D=/…/plan.md`, read as a *relative* path and therefore
+    /// looked for under the pane's own directory, where it can never be.
+    #[test]
+    fn a_path_is_reached_past_a_prefix_that_is_not_a_wrapper() {
+        let path = temp_file("2026-09-01-plan.md");
+        let shown = path.display().to_string();
+        let prefix = "⏺ Bash(D=";
+        let line = format!("{prefix}{shown}");
+        let start = prefix.chars().count();
+
+        let link = local_link_at(&line, start + 2, &one_root(Path::new("/")), true)
+            .expect("the path the assignment names");
+        assert_eq!(
+            (link.start, link.end),
+            (start, line.chars().count() - 1),
+            "the underline has to cover the path alone — the call and the \
+             variable in front of it are not part of the link"
+        );
+        match link.target {
+            LinkTarget::File {
+                path: got,
+                line,
+                column,
+                is_dir,
+            } => {
+                assert_eq!(got, path);
+                assert_eq!(line, None);
+                assert_eq!(column, None);
+                assert!(!is_dir);
+            }
+            LinkTarget::Url(url) => panic!("expected file link, got URL {url}"),
+        }
+    }
+
+    /// The prefixes a path arrives glued to. Each is a name rather than a
+    /// wrapper character, so none of them can be walked off the front, and
+    /// each one used to swallow the path whole.
+    #[test]
+    fn a_prefix_glued_onto_a_path_does_not_hide_it() {
+        for (line, col, want) in [
+            ("⏺ Bash(D=/tmp/plan.md", 12, "/tmp/plan.md"),
+            // The call alone, with no assignment inside it.
+            ("⏺ Bash(/tmp/run.sh", 10, "/tmp/run.sh"),
+            ("cargo --config=/etc/app.conf", 18, "/etc/app.conf"),
+            ("PATH=~/bin", 6, "~/bin"),
+            // Relative too: the roots are what a reading like this is measured
+            // from, exactly as for a bare token.
+            ("build --out=dist/app.js", 14, "dist/app.js"),
+            ("touched a.txt,docs/b.md", 16, "docs/b.md"),
+        ] {
+            let readings: Vec<String> = file_candidates_at(line, col)
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect();
+            assert!(
+                readings.iter().any(|path| path == want),
+                "{line} names {want} however the prefix in front of it is \
+                 written; got {readings:?}"
+            );
+        }
+    }
+
+    /// An anchored reading is a fallback, never a replacement. Every character
+    /// in [`is_prefix_boundary`] is legal in a Unix filename, so the token as
+    /// written has to be the first thing probed — otherwise a file that really
+    /// is called `a=b/c.txt` gets silently re-read as `b/c.txt`, which is how
+    /// a click opens a different file rather than none.
+    #[test]
+    fn the_token_as_written_is_probed_before_any_anchored_reading() {
+        for (line, col, whole) in [
+            ("ls a=b/c.txt", 3, "a=b/c.txt"),
+            ("ls src/foo(bar.txt", 4, "src/foo(bar.txt"),
+            ("ls docs/a,b/c.md", 4, "docs/a,b/c.md"),
+        ] {
+            assert_eq!(
+                file_candidates_at(line, col)
+                    .first()
+                    .expect("a reading")
+                    .path,
+                whole,
+                "{line} has to answer for itself before anything reads part of \
+                 it as a prefix"
+            );
+        }
+
+        // Nothing path-shaped stands after the boundary, so there is no
+        // anchored reading to be had and the bare word is left alone.
+        for (line, col) in [("ls foo(bar)", 3), ("ls my(file).txt", 3)] {
+            assert_eq!(
+                file_candidates_at(line, col).len(),
+                1,
+                "{line} has no reading past its paren worth a probe"
+            );
+        }
+    }
+
     /// Clicking the call's name is not clicking the path. The span shrinks to
     /// the path, so the column that asked falls outside it — the same answer
     /// `url_at` gives for a hover on a CJK prefix.
@@ -2094,6 +2258,12 @@ mod tests {
     /// ordinary hover would pay to tokenise the line three times and to probe
     /// candidates that can only repeat each other — and on a remote pane a
     /// probe is a round trip.
+    ///
+    /// The wrapped call is here for the second half of that: `Update(…)` does
+    /// carry a prefix boundary, and the anchored reading of it lands on the
+    /// span [`trim_file_token`] had already unwrapped. Charging a probe for
+    /// the same span twice is what the deduplication in [`push_candidate`] is
+    /// for, and this is what holds it in place.
     #[test]
     fn an_ascii_line_yields_exactly_one_reading() {
         for (line, col) in [
@@ -2109,8 +2279,9 @@ mod tests {
             assert_eq!(
                 file_candidates_at(line, col).len(),
                 1,
-                "{line} has no CJK in it, so the three edge sets must agree \
-                 and collapse to one probe"
+                "{line} has no CJK in it, so the three edge sets must agree — \
+                 and no anchored reading may add a span the token did not \
+                 already cover"
             );
             // The premise the fast path rests on: skipping the other two scans
             // is only free because they cannot see the token differently.
