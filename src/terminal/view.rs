@@ -5633,11 +5633,12 @@ impl TerminalView {
             pending |= matches!(answer, super::search::Probe::Unknown);
             answer
         };
-        let link = super::search::link_at(&text, click_idx, &roots, files, &mut probe);
+        let lookup = super::search::link_lookup_at(&text, click_idx, &roots, files, &mut probe);
         // `probe` holds the cache borrow; nothing below touches it, so the
         // borrow ends here and `self` is whole again for the flush.
         self.flush_link_probes(cx);
 
+        let super::search::LinkLookup { link, candidate } = lookup;
         let link = link.or_else(|| {
             include_loopback.then(|| {
                 super::loopback::loopback_url_span_at(&text, click_idx).map(|(start, end, url)| {
@@ -5653,10 +5654,7 @@ impl TerminalView {
             Some(link) => LinkAt::Found(link.target, points[link.start], points[link.end]),
             // Nothing answered. Hand back what the token *said* so a click can
             // say so out loud instead of looking broken.
-            None => match files
-                .then(|| super::search::file_candidate_at(&text, click_idx))
-                .flatten()
-            {
+            None => match candidate {
                 Some(candidate) => LinkAt::Unresolved { candidate, pending },
                 None => LinkAt::None,
             },

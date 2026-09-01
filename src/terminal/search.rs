@@ -762,6 +762,21 @@ impl LinkRoots {
     }
 }
 
+/// What a lookup found: the link, or — when nothing answered — the reading of
+/// the token worth naming in a report.
+///
+/// The two travel together because the readings are computed once. A caller
+/// that asked and got nothing already holds everything needed to say what the
+/// click *said*; going back to the text for it would re-tokenise the whole
+/// line on a path that runs on every hover.
+pub(super) struct LinkLookup {
+    pub link: Option<LinkMatch>,
+    /// Only ever set when `link` is `None`. See [`report_candidate`].
+    pub candidate: Option<FileCandidate>,
+}
+
+/// The link alone, for callers with nothing to report when there is none.
+#[cfg(test)]
 pub(super) fn link_at(
     text: &str,
     col: usize,
@@ -769,28 +784,68 @@ pub(super) fn link_at(
     include_files: bool,
     probe: &mut dyn FnMut(&Path, bool) -> Probe,
 ) -> Option<LinkMatch> {
+    link_lookup_at(text, col, roots, include_files, probe).link
+}
+
+pub(super) fn link_lookup_at(
+    text: &str,
+    col: usize,
+    roots: &LinkRoots,
+    include_files: bool,
+    probe: &mut dyn FnMut(&Path, bool) -> Probe,
+) -> LinkLookup {
     if let Some((start, end, url)) = url_span_at(text, col) {
-        return Some(LinkMatch {
-            start,
-            end,
-            target: LinkTarget::Url(url),
-        });
+        return LinkLookup {
+            link: Some(LinkMatch {
+                start,
+                end,
+                target: LinkTarget::Url(url),
+            }),
+            candidate: None,
+        };
     }
     if !include_files {
-        return None;
+        return LinkLookup {
+            link: None,
+            candidate: None,
+        };
     }
-    let candidate = file_candidate_at(text, col)?;
-    let (path, is_dir) = resolve_candidate(&candidate, roots, probe)?;
-    Some(LinkMatch {
-        start: candidate.start,
-        end: candidate.end,
-        target: LinkTarget::File {
-            path,
-            line: candidate.line,
-            column: candidate.column,
-            is_dir,
-        },
-    })
+    // Every reading of the token gets its own look and the first one something
+    // answers for wins. The winner's span is what gets underlined, so on a
+    // Chinese line the underline lands on the path alone rather than on the
+    // prose that happened to touch it.
+    let candidates = file_candidates_at(text, col);
+    for candidate in &candidates {
+        let Some((path, is_dir)) = resolve_candidate(candidate, roots, probe) else {
+            continue;
+        };
+        return LinkLookup {
+            link: Some(LinkMatch {
+                start: candidate.start,
+                end: candidate.end,
+                target: LinkTarget::File {
+                    path,
+                    line: candidate.line,
+                    column: candidate.column,
+                    is_dir,
+                },
+            }),
+            candidate: None,
+        };
+    }
+    LinkLookup {
+        link: None,
+        candidate: report_candidate(candidates),
+    }
+}
+
+fn report_candidate(candidates: Vec<FileCandidate>) -> Option<FileCandidate> {
+    let narrowest = candidates
+        .iter()
+        .filter(|candidate| candidate.looks_like_a_path())
+        .min_by_key(|candidate| candidate.end - candidate.start)
+        .cloned();
+    narrowest.or_else(|| candidates.into_iter().next())
 }
 
 /// The first of `candidate`'s possible paths that something answers for.
@@ -872,16 +927,81 @@ impl FileCandidate {
     /// user about when nothing answers for it. A bare word is not — every
     /// modifier-click on ordinary output would raise a notification saying so.
     pub fn looks_like_a_path(&self) -> bool {
-        self.path.starts_with('~')
-            || self.path.contains('/')
-            || (cfg!(windows) && self.path.contains('\\'))
+        is_path_shaped(&self.path)
     }
 }
 
-/// The syntactic half of file detection: everything that can be decided from
-/// the text alone, with no filesystem behind it.
+/// Whether a run of text is written like a path rather than like a word: it
+/// says where it starts, or it names a directory on the way.
+fn is_path_shaped(token: &str) -> bool {
+    token.starts_with('~') || token.contains('/') || (cfg!(windows) && token.contains('\\'))
+}
+
+/// Every reading of the token under `col`, most conservative first.
+///
+/// A token with no CJK in it yields exactly one, off a single scan: the three
+/// edge sets agree character for character on such a token, so the ordinary
+/// hover neither probes twice nor tokenises the line three times. Only a token
+/// that mixes prose with a path produces more, and there the order is what
+/// decides the answer — [`TokenEdge::CjkPunct`] comes first because it keeps
+/// `docs/设计文档.md` whole, and [`TokenEdge::Cjk`] follows to rescue the lines
+/// where nothing but a han character separates the prose from the path.
+pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
+    let Some((start, end, widest)) = token_at(text, col, TokenEdge::Whitespace) else {
+        return Vec::new();
+    };
+    // The fast path, and the one nearly every hover takes: a token with no CJK
+    // character anywhere in it reads the same under all three edge sets, so
+    // the other two scans can only repeat this one. The CJK arms of
+    // [`TokenEdge::ends_token`] match nothing inside such a token, and the
+    // half-width rule needs CJK on the far side of the mark — which, at this
+    // token's own edges, is the whitespace that ended it.
+    if !widest.chars().any(super::smart_select::is_cjk) {
+        return file_candidate_from(start, end, widest, col)
+            .into_iter()
+            .collect();
+    }
+
+    let mut out: Vec<FileCandidate> = Vec::new();
+    for edge in [TokenEdge::CjkPunct, TokenEdge::Cjk] {
+        let Some((start, end, token)) = token_at(text, col, edge) else {
+            continue;
+        };
+        push_candidate(&mut out, file_candidate_from(start, end, token, col));
+    }
+    push_candidate(&mut out, file_candidate_from(start, end, widest, col));
+    out
+}
+
+/// Adds a reading unless one covering the same span is already there.
+fn push_candidate(out: &mut Vec<FileCandidate>, candidate: Option<FileCandidate>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    if out
+        .iter()
+        .any(|seen| seen.start == candidate.start && seen.end == candidate.end)
+    {
+        return;
+    }
+    out.push(candidate);
+}
+
+/// The first reading of the token under `col`, for callers that only need to
+/// say what the click *said* rather than resolve it.
+#[cfg(test)]
 pub(super) fn file_candidate_at(text: &str, col: usize) -> Option<FileCandidate> {
-    let (start, end, token) = non_ws_token_at(text, col)?;
+    file_candidates_at(text, col).into_iter().next()
+}
+
+/// The syntactic half of file detection: everything that can be decided from
+/// the token alone, with no filesystem behind it.
+fn file_candidate_from(
+    start: usize,
+    end: usize,
+    token: String,
+    col: usize,
+) -> Option<FileCandidate> {
     let (start, mut end, mut token) = trim_file_token(start, end, token);
     if token.is_empty() {
         return None;
@@ -906,22 +1026,7 @@ pub(super) fn file_candidate_at(text: &str, col: usize) -> Option<FileCandidate>
 }
 
 pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, String)> {
-    let chars: Vec<char> = text.chars().collect();
-    if col >= chars.len() {
-        return None;
-    }
-    if chars[col].is_whitespace() {
-        return None;
-    }
-    let mut start = col;
-    while start > 0 && !chars[start - 1].is_whitespace() {
-        start -= 1;
-    }
-    let mut end = col;
-    while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
-        end += 1;
-    }
-    let mut token: String = chars[start..=end].iter().collect();
+    let (mut start, _, mut token) = token_at(text, col, TokenEdge::CjkPunct)?;
     trim_trailing_punct(&mut token);
 
     const SCHEMES: [&str; 4] = ["https://", "http://", "file://", "ftp://"];
@@ -956,18 +1061,100 @@ pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, Strin
     }
 }
 
-fn non_ws_token_at(text: &str, col: usize) -> Option<(usize, usize, String)> {
+/// How far a token reaches before something ends it.
+///
+/// CJK prose puts no spaces between words, so a path printed inside a Chinese
+/// or Japanese sentence has no whitespace to stop at — `文档：docs/a.md，未提交`
+/// is a single whitespace-delimited token and the path inside it is
+/// unreachable. Widening the boundary set is what pulls the path back out.
+///
+/// The two CJK levels are kept apart because they disagree about a path that
+/// *contains* CJK: `docs/设计文档.md` survives [`Self::CjkPunct`] whole and is
+/// cut short by [`Self::Cjk`], while `修改了src/main.rs和docs/b.md` needs
+/// [`Self::Cjk`] because no punctuation separates the prose from the path.
+/// Neither is right for every line, which is why [`file_candidates_at`] tries
+/// them in turn rather than choosing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenEdge {
+    /// Whitespace alone — what every line without CJK in it wants.
+    Whitespace,
+    /// Whitespace and CJK punctuation. Keeps CJK filenames whole.
+    ///
+    /// "Punctuation" here also covers the half-width marks a CJK line leans
+    /// against a path, but only there — see [`ends_token_at`].
+    CjkPunct,
+    /// Whitespace and any CJK character, for prose written flush against a
+    /// path with no punctuation in between.
+    Cjk,
+}
+
+impl TokenEdge {
+    fn ends_token(self, c: char) -> bool {
+        c.is_whitespace()
+            || match self {
+                Self::Whitespace => false,
+                Self::CjkPunct => is_cjk_punct(c),
+                Self::Cjk => super::smart_select::is_cjk(c),
+            }
+    }
+}
+
+/// CJK punctuation — the full-width comma, colon, brackets and ideographic
+/// space, which sit *between* words rather than inside them.
+///
+/// Han, kana, hangul and the full-width letters and digits are all
+/// alphanumeric, so this tells the marks apart from the writing without a
+/// hand-maintained code point table.
+fn is_cjk_punct(c: char) -> bool {
+    super::smart_select::is_cjk(c) && !c.is_alphanumeric()
+}
+
+/// Whether `c` ends the token, given `outward` — the character on its far
+/// side, away from the token being grown.
+///
+/// The lookout is what lets a half-width mark separate CJK prose from a path:
+/// `文档:src/main.rs` and `见:www.example.com,谢谢` are written with ASCII
+/// punctuation just as often as with the full-width kind, and neither offers
+/// any other boundary. Deciding on the mark alone is not open to us — `:` also
+/// carries the line suffix in `src/main.rs:12` and the scheme in `https://` —
+/// so the mark only ends a token when the writing it leans against is CJK.
+fn ends_token_at(c: char, outward: Option<char>, edge: TokenEdge) -> bool {
+    if edge.ends_token(c) {
+        return true;
+    }
+    if edge == TokenEdge::Whitespace || !is_ascii_prose_punct(c) {
+        return false;
+    }
+    outward.is_some_and(super::smart_select::is_cjk)
+}
+
+/// The half-width marks CJK prose borrows from ASCII, kept to the ones that
+/// only ever stand *between* words. `/`, `.`, `-` and `_` are absent because
+/// they live inside paths; `:` is here only on the strength of the CJK lookout
+/// in [`ends_token_at`].
+fn is_ascii_prose_punct(c: char) -> bool {
+    matches!(c, ':' | ',' | ';' | '!' | '?')
+}
+
+fn token_at(text: &str, col: usize, edge: TokenEdge) -> Option<(usize, usize, String)> {
     let chars: Vec<char> = text.chars().collect();
-    if col >= chars.len() || chars[col].is_whitespace() {
+    if col >= chars.len() || edge.ends_token(chars[col]) {
         return None;
     }
 
     let mut start = col;
-    while start > 0 && !chars[start - 1].is_whitespace() {
+    while start > 0
+        && !ends_token_at(
+            chars[start - 1],
+            start.checked_sub(2).map(|i| chars[i]),
+            edge,
+        )
+    {
         start -= 1;
     }
     let mut end = col;
-    while end + 1 < chars.len() && !chars[end + 1].is_whitespace() {
+    while end + 1 < chars.len() && !ends_token_at(chars[end + 1], chars.get(end + 2).copied(), edge)
+    {
         end += 1;
     }
     Some((start, end, chars[start..=end].iter().collect()))
@@ -982,15 +1169,92 @@ fn trim_file_token(mut start: usize, mut end: usize, mut token: String) -> (usiz
         token.remove(0);
         start += 1;
     }
-    while token
-        .chars()
-        .next_back()
-        .is_some_and(is_file_trailing_punct)
-    {
+    strip_trailing_punct(&mut token, &mut end);
+    // `Update(src/main.rs)` — an emitter that writes the path inside a call.
+    // The strip above only walks characters off the *front*, so a name in
+    // front of the paren leaves the token starting at `U` and the path
+    // unreachable however far the front is trimmed.
+    //
+    // What tells a call from a filename is the shape of the whole token rather
+    // than the paren alone, because `foo(bar)`, `my(file).txt` and
+    // `src/foo(bar)` are all legal names on Unix and none of them is a call.
+    // Three things have to hold at once: the token ends at the `)` this `(`
+    // opened, what stands in front of the paren reads like a name rather than
+    // a path, and what stands inside it reads like a path. The last of those
+    // costs `Update(main.rs)` — a call naming a file in the pane's own
+    // directory — and is worth it: without it, a file that is really called
+    // `foo(bar)` gets silently rewritten to `bar`, which is how a click ends
+    // up opening a different file rather than none.
+    if let Some(open) = call_wrapper_open(&token) {
         token.pop();
         end = end.saturating_sub(1);
+        start += token[..open].chars().count() + 1;
+        token.drain(..=open);
+        strip_trailing_punct(&mut token, &mut end);
     }
     (start, end, token)
+}
+
+/// Walks trailing punctuation off the token.
+///
+/// Runs before the call-wrapper rule as well as after it, because that rule
+/// reads the token's *final* character and a sentence puts its own punctuation
+/// there first: `Update(src/main.rs).` has to lose the full stop before the
+/// `)` underneath it can be recognised as the wrapper's. A closing bracket the
+/// token opened for itself survives either pass, which is what keeps
+/// `src/foo(bar).` a filename with a full stop after it.
+fn strip_trailing_punct(token: &mut String, end: &mut usize) {
+    while let Some(c) = token.chars().next_back() {
+        if !is_file_trailing_punct(c) || closes_own_pair(token, c) {
+            return;
+        }
+        token.pop();
+        *end = end.saturating_sub(1);
+    }
+}
+
+/// The `(` a call wrapper opens with, as a byte index into `token`.
+///
+/// See [`trim_file_token`] for what has to hold before a paren counts as a
+/// wrapper rather than as part of a name.
+fn call_wrapper_open(token: &str) -> Option<usize> {
+    let close = token.strip_suffix(')').map(str::len)?;
+    let open = matching_open_paren(token, close)?;
+    let name = &token[..open];
+    if name.is_empty() || name.contains(['/', '\\', '(', ')']) {
+        return None;
+    }
+    is_path_shaped(&token[open + 1..close]).then_some(open)
+}
+
+/// The `(` that the `)` at byte index `close` closes.
+fn matching_open_paren(token: &str, close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in token[..close].char_indices().rev() {
+        match c {
+            ')' => depth += 1,
+            '(' if depth == 0 => return Some(i),
+            '(' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a trailing bracket is the closing half of a pair the token opened
+/// for itself.
+///
+/// `src/foo(bar)` and `notes[1]` are names; `src/foo.txt)` is a name somebody
+/// wrote inside brackets. Counting is enough to tell them apart — the same
+/// judgement [`trim_trailing_punct`] makes for a URL.
+fn closes_own_pair(token: &str, c: char) -> bool {
+    let open = match c {
+        ')' => '(',
+        ']' => '[',
+        '}' => '{',
+        _ => return false,
+    };
+    count_char(token, c) <= count_char(token, open)
 }
 
 fn is_file_trailing_punct(c: char) -> bool {
@@ -1675,6 +1939,273 @@ mod tests {
                 PathBuf::from("/work/src/lib.rs"),
             ],
             "every root is asked about, so one round trip covers them all"
+        );
+    }
+
+    /// `Update(src/main.rs)` is how Claude Code — and anything else that
+    /// writes a path inside a call — prints the file it just touched. The
+    /// leading strip in [`trim_file_token`] only walks characters off the
+    /// front, so before the call-wrapper rule this token stayed
+    /// `Update(src/main.rs` however far it was trimmed: a path nothing could
+    /// ever answer for, printed on every single tool call.
+    #[test]
+    fn a_path_written_inside_a_call_is_reachable() {
+        let line = "⏺ Update(src/main.rs)";
+        let candidate = file_candidate_at(line, 9).expect("candidate");
+        assert_eq!(candidate.path, "src/main.rs");
+        assert_eq!(
+            line.chars()
+                .skip(candidate.start)
+                .take(candidate.end + 1 - candidate.start)
+                .collect::<String>(),
+            "src/main.rs",
+            "the span has to cover the path alone, or the underline is drawn \
+             over the call that wrapped it"
+        );
+
+        assert_eq!(
+            file_candidate_at("⏺ Update(src/main.rs:12)", 9)
+                .expect("candidate")
+                .line,
+            Some(12),
+            "unwrapping the call must not cost the line suffix"
+        );
+        assert_eq!(
+            file_candidate_at("⏺ Update(docs/my(v2).md)", 9)
+                .expect("candidate")
+                .path,
+            "docs/my(v2).md",
+            "only the paren the token ends at is the wrapper"
+        );
+
+        // A sentence puts its own punctuation after the call, and the wrapper
+        // rule reads the token's *final* character — so the tail has to come
+        // off before the `)` underneath it can be recognised.
+        for line in [
+            "⏺ Update(src/main.rs).",
+            "⏺ Update(src/main.rs),",
+            "⏺ Update(src/main.rs)、",
+        ] {
+            assert_eq!(
+                file_candidate_at(line, 9).expect("candidate").path,
+                "src/main.rs",
+                "{line} names the same file the unpunctuated line does"
+            );
+        }
+    }
+
+    /// Parens are legal in a Unix filename, and the call-wrapper rule has to
+    /// keep its hands off every one of these. The judgement is the token's
+    /// whole shape — where it ends, what stands in front of the paren and what
+    /// stands inside it — because nothing here guesses at what a function name
+    /// looks like.
+    #[test]
+    fn a_paren_that_belongs_to_the_filename_is_left_alone() {
+        for (line, col, want) in [
+            ("ls my(file).txt", 3, "my(file).txt"),
+            // Ends at a paren, but a path stands in front of it: a name, not a
+            // call. Nothing may rewrite this to `bar`.
+            ("ls src/foo(bar)", 4, "src/foo(bar)"),
+            // Ends at a paren with a name in front, but nothing path-shaped
+            // inside it. Rewriting this to `bar` is how a click opens a
+            // different file rather than none.
+            ("ls foo(bar)", 3, "foo(bar)"),
+            // The `(` is unpaired, which the old rule read as a wrapper and
+            // silently rewrote to `bar.txt` — a different file, and one that
+            // may well exist.
+            ("ls src/foo(bar.txt", 4, "src/foo(bar.txt"),
+            ("ls docs/notes[1]", 4, "docs/notes[1]"),
+            // The trailing strip runs before the wrapper rule now, so it must
+            // not take a bracket the name closed for itself with it.
+            ("ls src/foo(bar).", 4, "src/foo(bar)"),
+        ] {
+            assert_eq!(
+                file_candidate_at(line, col).expect("candidate").path,
+                want,
+                "{line} names a file that is legally called that"
+            );
+        }
+
+        for (line, col) in [("see (src/main.rs) ok", 6), ("at f (src/main.rs:3:9)", 7)] {
+            assert_eq!(
+                file_candidate_at(line, col).expect("candidate").path,
+                "src/main.rs",
+                "{line} was already reachable and must stay that way"
+            );
+        }
+    }
+
+    /// Clicking the call's name is not clicking the path. The span shrinks to
+    /// the path, so the column that asked falls outside it — the same answer
+    /// `url_at` gives for a hover on a CJK prefix.
+    #[test]
+    fn a_click_on_the_call_name_is_not_a_click_on_the_path() {
+        assert_eq!(file_candidate_at("⏺ Update(src/main.rs)", 3), None);
+    }
+
+    /// CJK prose has no spaces in it, so a path printed inside a Chinese
+    /// sentence has no whitespace to stop at. Every line here failed before
+    /// the CJK edge sets: the first two have no whitespace at all, and the
+    /// third has a perfectly good space on the left and still lost, because
+    /// `。完成` was glued to the right.
+    #[test]
+    fn a_path_glued_to_cjk_prose_is_reachable() {
+        for (line, col) in [
+            ("文档：docs/plan.md，未提交", 3),
+            ("路径（docs/plan.md）已生成", 3),
+            ("写入 docs/plan.md。完成", 3),
+        ] {
+            assert_eq!(
+                file_candidate_at(line, col).expect("candidate").path,
+                "docs/plan.md",
+                "{line} names a path the click cannot reach otherwise"
+            );
+        }
+    }
+
+    /// The two CJK edge sets disagree here, which is why both are kept: a han
+    /// character inside the *filename* must not end the token, while a han
+    /// character standing between prose and path must. Neither reading is
+    /// right for both lines, so the first that resolves wins.
+    #[test]
+    fn a_cjk_filename_and_cjk_prose_get_different_readings() {
+        assert_eq!(
+            file_candidate_at("参见：docs/设计文档.md", 3)
+                .expect("candidate")
+                .path,
+            "docs/设计文档.md",
+            "the punctuation edge keeps a CJK filename whole, and it is tried \
+             first for exactly that reason"
+        );
+
+        let readings: Vec<String> = file_candidates_at("修改了src/main.rs和docs/b.md", 3)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert!(
+            readings.iter().any(|p| p == "src/main.rs"),
+            "no punctuation separates the prose from the path here, so only \
+             the han edge can reach it; got {readings:?}"
+        );
+    }
+
+    /// The cost control for the multi-candidate walk. A token with no CJK in
+    /// it must collapse to a single reading *off a single scan*, or every
+    /// ordinary hover would pay to tokenise the line three times and to probe
+    /// candidates that can only repeat each other — and on a remote pane a
+    /// probe is a round trip.
+    #[test]
+    fn an_ascii_line_yields_exactly_one_reading() {
+        for (line, col) in [
+            ("wrote scratchpad/notes.md now", 8),
+            ("error in crates/core/src/lib.rs:88:5 here", 12),
+            ("see (src/main.rs) ok", 6),
+            ("⏺ Update(src/main.rs)", 9),
+            // The half-width edge is spelled with a lookout at CJK for exactly
+            // this reason: `:` and `,` are ordinary characters on an ASCII
+            // line and must not split it into readings.
+            ("run a,b,c and see src/lib.rs:9", 20),
+        ] {
+            assert_eq!(
+                file_candidates_at(line, col).len(),
+                1,
+                "{line} has no CJK in it, so the three edge sets must agree \
+                 and collapse to one probe"
+            );
+            // The premise the fast path rests on: skipping the other two scans
+            // is only free because they cannot see the token differently.
+            let widest = token_at(line, col, TokenEdge::Whitespace);
+            for edge in [TokenEdge::CjkPunct, TokenEdge::Cjk] {
+                assert_eq!(
+                    token_at(line, col, edge),
+                    widest,
+                    "{line} must tokenise the same under {edge:?} as under \
+                     whitespace, or the single scan is answering for a reading \
+                     it never took"
+                );
+            }
+        }
+    }
+
+    /// CJK prose is written with half-width punctuation at least as often as
+    /// with the full-width kind, and the ASCII marks offer no boundary of
+    /// their own — `文档` and `src/main.rs` are one whitespace-delimited token
+    /// either way. The mark counts as an edge only because CJK stands on the
+    /// far side of it.
+    #[test]
+    fn half_width_punctuation_separates_cjk_prose_from_a_path() {
+        for (line, col) in [("文档:src/main.rs", 3), ("见:src/main.rs,谢谢", 2)] {
+            let readings: Vec<String> = file_candidates_at(line, col)
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect();
+            assert!(
+                readings.iter().any(|path| path == "src/main.rs"),
+                "{line} names a path the click cannot reach otherwise; got \
+                 {readings:?}"
+            );
+        }
+
+        assert_eq!(
+            url_at("见:www.example.com,谢谢", 2).as_deref(),
+            Some("https://www.example.com"),
+            "the `www.` arm asks `starts_with`, so a glued-on prefix defeats \
+             it outright unless the edge cuts the token first"
+        );
+
+        assert_eq!(
+            file_candidate_at("see src/main.rs:12 here", 5)
+                .expect("candidate")
+                .line,
+            Some(12),
+            "a `:` with no CJK against it still carries the line suffix"
+        );
+    }
+
+    /// What a failed click gets told. The readings are ordered most
+    /// conservative first, and the most conservative reading of a Chinese line
+    /// is the whole sentence — reporting *that* as a missing file is a
+    /// notification the user cannot act on.
+    #[test]
+    fn an_unresolved_report_names_the_narrowest_path_shaped_reading() {
+        let line = "修改了src/main.rs和docs/b.md";
+        let lookup = link_lookup_at(
+            line,
+            3,
+            &LinkRoots::local(vec![PathBuf::from("/work")]),
+            true,
+            &mut |_, _| Probe::Miss,
+        );
+        assert_eq!(lookup.link, None);
+        assert_eq!(
+            lookup.candidate.expect("a report candidate").path,
+            "src/main.rs",
+            "the sentence around the path is not what the user clicked"
+        );
+
+        let word = link_lookup_at(
+            "wrote notes now",
+            8,
+            &LinkRoots::local(vec![PathBuf::from("/work")]),
+            true,
+            &mut |_, _| Probe::Miss,
+        );
+        assert_eq!(
+            word.candidate.expect("a report candidate").path,
+            "notes",
+            "a token that is not path-shaped still comes back, so the caller \
+             is the one that decides it is not worth reporting"
+        );
+    }
+
+    /// The `www.` arm asks `starts_with`, so unlike the scheme arm it cannot
+    /// relocate its own start inside the token — a glued-on Chinese prefix
+    /// defeated it outright until the token edge learned about CJK.
+    #[test]
+    fn url_at_detects_bare_www_glued_to_cjk_prose() {
+        assert_eq!(
+            url_at("见：www.example.com，谢谢", 2).as_deref(),
+            Some("https://www.example.com")
         );
     }
 
