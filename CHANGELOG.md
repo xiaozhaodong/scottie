@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.9.1] - 2026-09-01
+
+### Fixed
+
+- **A path written inside a call is reachable again, and a legal filename is
+  left alone.** `Update(src/main.rs)` — how a coding agent prints the file it
+  just touched — was unreachable, because the token trim only ever walked
+  characters off the front and the call's name stayed glued to it. Unwrapping
+  the call fixed that but went too far: `src/foo(bar.txt` and `src/foo(bar)`
+  are legal names on Unix, and both were silently rewritten to a shorter path
+  that may well name a *different* file. A paren now counts as a wrapper only
+  when the whole token says so — it ends at the `)` that paren opened, what
+  stands in front reads like a name rather than a path, and what stands inside
+  reads like a path. Punctuation the sentence put after the call comes off
+  first, so `Update(src/main.rs).` resolves like the bare form.
+
+- **Half-width punctuation separates CJK prose from a path or a bare URL.** CJK
+  writing puts no spaces between words, and `文档:src/main.rs` or
+  `见:www.example.com,谢谢` is a single whitespace-delimited token. Only the
+  full-width marks used to end one, so the half-width forms — at least as
+  common — left the path unreachable. A `:` or `,` now ends a token when the
+  writing on the far side of it is CJK, which leaves `src/main.rs:12` and
+  `https://` untouched.
+
+- **A file that cannot be found is named accurately.** When several readings of
+  a token all miss, the notification quoted the most conservative one — on
+  `修改了src/main.rs和docs/b.md` that is the entire sentence, reported as a
+  missing file. It now names the narrowest path-shaped reading.
+
+### Changed
+
+- **Hovering an ordinary line tokenises it once instead of three times.** A
+  token with no CJK character in it reads identically under all three boundary
+  sets, so the other two scans could only repeat the first; they are skipped,
+  and a lookup that resolves to nothing hands its candidate back to the caller
+  rather than making it re-scan the line to build a message.
+
 ## [26.8.7] - 2026-08-31
 
 Synced with upstream tty7 (`ba6760c..a2b5ae5`).
@@ -4220,6 +4257,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.9.1]: https://github.com/xiaozhaodong/scottie/compare/v26.8.7...v26.9.1
 [26.8.6]: https://github.com/xiaozhaodong/scottie/compare/v26.8.5...v26.8.6
 [26.8.3]: https://github.com/l0ng-ai/tty7/compare/v26.8.2...v26.8.3
 [26.8.2]: https://github.com/l0ng-ai/tty7/compare/v26.8.1...v26.8.2
