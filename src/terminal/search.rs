@@ -1372,13 +1372,43 @@ fn split_file_location(token: &str) -> FileLocation {
     }
 }
 
+/// The `:line` a path carries, as the token without it and the number.
+///
+/// A range counts as the line it starts on: `remote.rs:1215-1247` is how a
+/// review note or a coding agent names a span, and the file it points at is
+/// the same one a bare `:1215` would.
+///
+/// What keeps a date out is that a span ends at or after it starts.
+/// `2026-09-02` fails on its second hyphen and `2026-09` on `9 < 2026`, while
+/// `12-30` and `1215-1247` pass. A token that reads as both — `log:2024-2025`
+/// — is taken as the range; nothing in the text settles that one, and `log`
+/// has to exist as a file before any of it matters.
 fn strip_numeric_suffix(token: &str) -> Option<(&str, u32)> {
     let (prefix, suffix) = token.rsplit_once(':')?;
-    if prefix.is_empty() || suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+    if prefix.is_empty() {
         return None;
     }
-    let value = suffix.parse().ok()?;
-    Some((prefix, value))
+    let (first, last) = match suffix.split_once('-') {
+        Some((first, last)) => (first, Some(last)),
+        None => (suffix, None),
+    };
+    let line = parse_line_number(first)?;
+    if let Some(last) = last {
+        if parse_line_number(last)? < line {
+            return None;
+        }
+    }
+    Some((prefix, line))
+}
+
+/// A non-empty run of ASCII digits, parsed. The digits are checked before the
+/// parse rather than left to it: `u32::from_str` would also take a leading
+/// `+`, which is not how anybody writes a line number.
+fn parse_line_number(s: &str) -> Option<u32> {
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn expand_home(path: &str, cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
@@ -2224,6 +2254,35 @@ mod tests {
                 "docs/plan.md",
                 "{line} names a path the click cannot reach otherwise"
             );
+        }
+    }
+
+    /// A span is how a review note or a coding agent names a region of a file,
+    /// and the file it names is the one a bare `:1215` would name. Before
+    /// this, the `-` disqualified the whole suffix, the range was carried into
+    /// the path, and nothing on any filesystem answered for
+    /// `remote.rs:1215-1247`. A date is held out by the rule that a span ends
+    /// at or after it starts — one hyphen is not enough to tell them apart.
+    #[test]
+    fn a_line_range_resolves_to_the_line_it_starts_on() {
+        for (line, col, path, want) in [
+            ("see src/main.rs:12-30 here", 5, "src/main.rs", Some(12)),
+            (
+                "改动（src/terminal/remote.rs:1215-1247）",
+                4,
+                "src/terminal/remote.rs",
+                Some(1215),
+            ),
+            // A range of one line is still a range.
+            ("see src/main.rs:12-12 here", 5, "src/main.rs", Some(12)),
+            // Dates: the second hyphen stops the first, `9 < 2026` the second.
+            ("see notes:2026-09-02 here", 5, "notes:2026-09-02", None),
+            ("see notes:2026-09 here", 5, "notes:2026-09", None),
+        ] {
+            let candidate = file_candidate_at(line, col).expect("candidate");
+            assert_eq!(candidate.path, path, "{line}");
+            assert_eq!(candidate.line, want, "{line}");
+            assert_eq!(candidate.column, None, "{line}");
         }
     }
 

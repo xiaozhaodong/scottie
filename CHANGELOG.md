@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.9.3] - 2026-09-02
+
+### Fixed
+
+- **A selection made in a pane is visible to system-wide text tools again.**
+  ⌘C carries a default keymap chord on macOS once more. `handle_cmd_shortcut`
+  already answered the key inside the pane, so nothing looked wrong — but the
+  menu bar is built from the keymap, and on macOS an item's key equivalent is
+  how an app states to the system that it can copy. Tools that lift the
+  frontmost selection find the command through `AXMenuItemCmdChar` rather than
+  through the item's title, which is localised, so while the chord sat empty
+  the Edit menu's Copy item was enabled but mute.
+
+- **A line range in a path resolves to the line it opens on.**
+  `remote.rs:1215-1247` — how a review note or a coding agent names a region —
+  used to carry the range into the path, which nothing on any filesystem
+  answers for, so the link was not detected at all. A span has to end at or
+  after it starts, which is what keeps `notes:2026-09-02` and `notes:2026-09`
+  names rather than line 2026.
+
+- **`link_file_command` no longer throws the file away with an absent line.**
+  A word holding `{path}` now loses only the empty placeholder and the text
+  that joined it on, rewinding to that joint and no further — a `#`, `:` or `,`
+  the path itself ends in survives, all three being legal in a filename. The
+  documented `--goto {path}:{line}:{column}` used to be dropped whole on any
+  link naming a line but no column — the commonest of the three shapes —
+  leaving the editor to open on nothing. A word with no path in it,
+  `--line={line}`, still disappears entirely.
+
+### Internal
+
+- **Every resize is recorded now, not only one that collides.** The warn for a
+  `DaemonMsg::Size` landing inside a synchronized update cannot be read on its
+  own: a run without it means either that no resize ever collided or that the
+  geometry never moved at all, and those are different findings. The clean case
+  is logged at `info`, and both lines open with `resize landed`, so a single
+  grep censuses every Size that arrived. Observation only, no behaviour change.
+
 ## [26.9.2] - 2026-09-02
 
 ### Fixed
@@ -4286,6 +4324,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.9.3]: https://github.com/xiaozhaodong/scottie/compare/v26.9.2...v26.9.3
 [26.9.2]: https://github.com/xiaozhaodong/scottie/compare/v26.9.1...v26.9.2
 [26.9.1]: https://github.com/xiaozhaodong/scottie/compare/v26.8.7...v26.9.1
 [26.8.6]: https://github.com/xiaozhaodong/scottie/compare/v26.8.5...v26.8.6

@@ -6884,12 +6884,28 @@ fn expand_file_command_template(
     column: Option<u32>,
 ) -> Vec<String> {
     let path = path.to_string_lossy();
+    // A column standing without a line would fill `{path}:{line}:{column}` as
+    // `/tmp/foo.rs:3` and send the editor to line 3. `split_file_location`
+    // never builds one, and pinning it here keeps that a property of the link
+    // rather than something every caller has to remember.
+    let column = line.and(column);
     template
         .split_whitespace()
         .filter_map(|token| expand_file_command_token(token, &path, line, column))
         .collect()
 }
 
+/// One whitespace-separated token of the template with its placeholders filled
+/// in, or `None` when nothing worth passing is left of it.
+///
+/// A missing `{line}` or `{column}` normally takes its whole token with it,
+/// which is what makes `--line={line}` disappear rather than expand to a flag
+/// carrying no value. A token holding `{path}` is the exception: the path is
+/// the point of the click, so only the empty placeholder and the text that
+/// joined it on are dropped. Without that carve-out
+/// `--goto {path}:{line}:{column}` — the shape an editor CLI asks for — threw
+/// the file away on the commonest link there is, one naming a line but no
+/// column, and opened the editor on nothing at all.
 fn expand_file_command_token(
     token: &str,
     path: &str,
@@ -6898,23 +6914,43 @@ fn expand_file_command_token(
 ) -> Option<String> {
     let mut out = String::with_capacity(token.len());
     let mut rest = token;
+    let mut carries_path = false;
+    let mut missing = false;
     while let Some(open) = rest.find('{') {
         let Some(close_rel) = rest[open..].find('}') else {
             break;
         };
         let close = open + close_rel;
+        // Where the text joining this placeholder on begins. An absent value
+        // rewinds to exactly here, so a `#`, `:` or `,` the *path* ends in
+        // survives: all three are legal in a filename — an Emacs autosave is
+        // called `#foo#` — and walking back through one opens a different file
+        // rather than none.
+        let joint = out.len();
         out.push_str(&rest[..open]);
         let value = match &rest[open + 1..close] {
-            "path" => Some(path.to_string()),
+            "path" => {
+                carries_path = true;
+                Some(path.to_string())
+            }
             "line" => line.map(|l| l.to_string()),
             "column" => column.map(|c| c.to_string()),
             other => Some(format!("{{{other}}}")),
         };
-        out.push_str(&value?);
+        match value {
+            Some(value) => out.push_str(&value),
+            None => {
+                missing = true;
+                out.truncate(joint);
+            }
+        }
         rest = &rest[close + 1..];
     }
     out.push_str(rest);
-    Some(out)
+    if missing && !carries_path {
+        return None;
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn encode_mouse(
@@ -7933,6 +7969,9 @@ mod tests {
         assert_eq!(argv, vec!["herdr", "edit", "/tmp/foo.rs", "--line=42"]);
     }
 
+    /// The name has always claimed the path survives a token whose other
+    /// placeholder came up empty. Until the separator carve-out it did not,
+    /// and `code --goto` opened the editor on nothing.
     #[test]
     fn file_command_template_keeps_path_only_token_and_unknown_placeholder() {
         let argv = expand_file_command_template(
@@ -7941,7 +7980,48 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(argv, vec!["code", "--goto", "{other}"]);
+        assert_eq!(argv, vec!["code", "--goto", "/tmp/foo.rs", "{other}"]);
+    }
+
+    /// The shape an editor's CLI asks for, against all three link shapes. A
+    /// missing column has to cost the column alone, never the file.
+    #[test]
+    fn file_command_template_drops_only_the_absent_half_of_a_path_token() {
+        let expand = |line, column| {
+            expand_file_command_template(
+                "code --goto {path}:{line}:{column}",
+                Path::new("/tmp/foo.rs"),
+                line,
+                column,
+            )
+        };
+        assert_eq!(
+            expand(Some(50), Some(3)),
+            vec!["code", "--goto", "/tmp/foo.rs:50:3"]
+        );
+        assert_eq!(
+            expand(Some(50), None),
+            vec!["code", "--goto", "/tmp/foo.rs:50"],
+            "a line with no column is the commonest of the three shapes"
+        );
+        assert_eq!(expand(None, None), vec!["code", "--goto", "/tmp/foo.rs"]);
+    }
+
+    /// `#`, `:`, `=` and `,` are all legal in a filename, so the rewind for an
+    /// absent placeholder stops at the joint rather than walking back through
+    /// whatever the path ends in. An Emacs autosave is called `#foo#`, and
+    /// eating that `#` opens a different file rather than none.
+    #[test]
+    fn an_absent_placeholder_does_not_eat_the_path_it_was_joined_to() {
+        for name in ["/tmp/foo#", "/tmp/foo:", "/tmp/foo=", "/tmp/foo,"] {
+            let argv = expand_file_command_template(
+                "code --goto {path}:{line}",
+                Path::new(name),
+                None,
+                None,
+            );
+            assert_eq!(argv, vec!["code", "--goto", name], "{name}");
+        }
     }
 
     /// #542's contract: a failed open is an `Err` the click site can toast,

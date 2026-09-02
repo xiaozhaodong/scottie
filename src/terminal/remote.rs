@@ -1221,21 +1221,48 @@ impl RemoteTerminal {
                                 // geometry — exactly what the `Snapshot` arm ends its
                                 // sync for and this one does not. Logged so a garbled
                                 // screen can be matched against a timestamp.
+                                //
+                                // The clean case is recorded too, because the warn
+                                // cannot be read on its own: a run without it means
+                                // either that no resize ever collided or that the
+                                // geometry never moved at all, and those are different
+                                // findings. Both lines open with "resize landed", so a
+                                // single grep censuses every Size that arrived.
                                 let mid_sync = processor.sync_timeout().sync_timeout().is_some();
                                 {
+                                    use alacritty_terminal::grid::Dimensions as _;
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
                                     }
+                                    let (from_cols, from_rows) =
+                                        (term.columns(), term.screen_lines());
                                     if mid_sync {
-                                        use alacritty_terminal::grid::Dimensions as _;
                                         log::warn!(
                                             "resize landed mid synchronized-update: {}x{} -> {}x{}, {} bytes held",
-                                            term.columns(),
-                                            term.screen_lines(),
+                                            from_cols,
+                                            from_rows,
                                             ws.cols,
                                             ws.rows,
                                             processor.sync_bytes_count(),
+                                        );
+                                    } else if from_cols != ws.cols as usize
+                                        || from_rows != ws.rows as usize
+                                    {
+                                        // Only a Size that moves the grid is
+                                        // worth a line. Replay precedes every
+                                        // ring segment with its own Size, so a
+                                        // reconnect would otherwise file one of
+                                        // these per segment with nothing to
+                                        // report — and a Size that reflows
+                                        // nothing could not have collided with
+                                        // anything either.
+                                        log::info!(
+                                            "resize landed clear of a synchronized update: {}x{} -> {}x{}",
+                                            from_cols,
+                                            from_rows,
+                                            ws.cols,
+                                            ws.rows,
                                         );
                                     }
                                     term.resize(TermSize::new(

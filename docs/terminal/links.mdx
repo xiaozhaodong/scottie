@@ -33,6 +33,12 @@ or a command echoed inside a call the line ends before closing, which is what a
 coding agent prints on every tool call. The word as written is still tried
 first, because `=` and `(` are legal in a filename.
 
+A trailing `:12` sends the editor to that line and `:12:5` to that column. A
+span is read as the line it opens on, so `remote.rs:1215-1247` — how a review
+note or a coding agent names a region — lands on 1215. A span has to end at or
+after it starts, which is what keeps `notes:2026-09-02` and `notes:2026-09`
+names rather than line numbers.
+
 Paths in a pane connected to another machine are resolved *on that machine*,
 so the underline appears a moment after the pointer settles rather than
 instantly. A pane running `ssh` typed into a local shell has no host that can
@@ -61,7 +67,10 @@ herdr edit {path} --line={line}
 
 `{path}`, `{line}`, and `{column}` are filled in from the link. A flag whose
 value is not available is dropped rather than passed empty — so
-`--line={line}` simply disappears when the link had no line number.
+`--line={line}` simply disappears when the link had no line number. A word
+holding `{path}` keeps the path either way: on a link naming a line but no
+column, `{path}:{line}:{column}` passes `/tmp/foo.rs:12` rather than dropping
+the file along with the column.
 
 The settings are `link_file_open` (`internal`, `system`, or `command`) and
 `link_file_command` in `config.json`. A config written before `link_file_open`
