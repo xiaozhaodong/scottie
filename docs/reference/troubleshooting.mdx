@@ -44,6 +44,10 @@ TTY7_LOG=info   # must be set before the server starts
 tty7 server logs
 ```
 
+The app window logs separately, and a GUI started from the Dock inherits no
+shell environment. Set `"log_level": "info"` in `config.json`, restart Scottie,
+and read `tty7.log` beside it.
+
 ## Panes came back empty
 
 A crash, a `kill -9`, or a reboot takes the shells with it — that part is

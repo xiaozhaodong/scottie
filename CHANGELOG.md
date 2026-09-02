@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.9.2] - 2026-09-02
+
+### Fixed
+
+- **A path glued to a prefix is found anyway.** A path no longer has to stand
+  as its own word: a flag (`--config=/etc/app.conf`), a shell assignment, or
+  the unclosed command echo a coding agent prints on every tool call is seen
+  through. The token as written is still tried first, because `=` and `(` are
+  legal in a filename.
+
+### Added
+
+- **`log_level` in `config.json`.** Off unless set; one of `error`, `warn`,
+  `info`, `debug`, `trace`. `TTY7_LOG` and `RUST_LOG` still win. This exists
+  because a GUI started from the Dock inherits no shell environment, so
+  `TTY7_LOG` could not reach it, and the config `env` map reaches the pane's
+  shell rather than Scottie itself.
+
+### Internal
+
+- **A resize that lands mid synchronized-update is now recorded.** If the
+  processor is inside a synchronized update when `DaemonMsg::Size` arrives,
+  `flush_batch!` drains nothing into the grid and the reflow that follows lands
+  on top of output produced at the old geometry — and alacritty reflows the
+  scrollback with it, so the damage is written into history. A `warn` names the
+  old and new geometry and how many bytes were held; a forced flush after the
+  synchronized-update timeout logs `info`. Observation only, no behaviour
+  change.
+
 ## [26.9.1] - 2026-09-01
 
 ### Fixed
@@ -4257,6 +4286,7 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[26.9.2]: https://github.com/xiaozhaodong/scottie/compare/v26.9.1...v26.9.2
 [26.9.1]: https://github.com/xiaozhaodong/scottie/compare/v26.8.7...v26.9.1
 [26.8.6]: https://github.com/xiaozhaodong/scottie/compare/v26.8.5...v26.8.6
 [26.8.3]: https://github.com/l0ng-ai/tty7/compare/v26.8.2...v26.8.3

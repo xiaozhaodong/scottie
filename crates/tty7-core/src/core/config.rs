@@ -329,6 +329,13 @@ pub struct Config {
     pub working_directory: WorkingDirectory,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Diagnostic logging level for the app's own log file, for users who
+    /// cannot set `TTY7_LOG` on a double-clicked GUI process (the config `env`
+    /// map reaches the pane's shell, never this process). `TTY7_LOG` /
+    /// `RUST_LOG` still win when set. Off unless asked for; one of `error`,
+    /// `warn`, `info`, `debug`, `trace`.
+    #[serde(default)]
+    pub log_level: Option<String>,
 
     #[serde(default)]
     pub ssh_profiles: Vec<crate::core::ssh_profile::SshProfile>,
@@ -663,6 +670,7 @@ impl Default for Config {
             remember_window_size: true,
             working_directory: WorkingDirectory::default(),
             env: HashMap::new(),
+            log_level: None,
             ssh_profiles: Vec::new(),
             verify_host_keys: true,
             ssh_warn_on_close: false,
@@ -849,6 +857,11 @@ impl Config {
             .take()
             .map(|proxy| proxy.trim().to_string())
             .filter(|proxy| !proxy.is_empty());
+        self.log_level = self
+            .log_level
+            .take()
+            .map(|level| level.trim().to_string())
+            .filter(|level| !level.is_empty());
         if !SUPPORTED_GUI_LANGUAGES.contains(&self.gui_language.as_str()) {
             self.gui_language = default_gui_language();
         }
@@ -1988,6 +2001,21 @@ mod tests {
             normalize(Some("  http://127.0.0.1:7890 ")),
             Some("http://127.0.0.1:7890".to_string())
         );
+    }
+
+    #[test]
+    fn sanitize_normalizes_blank_log_level_to_none() {
+        let normalize = |level: Option<&str>| {
+            let mut cfg = Config {
+                log_level: level.map(String::from),
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.log_level
+        };
+        assert_eq!(normalize(None), None);
+        assert_eq!(normalize(Some("  ")), None);
+        assert_eq!(normalize(Some(" info ")), Some("info".to_string()));
     }
 
     #[test]

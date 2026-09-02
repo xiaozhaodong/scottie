@@ -39,7 +39,7 @@ impl Log for FileLogger {
 }
 
 pub fn install(role: &'static str) {
-    let level = level_from_env();
+    let level = level_from_env().unwrap_or_else(level_from_config);
     if level == LevelFilter::Off {
         return;
     }
@@ -57,11 +57,25 @@ pub fn install(role: &'static str) {
     }
 }
 
-fn level_from_env() -> LevelFilter {
+/// `None` when neither variable is set, so the config file gets its turn. An
+/// unparseable value is a deliberate `Off` rather than a fall-through: the
+/// environment is the more specific instruction of the two.
+fn level_from_env() -> Option<LevelFilter> {
     let raw = std::env::var("TTY7_LOG")
         .or_else(|_| std::env::var("RUST_LOG"))
-        .unwrap_or_default();
-    parse_level(&raw)
+        .ok()?;
+    Some(parse_level(&raw))
+}
+
+/// A GUI launched from Finder or the Dock inherits no shell environment, so
+/// `TTY7_LOG` cannot reach it; `log_level` in the config file is how that
+/// process is asked for a log. Read once at startup — this runs before the
+/// logger exists, so nothing here can log.
+fn level_from_config() -> LevelFilter {
+    crate::core::config::Config::load()
+        .log_level
+        .as_deref()
+        .map_or(LevelFilter::Off, parse_level)
 }
 
 fn parse_level(raw: &str) -> LevelFilter {

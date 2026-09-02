@@ -182,6 +182,12 @@ angle brackets, and a tab:
 
 [Updates →](/reference/updates)
 
+## Diagnostics
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `log_level` | string | — | Off unless set. One of `error`, `warn`, `info`, `debug`, `trace`; writes to `tty7.log` next to this file, capped at 4 MB. `TTY7_LOG` / `RUST_LOG` override it — this key exists because a GUI started from the Dock inherits no shell environment, and the `env` map above reaches the pane's shell, not Scottie itself. |
+
 ## Keys Scottie manages itself
 
 `ssh_profile_frecency` and `command_frecency` record how often and how recently
