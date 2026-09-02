@@ -391,7 +391,28 @@ pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
             per_platform("secondary-k", "secondary-shift-k"),
         ),
         ("InsertNewline", INSERT_NEWLINE_DEFAULT),
-        ("CopyText", per_platform("", "ctrl-shift-c")),
+        // macOS binds ⌘C here for the menu bar rather than for the pane: gpui
+        // reads `bindings_for_action` to set each item's key equivalent, and on
+        // macOS that equivalent is how an app states to the system that it can
+        // copy. Tools that lift a selection out of the frontmost window —
+        // PopClip and its kind — find the command through `AXMenuItemCmdChar`
+        // rather than the item's title, which is localised. While this was
+        // empty the Edit menu's Copy item was enabled but mute, so a selection
+        // made in a pane was invisible to them.
+        //
+        // Binding it also moves the dispatch: an action listener stops
+        // propagation by default in the bubble phase, so ⌘C now reaches
+        // `CopyText` and no longer reaches `handle_cmd_shortcut`. Both call
+        // `copy_contextual`, and ⌘C encodes to no bytes, so the pane behaves
+        // exactly as before — and that arm stays the fallback that keeps ⌘C
+        // copying for anyone who rebinds `CopyText` somewhere else.
+        //
+        // The menu's own lookup is more fragile than it looks: it evaluates
+        // this binding's `Terminal` predicate against a hardcoded
+        // Workspace/Pane/Editor context, which can never match, and reaches
+        // this entry only because `find_or_first` falls back to the first one.
+        // A second `CopyText` chord would be the one the menu displays.
+        ("CopyText", per_platform("secondary-c", "ctrl-shift-c")),
         ("PasteText", paste_text_default()),
         ("AlternatePaste", alternate_paste_default()),
         ("OpenSettings", "secondary-,"),
@@ -1600,6 +1621,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn copy_keeps_a_default_chord_so_the_menu_item_is_not_mute() {
+        // What the keymap owns here is the menu bar, not the pane: gpui reads
+        // `bindings_for_action` to give each item its key equivalent, and on
+        // macOS that equivalent is an app's statement to the system that it
+        // can copy. Tools that lift the frontmost selection locate the command
+        // by `AXMenuItemCmdChar`, not by the item's title — the title is
+        // localised — so an empty chord leaves Copy enabled but mute and a
+        // selection made in a pane cannot be picked up. The pane itself does
+        // not depend on this: ⌘C is answered by the `CopyText` action while a
+        // chord is bound here and by `handle_cmd_shortcut` when none is. The
+        // chord is free to move; being bound at all is the invariant.
+        let chord = default_bindings()
+            .into_iter()
+            .find(|(action, _)| *action == "CopyText")
+            .map(|(_, chord)| chord)
+            .expect("CopyText is a default binding");
+        assert!(
+            !chord.is_empty(),
+            "CopyText needs a default chord on macOS: without one the Edit \
+             menu's Copy item carries no key equivalent, and system-wide text \
+             tools stop seeing selections made in a pane."
+        );
     }
 
     #[test]

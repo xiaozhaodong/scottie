@@ -215,10 +215,15 @@ impl CommandKind {
 
     fn key_spec(&self, cx: &App) -> Option<String> {
         use CommandKind::*;
+        // Cut, paste and select-all are answered by `handle_cmd_shortcut`
+        // alone on macOS — the keymap holds no chord for them — so the row
+        // would read empty without this. Copy is deliberately absent: it earns
+        // its keymap entry from the menu bar (see `default_bindings`), and
+        // going through the keymap is what keeps this row honest when a user
+        // moves the chord.
         let inline =
             |spec: &str| -> Option<String> { cfg!(target_os = "macos").then(|| spec.to_string()) };
         match self {
-            CopyText => return inline("secondary-c"),
             CutText => return inline("secondary-x"),
             PasteText => return inline("secondary-v"),
             SelectAllText => return inline("secondary-a"),
@@ -300,8 +305,8 @@ impl CommandKind {
             ScmCreateBranch => "ScmCreateBranch",
             OpenBranchPicker => "ScmCheckoutBranch",
             ToggleDiffViewMode => "ToggleDiffViewMode",
-            CopyText
-            | CutText
+            CopyText => "CopyText",
+            CutText
             | PasteText
             | SelectAllText
             | SendSelectionToAgent
