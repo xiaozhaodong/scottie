@@ -1214,56 +1214,10 @@ impl RemoteTerminal {
                             // this frame must be parsed into the old grid.
                             DaemonMsg::Size(ws) => {
                                 flush_batch!();
-                                // Observation only, for the render-corruption hunt: a
-                                // synchronized update still holding bytes here means
-                                // `flush_batch!` drained nothing into the grid, and the
-                                // reflow below lands on top of output produced at the old
-                                // geometry — exactly what the `Snapshot` arm ends its
-                                // sync for and this one does not. Logged so a garbled
-                                // screen can be matched against a timestamp.
-                                //
-                                // The clean case is recorded too, because the warn
-                                // cannot be read on its own: a run without it means
-                                // either that no resize ever collided or that the
-                                // geometry never moved at all, and those are different
-                                // findings. Both lines open with "resize landed", so a
-                                // single grep censuses every Size that arrived.
-                                let mid_sync = processor.sync_timeout().sync_timeout().is_some();
                                 {
-                                    use alacritty_terminal::grid::Dimensions as _;
                                     let mut term = term.lock();
                                     if quit.load(Ordering::SeqCst) {
                                         return;
-                                    }
-                                    let (from_cols, from_rows) =
-                                        (term.columns(), term.screen_lines());
-                                    if mid_sync {
-                                        log::warn!(
-                                            "resize landed mid synchronized-update: {}x{} -> {}x{}, {} bytes held",
-                                            from_cols,
-                                            from_rows,
-                                            ws.cols,
-                                            ws.rows,
-                                            processor.sync_bytes_count(),
-                                        );
-                                    } else if from_cols != ws.cols as usize
-                                        || from_rows != ws.rows as usize
-                                    {
-                                        // Only a Size that moves the grid is
-                                        // worth a line. Replay precedes every
-                                        // ring segment with its own Size, so a
-                                        // reconnect would otherwise file one of
-                                        // these per segment with nothing to
-                                        // report — and a Size that reflows
-                                        // nothing could not have collided with
-                                        // anything either.
-                                        log::info!(
-                                            "resize landed clear of a synchronized update: {}x{} -> {}x{}",
-                                            from_cols,
-                                            from_rows,
-                                            ws.cols,
-                                            ws.rows,
-                                        );
                                     }
                                     term.resize(TermSize::new(
                                         ws.cols as usize,
@@ -1467,22 +1421,12 @@ impl RemoteTerminal {
                             let left =
                                 deadline.saturating_duration_since(std::time::Instant::now());
                             if left.is_zero() {
-                                let held = processor.sync_bytes_count();
                                 let mut term = term.lock();
                                 if quit.load(Ordering::SeqCst) {
                                     return;
                                 }
                                 processor.stop_sync(&mut *term);
                                 drop(term);
-                                // Observation only: a frame that did not arrive whole
-                                // within the 150 ms budget gets split onto the screen
-                                // here. Splitting alone does not change the final grid
-                                // (proven by exhausting every split point), but the rate
-                                // measures how slow the link runs — and that is the
-                                // precondition for a resize to land inside a frame.
-                                log::info!(
-                                    "synchronized-update timed out, force-flushed {held} bytes"
-                                );
                                 proxy.send_event(AlacEvent::Wakeup);
                                 continue;
                             }

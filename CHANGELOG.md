@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+
+- **The resize observation logs are withdrawn.** Neither line ever fired in
+  anger: over the observation window `mid synchronized-update` came back 0
+  times and the forced flush 0 times, against 107 recorded resizes that landed
+  clear. What retired the hunt was not the counts but the premise — the same
+  corruption turned out to reproduce in other terminals, so it is not ours, and
+  it matches claude-code#81135: a live region redrawn after a resize leaves the
+  cells past the new width uncleared, the same message lands twice at two
+  widths, and the damage goes into scrollback for good. The `DaemonMsg::Size`
+  path is not cleared by this, only set aside — 0 hits across 13 usable samples
+  falsifies nothing. `git show ce8c599` still holds the patch if it has to be
+  rebuilt.
+
 ## [26.9.3] - 2026-09-02
 
 ### Fixed
