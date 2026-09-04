@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.9.4] - 2026-09-04
+
 ### Added
 
 - **Remote programs can copy images to the local clipboard over SSH.** A saved
@@ -25,6 +27,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Choosing **Default** back applies immediately instead of at the next launch,
   and the key is written out as `null` when unset rather than disappearing from
   the file, so `config.json` still lists what can be set by hand.
+
+### Changed
+
+- **The pane protocol moves to v6, so the daemon has to restart once.** The
+  clipboard permission rides along on `Attach`, which changes that frame's
+  shape — a v5 daemon and a v6 window have no way to read each other's. The
+  disagreement is caught during startup and put up as the existing prompt
+  rather than surfacing as a failed connect, and that prompt is **Restart or
+  Quit**: there is no carrying on beside a server whose number disagrees,
+  because panes would go on spawning while every machine-tree call was refused
+  — a window that opens with no tabs and saves none of the ones you make.
+  Restart ends every process the daemon owns: the shells, the agents, the SSH
+  sessions. Quit destroys nothing and leaves the old server and its shells
+  running, which is the answer if you would rather land what is in flight
+  first.
 
 ### Fixed
 
