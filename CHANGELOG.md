@@ -16,6 +16,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and never enter scrollback or replay after reconnecting. The permission is
   off by default; clipboard reads and SVG writes remain unsupported.
 
+- **The interface font is yours to pick.** **Settings → Appearance → Typography
+  → Interface font family** (`ui_font_family` in `config.json`) sets the face
+  for tabs, sidebars, dialogs and settings; the terminal grid keeps its own
+  `font_family`. Unset means the system UI font, and the row now says that
+  rather than borrowing the bold/italic label's "Default (match primary)",
+  which promised the terminal's primary face for chrome that never used it.
+  Choosing **Default** back applies immediately instead of at the next launch,
+  and the key is written out as `null` when unset rather than disappearing from
+  the file, so `config.json` still lists what can be set by hand.
+
+### Fixed
+
+- **↑ and Ctrl+P recall the last command matching what you typed.** The prompt
+  editor walked history in file-load order and ignored the prefix already on
+  the line, so the first press surfaced whatever had been concatenated last —
+  often a stale record from Scottie's own history file, or a command with
+  nothing to do with what was being typed. It keeps the prefix from when
+  navigation started and matches on the text left of the cursor, the way zsh's
+  `up-line-or-beginning-search` does, and merged history files are ordered by
+  timestamp — bash lines carrying none borrow the file's mtime rather than
+  sorting as the oldest thing there is.
+
 ### Internal
 
 - **The resize observation logs are withdrawn.** Neither line ever fired in
