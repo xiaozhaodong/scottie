@@ -32,7 +32,6 @@ impl CmdEditor {
         self.cursor
     }
 
-    #[allow(dead_code)]
     pub fn cursor_byte(&self) -> usize {
         self.chars[..self.cursor].iter().map(|c| c.len_utf8()).sum()
     }

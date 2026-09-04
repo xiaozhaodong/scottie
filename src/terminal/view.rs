@@ -307,6 +307,8 @@ pub struct TerminalView {
     /// been prepared for this pane. `None` means "not prepared yet", never
     /// "preparation failed" — see [`staging_cache`].
     remote_clipboard_dir: Option<String>,
+    remote_clipboard_write_in_flight: Option<u64>,
+    remote_clipboard_write_generation: u64,
     pub focus_handle: FocusHandle,
     /// See [`displayed_registry`]. Shared with the registry so the app can
     /// flip it during a draw without an entity access.
@@ -424,6 +426,7 @@ pub struct TerminalView {
     ranked_cwd: Option<std::path::PathBuf>,
     history_nav: Option<usize>,
     history_stash: String,
+    history_prefix: String,
     last_word_nav: Option<LastWordWalk>,
     pending_history: Option<PendingHistory>,
     completion: Option<CompletionSession>,
@@ -840,6 +843,23 @@ fn remote_paste_spec<'a>(
     ssh_spec
 }
 
+/// Whether this pane may hand a remote program's image to the system clipboard.
+///
+/// The daemon is the gate. It holds the `NativeSshSpec` that dialled the host
+/// and answers a write the profile forbids with `EPERM` before a byte of image
+/// reaches this process; a pane it never granted the permission to sends no
+/// `ClipboardWrite` at all. This is a second opinion, and it can only give one
+/// when the pane kept a copy of that spec. A pane restored by attaching to its
+/// id did not keep one — reading that absence as "forbidden" is what put the
+/// permission to sleep on the first restart after the user granted it. So:
+/// refuse what this side can see is forbidden, and defer otherwise.
+fn allows_remote_clipboard_write(
+    workspace: Option<&crate::terminal::PaneWorkspace>,
+    ssh_spec: Option<&crate::daemon::protocol::NativeSshSpec>,
+) -> bool {
+    remote_paste_spec(workspace, ssh_spec).is_none_or(|spec| spec.remote_clipboard_write)
+}
+
 /// Whether a pane stages the clipboard image to a file instead of forwarding
 /// SYN and letting the agent read the clipboard itself.
 ///
@@ -1045,6 +1065,34 @@ fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> 
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .ok()?;
     Some(out)
+}
+
+fn validate_remote_clipboard_image(
+    write: tty7_core::core::clipboard::ClipboardWrite,
+) -> Result<(gpui::Image, Option<String>), String> {
+    let (gpui_format, image_format) = match write.mime.as_str() {
+        "image/png" => (gpui::ImageFormat::Png, image::ImageFormat::Png),
+        "image/jpeg" | "image/jpg" => (gpui::ImageFormat::Jpeg, image::ImageFormat::Jpeg),
+        "image/gif" => (gpui::ImageFormat::Gif, image::ImageFormat::Gif),
+        "image/webp" => (gpui::ImageFormat::Webp, image::ImageFormat::WebP),
+        _ => return Err("unsupported image MIME type".into()),
+    };
+    if image::guess_format(&write.data).ok() != Some(image_format) {
+        return Err("image signature does not match its MIME type".into());
+    }
+
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(&write.data), image_format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(256 << 20);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|e| format!("invalid or oversized image: {e}"))?;
+
+    Ok((gpui::Image::from_bytes(gpui_format, write.data), write.id))
 }
 
 fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
@@ -1357,6 +1405,8 @@ impl TerminalView {
             restored: false,
             ssh_spec: None,
             remote_clipboard_dir: None,
+            remote_clipboard_write_in_flight: None,
+            remote_clipboard_write_generation: 0,
             focus_handle,
             displayed,
             font,
@@ -1429,6 +1479,7 @@ impl TerminalView {
             ranked_cwd: None,
             history_nav: None,
             history_stash: String::new(),
+            history_prefix: String::new(),
             last_word_nav: None,
             pending_history: None,
             completion: None,
@@ -1743,6 +1794,9 @@ impl TerminalView {
         cell_h: u16,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        self.remote_clipboard_write_generation =
+            self.remote_clipboard_write_generation.wrapping_add(1);
+        self.remote_clipboard_write_in_flight = None;
         self.terminal
             .adopt_relink(stream, buffered, route, size, cell_w, cell_h)?;
         self.relink_abandoned = false;
@@ -2023,9 +2077,62 @@ impl TerminalView {
         }
     }
 
+    fn poll_remote_clipboard_write(&mut self, cx: &mut Context<Self>) {
+        if self.remote_clipboard_write_in_flight.is_some() {
+            return;
+        }
+        let write = loop {
+            let Some(write) = self.terminal.pop_clipboard_write() else {
+                return;
+            };
+            if allows_remote_clipboard_write(self.workspace.as_ref(), self.ssh_spec.as_deref()) {
+                break write;
+            }
+            self.terminal.finish_clipboard_write();
+            self.terminal.write(tty7_core::core::clipboard::response(
+                write.id.as_deref(),
+                "EPERM",
+            ));
+        };
+
+        let generation = self.remote_clipboard_write_generation;
+        self.remote_clipboard_write_in_flight = Some(generation);
+        let request_id = write.id.clone();
+        cx.spawn(async move |view, cx| {
+            let validated = cx
+                .background_spawn(async move { validate_remote_clipboard_image(write) })
+                .await;
+            view.update(cx, |view, cx| {
+                if view.remote_clipboard_write_in_flight != Some(generation) {
+                    return;
+                }
+                view.remote_clipboard_write_in_flight = None;
+                view.terminal.finish_clipboard_write();
+                match validated {
+                    Ok((image, id)) => {
+                        cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                        view.terminal
+                            .write(tty7_core::core::clipboard::response(id.as_deref(), "DONE"));
+                    }
+                    Err(reason) => {
+                        log::warn!("refusing remote clipboard image: {reason}");
+                        view.terminal.write(tty7_core::core::clipboard::response(
+                            request_id.as_deref(),
+                            "EINVAL",
+                        ));
+                    }
+                }
+                view.poll_remote_clipboard_write(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn handle_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) {
         self.terminal.poll_exited();
         self.sync_typeahead_owner();
+        self.poll_remote_clipboard_write(cx);
         if self.terminal.has_pending_auth() {
             cx.emit(AuthPromptReady);
         }
@@ -4195,6 +4302,7 @@ impl TerminalView {
         }
         self.history_nav = None;
         self.history_stash.clear();
+        self.history_prefix.clear();
         self.close_completion();
 
         self.wipe_pending_typeahead();
@@ -4256,32 +4364,44 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Walk older history, matching the prefix captured when navigation
+    /// started — zsh's `up-line-or-beginning-search`, which macOS users get
+    /// from ↑ and Ctrl+P. The prefix is the text left of the cursor, so
+    /// Ctrl+A then ↑ walks every entry; the whole line is stashed separately
+    /// because ↓ past the newest match has to restore what was typed, cursor
+    /// tail included.
     fn history_prev(&mut self, cx: &mut Context<Self>) {
-        if self.history.is_empty() {
-            return;
-        }
-        let next = match self.history_nav {
+        let from = match self.history_nav {
             None => {
-                self.history_stash = self.cmd.text();
-                self.history.len() - 1
+                let line = self.cmd.text();
+                self.history_prefix = line[..self.cmd.cursor_byte()].to_string();
+                self.history_stash = line;
+                self.history.len()
             }
-            Some(0) => 0,
-            Some(i) => i - 1,
+            Some(i) => i,
         };
-        self.history_nav = Some(next);
-        self.cmd.set(&self.history[next]);
-        cx.notify();
+        if let Some(next) = (0..from)
+            .rev()
+            .find(|&i| self.history[i].starts_with(&self.history_prefix))
+        {
+            self.history_nav = Some(next);
+            self.cmd.set(&self.history[next]);
+            cx.notify();
+        }
     }
 
     fn history_next(&mut self, cx: &mut Context<Self>) {
         let Some(i) = self.history_nav else {
             return;
         };
-        if i + 1 < self.history.len() {
-            self.history_nav = Some(i + 1);
-            self.cmd.set(&self.history[i + 1]);
+        if let Some(next) =
+            (i + 1..self.history.len()).find(|&j| self.history[j].starts_with(&self.history_prefix))
+        {
+            self.history_nav = Some(next);
+            self.cmd.set(&self.history[next]);
         } else {
             self.history_nav = None;
+            self.history_prefix.clear();
             let stash = std::mem::take(&mut self.history_stash);
             self.cmd.set(&stash);
         }
@@ -7824,6 +7944,44 @@ mod tests {
         );
     }
 
+    /// A pane restored by attaching to its id carries no copy of the spec that
+    /// dialled the host. The daemon still has one, and still refuses a write
+    /// the profile forbids — so a missing copy here is not a verdict.
+    #[test]
+    fn a_pane_without_its_own_spec_defers_to_the_daemons_verdict() {
+        let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+            r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+        )
+        .unwrap();
+        assert!(!super::allows_remote_clipboard_write(None, Some(&spec)));
+        spec.remote_clipboard_write = true;
+        assert!(super::allows_remote_clipboard_write(None, Some(&spec)));
+        assert!(super::allows_remote_clipboard_write(None, None));
+    }
+
+    #[test]
+    fn remote_clipboard_images_must_match_their_declared_mime() {
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let valid = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/png".into(),
+            data: png.clone(),
+            id: None,
+        };
+        assert!(super::validate_remote_clipboard_image(valid).is_ok());
+
+        let mismatched = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/jpeg".into(),
+            data: png,
+            id: None,
+        };
+        assert!(super::validate_remote_clipboard_image(mismatched).is_err());
+    }
+
     #[test]
     fn a_wsl_pane_gets_the_automount_path_not_the_windows_one() {
         // The staged file really is on the pane's own disk — only its name
@@ -10240,6 +10398,109 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn allowed_remote_clipboard_image_reaches_the_system_clipboard(cx: &mut TestAppContext) {
+        use gpui::ClipboardEntry;
+
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+                    r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                )
+                .unwrap();
+                spec.remote_clipboard_write = true;
+                view.ssh_spec = Some(Box::new(spec));
+            })
+            .unwrap();
+
+        let pixel = image::RgbaImage::from_pixel(1, 1, image::Rgba([4, 5, 6, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(pixel)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let write = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/png".into(),
+            data: png.clone(),
+            id: Some("copy-1".into()),
+        };
+        DaemonMsg::ClipboardWrite(write.encode_frame())
+            .encode(&mut daemon)
+            .unwrap();
+
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let copied = cx.update(|cx| {
+                cx.read_from_clipboard().and_then(|item| {
+                    item.entries().iter().find_map(|entry| match entry {
+                        ClipboardEntry::Image(image) => Some(image.bytes.clone()),
+                        _ => None,
+                    })
+                })
+            });
+            if copied.as_deref() == Some(png.as_slice()) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let copied = cx.update(|cx| cx.read_from_clipboard());
+        assert!(copied.is_some_and(|item| {
+            item.entries()
+                .iter()
+                .any(|entry| matches!(entry, ClipboardEntry::Image(image) if image.bytes == png))
+        }));
+        assert_eq!(
+            next_input(&mut daemon),
+            tty7_core::core::clipboard::response(Some("copy-1"), "DONE")
+        );
+    }
+
+    #[gpui::test]
+    fn disabled_remote_clipboard_image_is_rejected_without_overwriting(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.ssh_spec = Some(Box::new(
+                    serde_json::from_str(
+                        r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+                    )
+                    .unwrap(),
+                ));
+            })
+            .unwrap();
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("keep me".into())));
+
+        let write = tty7_core::core::clipboard::ClipboardWrite {
+            mime: "image/png".into(),
+            data: vec![1, 2, 3],
+            id: Some("copy-2".into()),
+        };
+        DaemonMsg::ClipboardWrite(write.encode_frame())
+            .encode(&mut daemon)
+            .unwrap();
+        let mut reply = None;
+        for _ in 0..100 {
+            cx.run_until_parked();
+            reply = next_input_until_timeout(&mut daemon);
+            if reply.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            reply,
+            Some(tty7_core::core::clipboard::response(
+                Some("copy-2"),
+                "EPERM"
+            ))
+        );
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+                .as_deref(),
+            Some("keep me")
+        );
+    }
+
+    #[gpui::test]
     fn ctrl_l_at_prompt_reaches_the_shell(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
         window
@@ -12088,6 +12349,75 @@ mod gpui_tests {
                 assert_eq!(view.cmd.text(), "echo hello");
                 view.handle_editor_key(&key("ctrl-n"), cx);
                 assert_eq!(view.cmd.text(), "");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn up_and_ctrl_p_recall_the_last_command_matching_the_typed_prefix(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "echo hello", "git log", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                view.cmd.set("git");
+
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "git log",
+                    "↑ skips ls and echo hello, which do not start with git"
+                );
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(view.cmd.text(), "git status");
+                view.handle_editor_key(&key("down"), cx);
+                assert_eq!(view.cmd.text(), "git log");
+                view.handle_editor_key(&key("down"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "git",
+                    "↓ past the newest match restores the prefix"
+                );
+
+                view.cmd.set("echo");
+                view.handle_editor_key(&key("ctrl-p"), cx);
+                assert_eq!(view.cmd.text(), "echo hello");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn history_search_takes_its_prefix_from_the_text_left_of_the_cursor(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.history = ["git status", "echo hello", "git log", "ls"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+
+                // Ctrl+A parks the cursor at the start. Nothing sits left of
+                // it, so UP walks the whole list instead of filtering on a line
+                // the user is about to edit in front of.
+                view.cmd.set_with_cursor("git", 0);
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(view.cmd.text(), "ls", "an empty prefix filters nothing");
+
+                // A cursor parked mid-line searches on what is behind it, and
+                // DOWN past the newest match restores the whole line, the part
+                // right of the cursor included.
+                view.history_nav = None;
+                view.cmd.set_with_cursor("git hello", 4);
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "git log",
+                    "the prefix is `git `, not the whole `git hello`"
+                );
+                view.handle_editor_key(&key("down"), cx);
+                assert_eq!(view.cmd.text(), "git hello");
             })
             .unwrap();
     }

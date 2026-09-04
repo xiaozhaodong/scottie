@@ -410,6 +410,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
+            title: SettingsUiFontFamily,
+            keywords: SettingsSearchUiFontFamilyKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
             title: SettingsLineHeight,
             keywords: SettingsSearchLineHeightKeywords,
         },
@@ -835,6 +840,7 @@ pub(crate) struct SettingsState {
     pub(crate) font_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_bold_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) font_italic_select: Entity<SelectState<SearchableVec<String>>>,
+    pub(crate) ui_font_select: Entity<SelectState<SearchableVec<String>>>,
     pub(crate) language_select: Entity<SelectState<SearchableVec<String>>>,
     #[cfg(target_os = "windows")]
     pub(crate) window_backdrop_select: Entity<SelectState<SearchableVec<String>>>,
@@ -984,6 +990,7 @@ pub(crate) struct SshProfileForm {
     x11: bool,
     skip_banner: bool,
     shell_integration: bool,
+    remote_clipboard_write: bool,
     verify_host_keys: Option<bool>,
     warn_on_close: Option<bool>,
 
@@ -1065,6 +1072,15 @@ pub(crate) struct Recording {
 
 pub(crate) fn font_default_label() -> &'static str {
     t(L10nKey::SettingsFontDefault)
+}
+
+/// The same first row for the interface face, spelled for what it actually
+/// does. The bold and italic dropdowns fall back to the *terminal's* primary
+/// family, which is what their label promises; the interface falls back to the
+/// system UI font instead, so it cannot borrow that label without telling the
+/// reader the chrome will come out in Hack.
+pub(crate) fn ui_font_default_label() -> &'static str {
+    t(L10nKey::SettingsUiFontDefault)
 }
 
 #[cfg(target_os = "macos")]
@@ -1221,6 +1237,7 @@ pub(crate) struct SshFormDraft {
     warn_on_close: Option<bool>,
     skip_banner: bool,
     shell_integration: bool,
+    remote_clipboard_write: bool,
     login_scripts: String,
     x11: bool,
     kex: String,
@@ -1318,6 +1335,7 @@ fn validate_ssh_draft(draft: SshFormDraft, profiles: &[SshProfile]) -> (SshProfi
         warn_on_close: draft.warn_on_close,
         skip_banner: draft.skip_banner,
         shell_integration: draft.shell_integration,
+        remote_clipboard_write: draft.remote_clipboard_write,
         login_scripts: split_lines(&draft.login_scripts),
         x11: draft.x11,
         algorithms: Algorithms {
@@ -2205,12 +2223,13 @@ impl Tty7App {
         let hover_bg = gpui::rgb(cx.global::<presets::Surfaces>().window.hover);
         let stepper_bg = theme.secondary.opacity(0.35);
         let font_size = self.font_size;
-        let (font_select, font_bold_select, font_italic_select, language_select) =
+        let (font_select, font_bold_select, font_italic_select, ui_font_select, language_select) =
             match self.active_settings() {
                 Some(s) => (
                     s.font_select.clone(),
                     s.font_bold_select.clone(),
                     s.font_italic_select.clone(),
+                    s.ui_font_select.clone(),
                     s.language_select.clone(),
                 ),
                 None => return div().into_any_element(),
@@ -2333,6 +2352,7 @@ impl Tty7App {
         let font_family_control = font_dropdown(&font_select);
         let font_bold_control = font_dropdown(&font_bold_select);
         let font_italic_control = font_dropdown(&font_italic_select);
+        let ui_font_family_control = font_dropdown(&ui_font_select);
         let ligature_switch = crate::ui::theme::switch("font-ligatures", cx)
             .checked(font_ligatures)
             .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_font_ligatures(*on, cx)))
@@ -2402,6 +2422,12 @@ impl Tty7App {
                 t(L10nKey::SettingsUiFontSize),
                 t(L10nKey::SettingsUiFontSizeDesc),
                 ui_font_size_control,
+                cx,
+            ))
+            .child(self.settings_row(
+                t(L10nKey::SettingsUiFontFamily),
+                t(L10nKey::SettingsUiFontFamilyDesc),
+                ui_font_family_control,
                 cx,
             ))
             .child(self.settings_row(
@@ -3682,6 +3708,7 @@ impl Tty7App {
             x11: profile.x11,
             skip_banner: profile.skip_banner,
             shell_integration: profile.shell_integration,
+            remote_clipboard_write: profile.remote_clipboard_write,
             verify_host_keys: profile.verify_host_keys,
             warn_on_close: profile.warn_on_close,
             test: None,
@@ -3727,6 +3754,7 @@ impl Tty7App {
             warn_on_close: form.warn_on_close,
             skip_banner: form.skip_banner,
             shell_integration: form.shell_integration,
+            remote_clipboard_write: form.remote_clipboard_write,
             login_scripts: raw(&form.login_scripts),
             x11: form.x11,
             kex: raw(&form.kex),
@@ -4991,6 +5019,22 @@ impl Tty7App {
                 ),
             )
             .child(self.subgroup_header(L10nKey::SettingsGroupSecurity, cx))
+            .child(
+                self.settings_row(
+                    t(L10nKey::SettingsRemoteClipboardWrite),
+                    t(L10nKey::SettingsRemoteClipboardWriteDesc),
+                    crate::ui::theme::switch("ssh-form-remote-clipboard-write", cx)
+                        .checked(form.remote_clipboard_write)
+                        .on_click(cx.listener(|this, on: &bool, _w, cx| {
+                            if let Some(f) = this.ssh_form_mut() {
+                                f.remote_clipboard_write = *on;
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element(),
+                    cx,
+                ),
+            )
             .child(self.settings_row(
                 t(L10nKey::SettingsVerifyHostKeys),
                 t_fmt(

@@ -1,6 +1,7 @@
 pub mod agent_hooks;
 pub mod agent_title;
 pub mod cli_agent;
+pub mod clipboard;
 pub mod codename;
 pub mod config;
 pub mod crash;

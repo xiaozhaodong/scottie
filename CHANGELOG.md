@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Remote programs can copy images to the local clipboard over SSH.** A saved
+  host can opt into OSC 5522 clipboard writes under **Advanced → Security →
+  Remote clipboard images**. PNG, JPEG, GIF and WebP transfers are decoded out
+  of band, capped at 16 MiB, validated before they reach the system clipboard,
+  and never enter scrollback or replay after reconnecting. The permission is
+  off by default; clipboard reads and SVG writes remain unsupported.
+
 ### Internal
 
 - **The resize observation logs are withdrawn.** Neither line ever fired in

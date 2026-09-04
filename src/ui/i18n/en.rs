@@ -95,6 +95,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Text size everywhere outside the terminal — tabs, panels and settings. \
              Raise it on a display that is not Retina."
         }
+        L10nKey::SettingsUiFontFamily => "Interface font family",
+        L10nKey::SettingsUiFontFamilyDesc => {
+            "Face used for tabs, sidebars, dialogs and settings; Default uses the system UI font."
+        }
         L10nKey::SettingsLineHeight => "Line height",
         L10nKey::SettingsLineHeightDesc => "Row spacing as a multiple of the font size.",
         L10nKey::SettingsFontFamily => "Font family",
@@ -308,6 +312,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsGroupConnection => "Connection",
         L10nKey::SettingsGroupSession => "Session",
         L10nKey::SettingsGroupSecurity => "Security",
+        L10nKey::SettingsRemoteClipboardWrite => "Remote clipboard images",
+        L10nKey::SettingsRemoteClipboardWriteDesc => {
+            "Allow programs on this host to replace the local clipboard with images over OSC 5522."
+        }
         L10nKey::SettingsIdentityFiles => "Identity files",
         L10nKey::SettingsIdentityFilesDesc => "Private-key paths, one per line (%h/%r expand).",
         L10nKey::SettingsAgentForwarding => "Agent forwarding",
@@ -816,6 +824,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchKeybindingsTitle => "Keybindings",
         L10nKey::SettingsSearchLineHeightKeywords => "typography leading spacing",
+        L10nKey::SettingsSearchUiFontFamilyKeywords => {
+            "interface font family ui typeface typography chrome sidebar tab"
+        }
         L10nKey::SettingsSearchNewTabPositionKeywords => "tabs order end after current",
         L10nKey::SettingsSearchNotifyOnCommandFinishKeywords => {
             "notification alert done osc desktop banner long command"
@@ -1652,6 +1663,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SwitcherStatusReconnecting => "reconnecting…",
         L10nKey::SwitcherStatusTakenOver => "taken over",
         L10nKey::SettingsFontDefault => "Default (match primary)",
+        L10nKey::SettingsUiFontDefault => "Default (system UI font)",
         L10nKey::ForwardDescriptionPlaceholder => "what it's for",
         L10nKey::SettingsShellDefaultLoginShell => "your login shell",
         L10nKey::SettingsShellDetected => "Shells Scottie found",

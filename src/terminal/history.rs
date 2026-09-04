@@ -104,7 +104,9 @@ pub fn load_with_shell_files(scope: &Scope, shell_files: Vec<(String, Vec<u8>)>)
     if let Some(path) = scope.file()
         && let Ok(content) = std::fs::read_to_string(&path)
     {
+        let start = raw.len();
         raw.extend(content.lines().map(parse_own_line));
+        stamp_missing(&mut raw[start..], file_mtime_secs(&path));
     }
     normalize(raw)
 }
@@ -252,6 +254,19 @@ pub fn append(scope: &Scope, cmd: &str, cwd: Option<&Path>, ts: u64, exit: Optio
 }
 
 fn normalize(raw: Vec<Raw>) -> History {
+    let mut raw = raw;
+    // Sources are concatenated (shell files, then tty7's own file), so vector
+    // order is "who was loaded last", not "what ran last". Sort by timestamp
+    // first: a command from ~/.zsh_history a minute ago must outrank one
+    // recorded in tty7 last week, or ↑ shows the wrong line. Untimestamped
+    // entries stay older than timestamped ones and keep relative file order
+    // among themselves (stable sort).
+    raw.sort_by(|a, b| match (a.ts, b.ts) {
+        (Some(ta), Some(tb)) => ta.cmp(&tb),
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (Some(_), None) => std::cmp::Ordering::Greater,
+    });
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut cwds: HashMap<String, HashSet<String>> = HashMap::new();
     let mut meta: HashMap<String, EntryMeta> = HashMap::new();
@@ -329,10 +344,35 @@ fn load_shell_history() -> Vec<Raw> {
     for path in files {
         if let Ok(bytes) = std::fs::read(&path) {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let start = out.len();
             parse_history_file(&name, &String::from_utf8_lossy(&bytes), &mut out);
+            // bash (and a bare HISTFILE) often have no per-line timestamp.
+            // Borrow the file's mtime so those entries can still be ordered
+            // against zsh/fish/tty7 records that do carry one — otherwise a
+            // month-old tty7 file concatenated last always wins ↑.
+            stamp_missing(&mut out[start..], file_mtime_secs(&path));
         }
     }
     out
+}
+
+fn file_mtime_secs(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+fn stamp_missing(raw: &mut [Raw], ts: Option<u64>) {
+    let Some(ts) = ts else {
+        return;
+    };
+    for r in raw {
+        if r.ts.is_none() {
+            r.ts = Some(ts);
+        }
+    }
 }
 
 /// Which reader a history file gets, by file name. The remote side has only
@@ -688,6 +728,117 @@ mod tests {
             ("ls -la", None, None, None)
         );
         assert_eq!(parse_own_line("echo\tfoo").cmd, "echo\tfoo");
+    }
+
+    #[test]
+    fn normalize_orders_by_timestamp_not_by_which_file_was_concatenated_last() {
+        // load() appends tty7's own file after the shell histories, so without
+        // a timestamp sort an old tty7 record becomes "most recent" and ↑
+        // recalls it instead of the command actually run last.
+        let raw = vec![
+            Raw {
+                cmd: "recent shell".into(),
+                cwd: None,
+                ts: Some(200),
+                exit: None,
+            },
+            Raw {
+                cmd: "old tty7".into(),
+                cwd: None,
+                ts: Some(100),
+                exit: None,
+            },
+        ];
+        let h = normalize(raw);
+        assert_eq!(
+            h.entries.last().map(String::as_str),
+            Some("recent shell"),
+            "the later timestamp must be the one ↑ recalls first: {:?}",
+            h.entries
+        );
+        assert_eq!(h.entries, ["old tty7", "recent shell"]);
+    }
+
+    #[test]
+    fn stamp_missing_fills_blanks_and_leaves_real_timestamps_alone() {
+        let mut raw = vec![
+            Raw {
+                cmd: "bash line".into(),
+                cwd: None,
+                ts: None,
+                exit: None,
+            },
+            Raw {
+                cmd: "zsh line".into(),
+                cwd: None,
+                ts: Some(100),
+                exit: None,
+            },
+        ];
+        stamp_missing(&mut raw, Some(500));
+        assert_eq!(raw[0].ts, Some(500), "a bash line borrows the file mtime");
+        assert_eq!(
+            raw[1].ts,
+            Some(100),
+            "a line that knows its own time keeps it"
+        );
+
+        // An unreadable mtime must not wipe what is already there.
+        let mut blank = vec![Raw {
+            cmd: "no time".into(),
+            cwd: None,
+            ts: None,
+            exit: None,
+        }];
+        stamp_missing(&mut blank, None);
+        assert_eq!(blank[0].ts, None);
+    }
+
+    #[test]
+    fn file_mtime_secs_reads_a_real_file_and_gives_up_on_a_missing_one() {
+        let dir = std::env::temp_dir().join(format!("tty7-hist-mtime-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history");
+        std::fs::write(&path, b"echo hi\n").unwrap();
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ts = file_mtime_secs(&path).expect("a file just written has an mtime");
+        assert!(ts.abs_diff(now) < 60, "mtime {ts} should sit near {now}");
+        assert_eq!(file_mtime_secs(&dir.join("absent")), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_borrowed_mtime_slots_untimestamped_entries_into_the_timeline() {
+        // Without a borrowed mtime these sort as the oldest thing there is and
+        // â can never walk back to them; with it the block lands where the
+        // file was last written.
+        let mut raw = vec![Raw {
+            cmd: "bash cmd".into(),
+            cwd: None,
+            ts: None,
+            exit: None,
+        }];
+        stamp_missing(&mut raw, Some(150));
+        raw.push(Raw {
+            cmd: "old zsh".into(),
+            cwd: None,
+            ts: Some(100),
+            exit: None,
+        });
+        raw.push(Raw {
+            cmd: "new zsh".into(),
+            cwd: None,
+            ts: Some(200),
+            exit: None,
+        });
+
+        let h = normalize(raw);
+        assert_eq!(h.entries, ["old zsh", "bash cmd", "new zsh"]);
     }
 
     #[test]

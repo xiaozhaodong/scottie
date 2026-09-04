@@ -38,6 +38,7 @@ failing the file.
 | `font_size` | number | `15` | Terminal text size in px (4–256). |
 | `line_height` | number | `1.4` | Multiple of the font size (0.5–4). |
 | `ui_font_size` | number | `16` | The interface's root size in px (12–24). |
+| `ui_font_family` | string | — | The face for everything outside the grid. Unset means the system UI font. |
 | `pane_title_font_size` | number | `13` | Absolute title size in px for a single or zoomed pane (8–24). Independent of `ui_font_size`. |
 
 [More about fonts →](/customization/fonts)
@@ -170,6 +171,12 @@ angle brackets, and a tab:
 | `ssh_profiles` | array | `[]` | Managed from **Settings → SSH**. Secrets live in the OS keychain, never here. |
 | `verify_host_keys` | bool | `true` | |
 | `ssh_warn_on_close` | bool | `false` | Confirm before closing a live connection. |
+
+Each object in `ssh_profiles` can also set:
+
+| Key | Type | Default | |
+|---|---|---|---|
+| `remote_clipboard_write` | bool | `false` | Allow programs on that SSH host to write PNG, JPEG, GIF, or WebP images to this machine's clipboard with OSC 5522. |
 
 ## Updates and network
 
