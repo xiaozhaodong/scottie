@@ -7960,7 +7960,7 @@ mod tests {
     /// or still standing under the app's? (#740)
     #[test]
     fn a_pane_states_a_title_whenever_it_is_not_the_placeholder() {
-        use super::stated_title;
+        use super::{DEFAULT_TITLE, stated_title};
 
         // Nothing has spoken — this is the pane a directory stands in for.
         assert_eq!(stated_title(DEFAULT_TITLE), None);
