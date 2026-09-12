@@ -2395,6 +2395,7 @@ mod ssh_host_row_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use gpui::TestAppContext;
     use unicode_segmentation::UnicodeSegmentation;
 
@@ -2968,7 +2969,7 @@ mod tests {
 
         assert_eq!(label_of(&tab, 0, Some(home())), "~/repo");
         assert_eq!(
-            tooltip_of(&tab, 0, Some(home())),
+            tooltip_of(&tab, 0, Some(home()), false),
             None,
             "the row is already showing the whole directory"
         );
@@ -2977,7 +2978,7 @@ mod tests {
         tab.cwd = Some("/Users/x/repo/crates/tty7-core/src".into());
         assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty7-core/src");
         assert_eq!(
-            tooltip_of(&tab, 0, Some(home())).as_deref(),
+            tooltip_of(&tab, 0, Some(home()), false).as_deref(),
             Some("~/repo/crates/tty7-core/src")
         );
 
@@ -2985,13 +2986,13 @@ mod tests {
         // guard was already getting wrong before a directory could reach it.
         let mut titled = strip_tab();
         titled.osc_title = Some("/Users/x/repo".into());
-        assert_eq!(tooltip_of(&titled, 0, Some(home())), None);
+        assert_eq!(tooltip_of(&titled, 0, Some(home()), false), None);
 
         // A shell integration's `user@host:` head is not in the label, so it
         // is still worth spelling out.
         titled.osc_title = Some("me@box:/Users/x/repo".into());
         assert_eq!(
-            tooltip_of(&titled, 0, Some(home())).as_deref(),
+            tooltip_of(&titled, 0, Some(home()), false).as_deref(),
             Some("me@box:/Users/x/repo")
         );
     }
@@ -3143,6 +3144,6 @@ mod tests {
         let mut root = strip_tab();
         root.cwd = Some("/".into());
         assert_eq!(label_of(&root, 0, Some(home())), "/");
-        assert_eq!(tooltip_of(&root, 0, Some(home())), None);
+        assert_eq!(tooltip_of(&root, 0, Some(home()), false), None);
     }
 }
