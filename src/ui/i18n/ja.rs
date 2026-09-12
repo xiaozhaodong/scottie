@@ -457,7 +457,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMouseZoomOff => "オフ",
         L10nKey::SettingsReportMouseToApps => "マウスイベントをアプリに報告",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "フルスクリーンアプリ（vim、tmux）にクリックとスクロールを処理させる。Shift を押している間はローカルで処理されます"
+            "フルスクリーンアプリ（vim、tmux）にクリックとスクロールを処理させる。Shift を押している間はローカルで処理されます。\
+             オフにするとクリックは届かず、ホイールは矢印キーとして送られます"
         }
         L10nKey::SettingsBell => "ベル通知",
         L10nKey::SettingsTerminalBell => "ターミナルベル",
@@ -469,9 +470,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsDetectUrlsDesc => {
             "ホバーでリンクに下線を表示し、{modifier}+クリックで開く"
         }
-        L10nKey::ForwardSshLoopbackLinks => "SSH ループバックリンクを転送",
+        L10nKey::ForwardSshLoopbackLinks => "リモートポートを転送",
         L10nKey::SettingsForwardSshLoopbackLinksDesc => {
-            "ペインが SSH 接続中の場合、一時的なポートフォワード経由で localhost リンクを開く"
+            "SSH 接続中、ペインが待ち受けを始めたポートを自動転送し、localhost リンクをこの端末で開く"
         }
         L10nKey::SettingsOpenFilesInternal => "内蔵エディタ",
         L10nKey::SettingsOpenFilesSystem => "デフォルトアプリ",
@@ -650,6 +651,17 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAboutDesc1 => {
             "ターミナルワークベンチ: 常駐セッション、リモート作業、エージェント"
         }
+        L10nKey::SettingsDefaultTerminal => "デフォルトのターミナル",
+        L10nKey::SettingsDefaultTerminalDesc => {
+            "Scottie を Unix 実行ファイル、SSH リンク、man ページリンク用の macOS のデフォルトターミナルにします。Scottie はフォルダとスクリプトも開けますが、Finder のフォルダハンドラは置き換えません。独自のターミナルを指定するアプリはこの設定を無視することがあります。"
+        }
+        L10nKey::SettingsDefaultTerminalSet => "デフォルトのターミナルに設定",
+        L10nKey::SettingsDefaultTerminalSetSuccess => {
+            "Scottie を対応するターミナルファイルとリンクのデフォルトハンドラに設定しました。"
+        }
+        L10nKey::SettingsDefaultTerminalSetFailed => {
+            "Scottie をデフォルトのターミナルに設定できませんでした: {error}"
+        }
         L10nKey::SettingsVersion => "バージョン",
         L10nKey::SettingsUpdates => "アップデート",
         L10nKey::SettingsUpdateAndRelaunch => "更新して再起動",
@@ -755,6 +767,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
+        L10nKey::SettingsAgentTraeCode => "TraeCode",
         L10nKey::SettingsAgentCopilotCli => "Copilot CLI",
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
@@ -765,6 +778,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentQwenCode => "Qwen Code",
         L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
+        L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "バージョン ライセンス クレジット ビルド 更新 確認 github about version license credits update check"
         }
@@ -794,6 +808,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchCodexKeywords => {
             "エージェント 統合 フック インストール openai codex agent integration hooks install"
+        }
+        L10nKey::SettingsSearchTraeCodeKeywords => {
+            "エージェント 統合 フック インストール trae code traecli traex agent integration hooks install"
         }
         L10nKey::SettingsSearchCommandLineToolKeywords => {
             "cli tty7 scottie パス シェル コマンド インストール シンボリックリンク ターミナル iterm エージェント スクリプト command line tool"
@@ -841,7 +858,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "タイポグラフィ 文字 拡大 縮小 ズーム font size typography text bigger smaller zoom"
         }
         L10nKey::SettingsSearchForwardSshLoopbackLinksKeywords => {
-            "ssh リモート ポート トンネル localhost フォワード リンク forward ssh loopback links tunnel"
+            "ssh リモート ポート トンネル localhost フォワード リンク 自動転送 forward ssh loopback links tunnel ports"
         }
         L10nKey::SettingsSearchGrokBuildKeywords => {
             "エージェント 統合 フック インストール xai grok build agent integration hooks install"
@@ -904,6 +921,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchKimiCodeKeywords => {
             "エージェント 統合 フック インストール kimi code moonshot agent integration hooks install"
+        }
+        L10nKey::SettingsSearchQoderCLIKeywords => {
+            "エージェント 統合 フック インストール qoder qodercli agent integration hooks install"
         }
         L10nKey::SettingsSearchPiKeywords => {
             "エージェント 統合 拡張 インストール pi agent integration extension install"
@@ -1025,7 +1045,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "貼り付けた画像を {host} にアップロードできませんでした: {error}"
         }
         L10nKey::LinkFileOpenFailed => "{path} を開けませんでした: {error}",
-        L10nKey::ForwardPanelTitle => "ポートフォワード",
         L10nKey::ForwardDisconnected => "切断済み",
         L10nKey::ForwardDisconnectedFrom => "{host} から切断されました",
         L10nKey::SshEditProfile => "接続を編集…",
@@ -1038,6 +1057,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "転送先",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "追加",
+        L10nKey::ForwardPortLabel => "リモートポート",
+        L10nKey::ForwardPortHere => "localhost:{port} で開きます",
+        L10nKey::ForwardNeedsPort => "ポートは 1 から 65535 までの数字です。",
+        L10nKey::ForwardAdvancedToggle => "詳細",
+        L10nKey::ForwardSimpleToggle => "シンプル",
         L10nKey::ForwardRequestFailed => "セッションに届きませんでした。何も変更していません",
         L10nKey::FileTreePlaceholderFileName => "ファイル名",
         L10nKey::FileTreePlaceholderFolderName => "フォルダ名",
@@ -1131,6 +1155,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::PanelProcessesSubtitle => "プロセス",
         L10nKey::PanelPortsSubtitle => "ポート",
+        L10nKey::PanelLatency => "遅延",
+        L10nKey::PanelPortsUnsupported => "リモートの tty7-server が古く、ポートを列挙できません。",
+        L10nKey::PanelPortsProbeFailed => {
+            "このペインが何をリッスンしているか確認できませんでした。"
+        }
+        L10nKey::PanelPortsRestricted => {
+            "他のユーザーで動いているプロセスがあり、そのポートは見えません。"
+        }
+        L10nKey::PortAutoForwarded => "リモートの :{port} は http://localhost:{local} で開けます",
         L10nKey::PanelCwd => "作業ディレクトリ",
         L10nKey::PanelShell => "シェル",
         L10nKey::PanelSsh => "ssh",
@@ -1285,6 +1318,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffUntrackedSummary => "未追跡 {count}",
         L10nKey::DiffViewSplit => "左右分割",
         L10nKey::DiffViewUnified => "統合",
+        L10nKey::DiffCopySelection => "選択した行をコピー",
         L10nKey::PendingConnecting => "{machine} に接続中…",
         L10nKey::PendingUnreachable => "{machine} に到達できませんでした",
         L10nKey::WorktreePromptNeedsName => "ワークツリーには名前が必要です",
@@ -1405,7 +1439,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "実行中のコーディングエージェントが見つかりません — 先にペインでコーディングエージェントを起動してください（claude、codex など）"
         }
         L10nKey::SwitcherThisComputer => "このコンピュータ",
-        L10nKey::SwitcherRestartingServer => "Scottie のサーバーを再起動中…",
+        L10nKey::SwitcherStartingServer => "Scottie のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Scottie のサーバーをダウンロード中… {done} / {total}"
         }
@@ -1475,6 +1509,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGroupAgents => "エージェント",
         L10nKey::CmdGroupApplication => "アプリケーション",
         L10nKey::CmdNewTab => "新しいタブ",
+        L10nKey::CmdNewWindow => "新しいウィンドウ",
         L10nKey::CmdNewWorktreeTab => "新しいワークツリータブ…",
         L10nKey::CmdNewWorktreeTabSubtitle => "新しいブランチでの独立したチェックアウト",
         L10nKey::CmdRenameTab => "タブの名前を変更…",
@@ -1502,6 +1537,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSessionSubtitle => "このエージェントのセッションを新しいタブにフォーク",
         L10nKey::CmdMarkTabAsUnread => "タブを未読としてマーク",
         L10nKey::CmdClosePaneTab => "ペイン / タブを閉じる",
+        L10nKey::CmdCloseWindow => "ウィンドウを閉じる",
+        L10nKey::CmdCloseWindowSubtitle => "シェルは実行を継続",
         L10nKey::CmdCloseOtherTabs => "他のタブを閉じる",
         L10nKey::CmdCloseTabsToTheRight => "右側のタブを閉じる",
         L10nKey::CmdReopenClosedTab => "閉じたタブをもう一度開く",
@@ -1576,7 +1613,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRestartServer => "サーバーを再起動…",
         L10nKey::CmdRestartServerSubtitle => "実行中のすべてのシェルを終了し、レイアウトは保持",
         L10nKey::CmdQuitTty7 => "Scottie を終了",
-        L10nKey::CmdQuitTty7Subtitle => "シェルは実行を継続",
+        L10nKey::CmdQuitTty7Subtitle => "サーバーを停止し、実行中のすべてのシェルを終了",
         L10nKey::CmdQuickConnect => "「{target}」に接続",
         L10nKey::CmdQuickConnectSaveProfile => "「{target}」をプロファイルとして保存…",
         L10nKey::CmdRecent => "最近",
@@ -1836,6 +1873,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuFocusPreviousPane => "前のペインにフォーカス",
         L10nKey::AppMenuZoomPane => "ペインを拡大",
         L10nKey::AppMenuClearScrollback => "スクロールバックをクリア",
+        L10nKey::AppMenuOpenLink => "開く",
+        L10nKey::AppMenuRevealInFinder => "Finder に表示",
+        L10nKey::AppMenuRevealInFolder => "含まれるフォルダーを開く",
+        L10nKey::AppMenuCopyLinkPath => "パスをコピー",
         L10nKey::AppMenuDocumentation => "Scottie ドキュメント",
         L10nKey::AppMenuKeyboardShortcuts => "キーボードショートカット",
         L10nKey::AppMenuJoinDiscord => "Discord に参加",
@@ -1858,6 +1899,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideSidebar => "サイドバーを非表示",
         L10nKey::TabTooltipHideDetailPanel => "詳細パネルを非表示",
         L10nKey::TabTooltipShowDetailPanel => "詳細パネルを表示",
+        L10nKey::TabTooltipZoomed => "ペインを拡大中 — 他のペインは非表示",
         L10nKey::TabMenuLocalShells => "ローカル",
         L10nKey::TabMenuAddHost => "SSH ホストを追加…",
         L10nKey::TabMenuAllHosts => "すべての SSH ホスト…",
@@ -1865,6 +1907,11 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabUnnamedShell => "シェル {n}",
         L10nKey::ShellDefault => "デフォルト",
         L10nKey::SidebarScratchGroup => "スクラッチ",
+        L10nKey::SidebarMoveToGroup => "グループへ移動",
+        L10nKey::SidebarNewGroup => "新規グループ…",
+        L10nKey::SidebarAutoGroup => "自動グループ化に戻す",
+        L10nKey::SidebarNewGroupName => "新規グループ",
+        L10nKey::SidebarRenameGroup => "グループ名を変更",
         L10nKey::TabContextCloseTab => "タブを閉じる",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
         L10nKey::AppAgentHooksOpFailed => "失敗: {error}",

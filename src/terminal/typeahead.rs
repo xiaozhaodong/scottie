@@ -4,11 +4,20 @@ const RECORD_CAP: usize = 4096;
 pub struct Typeahead {
     text: String,
     tainted: bool,
+    pasted: bool,
 }
 
 pub enum RawInput<'a> {
     Text(&'a str),
-    Key { key: &'a str, plain: bool },
+    /// [`Text`](Self::Text) for text that came off the clipboard rather than
+    /// the keyboard. The record replays into the editor's buffer, so the
+    /// provenance has to survive the round trip or a paste comes back looking
+    /// typed and is submitted as typed (#660).
+    Pasted(&'a str),
+    Key {
+        key: &'a str,
+        plain: bool,
+    },
     Interrupt,
 }
 
@@ -22,6 +31,10 @@ impl Typeahead {
             RawInput::Interrupt => self.discard(),
             _ if externally_owned => {}
             RawInput::Text(s) => self.record_text(s),
+            RawInput::Pasted(s) => {
+                self.record_text(s);
+                self.pasted = true;
+            }
             RawInput::Key {
                 key: "enter",
                 plain: true,
@@ -40,8 +53,28 @@ impl Typeahead {
         *self = Self::default();
     }
 
+    /// Whether any of the recorded text came off the clipboard. Read it before
+    /// [`drain`](Self::drain) or [`adopt`](Self::adopt), which clear it with
+    /// the seed — the same contract `GapHold::pasted` carries.
+    pub fn pasted(&self) -> bool {
+        self.pasted
+    }
+
     pub fn drain(&mut self) -> Option<String> {
         std::mem::take(self).flush()
+    }
+
+    /// Hand the seed to the local editor while leaving the wipe owed.
+    ///
+    /// The shell is still sitting on this text, so the `^U` that erases it has
+    /// to go out eventually — but not necessarily now. Taking the seed out and
+    /// keeping the record in its tainted (wipe, seed nothing) shape lets the
+    /// editor own the whole line straight away, and the next `drain` still
+    /// produces the wipe.
+    pub fn adopt(&mut self) -> Option<String> {
+        let seed = self.drain()?;
+        self.tainted = true;
+        Some(seed)
     }
 
     fn record_text(&mut self, s: &str) {
@@ -199,6 +232,62 @@ mod tests {
     #[test]
     fn untouched_record_flushes_to_none() {
         assert_eq!(Typeahead::new().drain(), None);
+    }
+
+    #[test]
+    fn adopting_moves_the_seed_out_and_leaves_the_wipe_owed() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("echo"), false);
+        assert_eq!(t.adopt(), Some("echo".to_string()));
+        // The seed is the editor's now, but the shell is still holding it.
+        assert_eq!(t.drain(), Some(String::new()));
+        assert_eq!(t.drain(), None);
+    }
+
+    #[test]
+    fn adopting_an_empty_record_owes_nothing() {
+        let mut t = Typeahead::new();
+        assert_eq!(t.adopt(), None);
+        assert_eq!(t.drain(), None);
+    }
+
+    #[test]
+    fn adopting_twice_seeds_once() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("echo"), false);
+        assert_eq!(t.adopt(), Some("echo".to_string()));
+        assert_eq!(t.adopt(), Some(String::new()));
+        assert_eq!(t.drain(), Some(String::new()));
+    }
+
+    #[test]
+    fn a_pasted_gap_replays_as_a_paste() {
+        let mut t = Typeahead::new();
+        assert!(!t.pasted(), "a fresh record carries nothing pasted");
+        t.observe(RawInput::Text("cat "), false);
+        assert!(!t.pasted());
+        t.observe(RawInput::Pasted("/tmp/x"), false);
+        assert!(t.pasted(), "the whole seed is pasted once any of it is");
+        assert_eq!(t.drain(), Some("cat /tmp/x".to_string()));
+        assert!(!t.pasted(), "the drain hands the mark over with the seed");
+    }
+
+    #[test]
+    fn adopting_hands_the_paste_mark_over_with_the_seed() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Pasted("ls"), false);
+        assert_eq!(t.adopt(), Some("ls".to_string()));
+        assert!(!t.pasted(), "what is left is the owed wipe, not a paste");
+        assert_eq!(t.drain(), Some(String::new()));
+    }
+
+    #[test]
+    fn discarding_an_adopted_record_drops_the_owed_wipe() {
+        let mut t = Typeahead::new();
+        t.observe(RawInput::Text("echo"), false);
+        assert_eq!(t.adopt(), Some("echo".to_string()));
+        t.discard();
+        assert_eq!(t.drain(), None);
     }
 
     #[test]

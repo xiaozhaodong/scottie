@@ -15,6 +15,7 @@ use crate::core::clipboard::{
 };
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
+use crate::core::term_modes::TerminalModes;
 use crate::daemon::protocol::{
     AuthResponse, DaemonMsg, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext, RemoteKind,
     ShellSpec, WinSize,
@@ -693,6 +694,22 @@ struct PaneState {
     /// record. See [`crate::core::machine::PaneRecord::osc_title`].
     osc_title: Option<String>,
     shell: ShellState,
+    /// Whether a prompt mark has arrived since `remote` was last set.
+    ///
+    /// The near shell cannot be at a prompt while a connection owns its pty,
+    /// so a mark that says "at a prompt" on a remote pane can only be the far
+    /// shell's — and that is the proof that the far side runs tty7's shell
+    /// integration. Until it lands, the newest mark on the pane is the near
+    /// shell's own "I started `ssh`", which says nothing about the far side
+    /// and will never be superseded. Cleared whenever `remote` changes, so a
+    /// second hop is proved on its own terms.
+    remote_prompt_seen: bool,
+    /// The private modes the pane's output has switched on — the alternate
+    /// screen and mouse reporting above all. Folded from the same bytes the
+    /// ring gets, because the ring cannot be trusted to still hold them: a
+    /// full-screen tool sets them once at startup and the ring drops its front
+    /// (#774). See [`TerminalModes`].
+    modes: TerminalModes,
     /// What this pane is running, for the machine tree to record. Distinct from
     /// `shell` above, which is the shell-integration state.
     shell_spec: Option<ShellSpec>,
@@ -1348,12 +1365,19 @@ pub fn retitle(title: &str) -> Vec<u8> {
 /// in the common case: the primary buffer still holds the pre-`vim` scrollback
 /// from earlier in the same snapshot.
 ///
+/// The same argument reaches further than the four resets it started with, and
+/// [`INPUT_MODE_RESETS`] is the rest of it: a snapshot that ends inside a
+/// full-screen program replays that program's `?1002h` and nothing to undo it,
+/// and the emulator then reports every pointer move into a shell that never
+/// asked (#850).
+///
 /// On Windows it ends by scrolling the restored screen out of the viewport
 /// ([`SCROLL_RESTORED_AWAY`]), which is a correctness requirement rather than a
 /// matter of taste — see that constant.
 pub fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x1b[?1049l\x1b[?25h\x1b[?7h\x1b[0m");
+    out.extend_from_slice(INPUT_MODE_RESETS);
     if let Some(banner) = banner.map(str::trim).filter(|b| !b.is_empty()) {
         out.extend_from_slice(b"\r\n\x1b[2m\xe2\x94\x80\xe2\x94\x80 ");
         // A newline inside the banner would be a client writing multiple lines
@@ -1366,6 +1390,45 @@ pub fn restore_preamble(banner: Option<&str>) -> Vec<u8> {
     }
     out
 }
+
+/// Turn off every mode that makes a terminal *send* bytes on its own, or encode
+/// keys in a way the incoming shell cannot read.
+///
+/// A restored pane is a snapshot of a dead process replayed at a brand-new
+/// shell. The process that switched these on was killed by a hangup with no
+/// grace period, so it never emitted its own `l` counterparts, and the snapshot
+/// was photographed before it could have anyway. What is left is a byte stream
+/// whose last word on mouse reporting is "on", replayed verbatim into an
+/// emulator that obeys it: the pointer crossing the pane types SGR reports into
+/// the shell's line, and the line grows for as long as the pointer is there
+/// (#850).
+///
+/// Unconditional on purpose. The state to land in is not "whatever the dead
+/// program had" but a constant — the new shell asked for none of these, and it
+/// is not running yet, so there is nothing here to preserve. Switching off a
+/// mode that is already off is a no-op in every emulator, which makes the blunt
+/// version the one that cannot fail: a fold over the snapshot's bytes that
+/// misreads one sequence leaves the mode on and the bug exactly as it is today.
+///
+/// - `9`/`1000`/`1002`/`1003` are the mouse reporting level, `1005`/`1006`/
+///   `1015`/`1016` its encodings. Our own emulator knows `1000`, `1002`, `1003`,
+///   `1005` and `1006` and ignores the rest; `9`, `1015` and `1016` are here for
+///   the terminals downstream of a CLI consumer replaying the same ring, which
+///   do know them.
+/// - `1004` is focus reporting — the other mode that makes the terminal write
+///   into the pty unprompted, on every window activation.
+/// - `2004` is bracketed paste: a paste into a shell that does not know the
+///   protocol arrives with `ESC[200~` typed around it.
+/// - `1` is DECCKM, which sends the arrow keys as `ESC O A` instead of `ESC[A`.
+/// - `CSI = 0 ; 1 u` sets the kitty keyboard flags to none, the same reset
+///   `stale_mode_resets` in the client uses.
+///
+/// Deliberately absent: `1007` (alternate scroll), which this emulator has *on*
+/// by default, so clearing it would walk away from the default rather than back
+/// to it; and `2026` (synchronised update), which the client's processor closes
+/// out itself the moment a replayed frame ends inside one.
+pub const INPUT_MODE_RESETS: &[u8] = b"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\
+\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1004l\x1b[?2004l\x1b[?1l\x1b[=0;1u";
 
 /// Push the restored screen into the client's scrollback and put the cursor
 /// back at the top-left, so the incoming shell starts on a blank viewport.
@@ -1461,6 +1524,8 @@ impl DaemonPane {
                 cwd: spawn.initial_cwd,
                 osc_title: restored_title,
                 shell: ShellState::default(),
+                remote_prompt_seen: false,
+                modes: TerminalModes::default(),
                 shell_spec: spawn.shell.clone(),
                 remote: spawn.remote.clone(),
                 agent: None,
@@ -1682,7 +1747,15 @@ impl DaemonPane {
                     at_prompt: carried.at_prompt,
                     last_exit_code: carried.last_exit,
                     command: None,
+                    // Not carried: the handoff record is a wire format shared
+                    // with older images, and a pane mid-`ssh` that comes back
+                    // claiming a prompt it cannot vouch for would be worse
+                    // than one that says it does not know. It re-latches on
+                    // the far side's next prompt.
+                    mark_at_prompt: false,
                 },
+                remote_prompt_seen: false,
+                modes: TerminalModes::default(),
                 remote: carried.remote,
                 agent: carried.agent,
                 agent_session: carried.agent_session,
@@ -1735,6 +1808,8 @@ impl DaemonPane {
             cwd: None,
             osc_title: None,
             shell: ShellState::default(),
+            remote_prompt_seen: false,
+            modes: TerminalModes::default(),
             remote: Some(remote),
             agent: None,
             agent_session: None,
@@ -1982,14 +2057,29 @@ impl DaemonPane {
                             // cwd/prompt change to emit while we hold the lock.
                             let mut signals = sniffer.feed(bytes);
 
+                            // `any` first: `foreground_running` is a syscall,
+                            // and most reads carry no prompt mark at all.
                             if signals.shell.iter().any(|s| s.at_prompt) && foreground_running() {
-                                for s in signals.shell.iter_mut() {
-                                    s.at_prompt = false;
-                                }
-                                signals.shell.dedup();
+                                suppress_relayed_prompt_marks(&mut signals.shell);
                             }
 
-                            let poll_now = std::time::Instant::now() >= next_remote_check;
+                            // A prompt mark that survived the suppression above
+                            // is the shell saying the command it ran is over, so
+                            // the foreground has just gone back to being the
+                            // shell itself. Probe right then rather than waiting
+                            // out the interval: the probe is what clears the
+                            // remote context an `ssh` left behind, and the
+                            // interval alone can miss it forever. Polling only
+                            // runs on output, and the prompt the shell just drew
+                            // is the last output a pane produces until the user
+                            // types again — so a pane whose `ssh` exited inside
+                            // the interval kept reporting itself as remote, and
+                            // everything keyed off that (the history scope ↑
+                            // reads, most visibly) stayed on the far end until
+                            // some unrelated output arrived (#817).
+                            let back_at_prompt = signals.shell.iter().any(|s| s.at_prompt);
+                            let poll_now =
+                                back_at_prompt || std::time::Instant::now() >= next_remote_check;
                             if poll_now {
                                 next_remote_check =
                                     std::time::Instant::now() + REMOTE_CONTEXT_POLL_INTERVAL;
@@ -2017,9 +2107,13 @@ impl DaemonPane {
                                 || remote.is_some()
                                 || agent.is_some()
                                 || probed_cwd.is_some();
+                            // Read off `signals` before `apply_signals` consumes
+                            // it; spent after the hop below — see the function.
+                            let saw_prompt_mark =
+                                signals.shell.iter().any(|s| s.mark_at_prompt);
                             let mut st = state.lock().unwrap();
                             let facts_before = may_change_facts.then(|| observed_facts(&st));
-                            st.ring.append(bytes);
+                            record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
                             // A positive foreground probe establishes the
                             // identity before parsing this batch's OSC/hook
@@ -2039,6 +2133,7 @@ impl DaemonPane {
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
                             }
+                            latch_remote_prompt(&mut st, saw_prompt_mark);
                             // Keep kitty file/shm transfer gated on the pane's
                             // *current* locality: an `ssh` that just took the PTY
                             // must stop us honoring host-local object names. Cheap
@@ -2092,11 +2187,33 @@ impl DaemonPane {
         subscriber: Sender<DaemonMsg>,
         allow_remote_clipboard_write: bool,
     ) -> u64 {
+        // Asked before the state lock, not under it: the probe takes the pty
+        // master's lock, and every other caller that holds both takes them in
+        // this order.
+        let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
-        let epoch =
-            attach_subscriber_with_permissions(&mut st, subscriber, allow_remote_clipboard_write);
+        let epoch = attach_subscriber_with_permissions(
+            &mut st,
+            subscriber,
+            allow_remote_clipboard_write,
+            foreground_command,
+        );
         self.gate.reset();
         epoch
+    }
+
+    /// Whether something other than the pane's own shell owns the terminal.
+    ///
+    /// Answered by the kernel (`tcgetpgrp`), not by the pane's stored shell
+    /// state, which is why it can contradict `st.shell.at_prompt` — see
+    /// [`replayed_at_prompt`]. A pane with no pty to ask (native ssh, and
+    /// every pane on Windows, where the pty has no foreground process group)
+    /// answers "no", which is what the live suppression already assumes.
+    fn has_foreground_command(&self) -> bool {
+        match &self.backend {
+            PaneBackend::Pty(pty) => foreground_command_running(&pty.master, pty.shell_pid),
+            PaneBackend::NativeSsh(_) => false,
+        }
     }
 
     pub fn detach(&self, epoch: u64) -> bool {
@@ -2110,8 +2227,9 @@ impl DaemonPane {
     }
 
     pub fn observe(&self, observer: Sender<DaemonMsg>, gate: Arc<OutputGate>) -> u64 {
+        let foreground_command = self.has_foreground_command();
         let mut st = self.state.lock().unwrap();
-        observe_subscriber(&mut st, observer, gate)
+        observe_subscriber(&mut st, observer, gate, foreground_command)
     }
 
     pub fn unobserve(&self, observer_id: u64) {
@@ -2142,13 +2260,35 @@ impl DaemonPane {
     }
 
     pub fn procs(&self) -> crate::daemon::protocol::PaneProcs {
-        let Some(pty) = self.pty() else {
-            return Default::default();
+        let mut out = match self.pty().and_then(|pty| {
+            pty.shell_pid
+                .map(|pid| crate::daemon::procinfo::snapshot(pid, pty_foreground_pgid(&pty.master)))
+        }) {
+            Some(procs) => procs,
+            None => Default::default(),
         };
-        let Some(shell_pid) = pty.shell_pid else {
-            return Default::default();
-        };
-        crate::daemon::procinfo::snapshot(shell_pid, pty_foreground_pgid(&pty.master))
+        out.context = Some(self.context());
+        out
+    }
+
+    /// What the pane knows about itself beyond its process list.
+    ///
+    /// Always filled, including on the branches above that have no tree to
+    /// walk — a native-SSH pane's empty `procs` is exactly the answer this has
+    /// to qualify, and returning `Default::default()` there would have said
+    /// "nothing is running" in the same shape as "we could not look".
+    fn context(&self) -> crate::daemon::protocol::PaneContext {
+        let st = self.state.lock().unwrap();
+        crate::daemon::protocol::PaneContext {
+            // The cached value only. `remote_context()` falls back to probing
+            // the pty, and this is answered on a poll: paying a `/proc` walk
+            // per tick for a fact the reader already refreshes on every prompt
+            // would put the cost on the wrong side.
+            remote: st.remote.clone(),
+            local_pty: matches!(self.backend, PaneBackend::Pty(_)),
+            at_prompt: st.shell.active.then_some(st.shell.mark_at_prompt),
+            remote_prompt_seen: st.remote_prompt_seen,
+        }
     }
 
     fn pty(&self) -> Option<&PtyBackend> {
@@ -2560,6 +2700,25 @@ impl ReplayRing {
         }
     }
 
+    /// The modes a replay of this ring switches on by itself — the same fold
+    /// the pane keeps, over the bytes that are actually left.
+    ///
+    /// Folded rather than remembered per mode because the front of the ring cuts
+    /// wherever the cap fell, possibly through a sequence: the client's emulator
+    /// will not act on half a `?1049h` either, and the answer here has to be the
+    /// one the emulator will reach.
+    fn modes(&self) -> TerminalModes {
+        let mut modes = TerminalModes::new();
+        for seg in &self.segments {
+            // Both halves of the deque, in order: `feed` carries a sequence
+            // across calls, so the split is invisible to the fold.
+            let (a, b) = seg.bytes.as_slices();
+            modes.feed(a);
+            modes.feed(b);
+        }
+        modes
+    }
+
     #[cfg(test)]
     fn flatten(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.len);
@@ -2570,7 +2729,37 @@ impl ReplayRing {
     }
 }
 
-fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
+/// Everything the pane remembers about a chunk of output: the bytes
+/// themselves, and the modes they switched on. One function so the two can
+/// never drift apart — the modes are only worth anything if they were folded
+/// from exactly the bytes the ring was given.
+fn record_output(st: &mut PaneState, bytes: &[u8]) {
+    st.ring.append(bytes);
+    st.modes.feed(bytes);
+}
+
+/// Everything a client needs to rebuild the pane's screen and status, in the
+/// order it has to be applied.
+///
+/// `foreground_command` is the answer to "does a program other than the shell
+/// own the terminal right now?", asked of the pty rather than of the pane's
+/// stored state. It gates the prompt report, and that gate is not cosmetic —
+/// see [`replayed_at_prompt`].
+fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>, foreground_command: bool) {
+    // Ahead of the ring, not after it: a client that is put into the alternate
+    // screen first paints the replayed frames into the buffer they belong to.
+    //
+    // Only the modes the ring cannot switch on itself, though. Re-entering an
+    // alternate screen the ring still carries is not a harmless duplicate —
+    // the emulator makes `?1049h` a no-op when the mode is already on, so the
+    // ring's own copy stops clearing the alternate screen, and everything the
+    // ring holds from *before* that sequence (the shell scrollback the user
+    // had behind the program) is painted into the alternate buffer, which has
+    // no history to keep it and is left behind when the program exits. What
+    // the ring carries always wins on its own terms.
+    if let Some(modes) = st.modes.restore_bytes_beyond(&st.ring.modes()) {
+        let _ = subscriber.send(DaemonMsg::Snapshot(modes));
+    }
     st.ring.replay(subscriber);
     if let Some(cwd) = &st.cwd {
         let _ = subscriber.send(DaemonMsg::Cwd(cwd.clone()));
@@ -2578,7 +2767,7 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
     if st.shell.active {
         let _ = subscriber.send(DaemonMsg::Prompt {
             active: st.shell.active,
-            at_prompt: st.shell.at_prompt,
+            at_prompt: replayed_at_prompt(st, foreground_command),
             last_exit: st.shell.last_exit_code,
         });
     }
@@ -2596,9 +2785,39 @@ fn replay_state(st: &PaneState, subscriber: &Sender<DaemonMsg>) {
     }
 }
 
+/// Whether a replay may tell the client the pane is sitting at a shell prompt.
+///
+/// `st.shell.at_prompt` is only ever as fresh as the last OSC 133 mark the pane
+/// produced, and a mark can stay the last word for hours: a shell that printed
+/// its prompt (`133;B`) and then handed the terminal to a full-screen program
+/// which emits no `133;C` of its own leaves the flag set for as long as that
+/// program runs. The live path already declines to believe such a mark — the
+/// reader drops `at_prompt` from any prompt mark that arrives while a
+/// foreground command owns the pty — but the replay re-asserted the stored
+/// value with no check at all.
+///
+/// That gap is what #711 is. A client that hears "at a prompt" scrubs the TUI
+/// modes it finds in its grid, the alternate screen included, on the reasoning
+/// that no full-screen program can own a pane whose shell is prompting. On a
+/// replay the alternate screen it finds is the one the ring *just rebuilt*, so
+/// the scrub swaps it away and leaves the primary screen underneath: the shell
+/// banner and the command line the pane was born with. The program is still
+/// there, still painting differential updates, now into a grid that no longer
+/// holds what those updates are differences from — which is why the pane came
+/// back as a few fragments on an empty screen, and why only a resize (a real
+/// `SIGWINCH`, a real repaint) put it back.
+///
+/// Asking the pty closes the gap without costing the scrub its purpose: when
+/// the shell really is prompting, no command is in the foreground, the report
+/// goes out unchanged, and a genuinely stranded alt screen (an `ssh` that died
+/// mid-`vim`) still heals on reattach.
+fn replayed_at_prompt(st: &PaneState, foreground_command: bool) -> bool {
+    st.shell.at_prompt && !foreground_command
+}
+
 #[cfg(test)]
 fn attach_subscriber(st: &mut PaneState, subscriber: Sender<DaemonMsg>) -> u64 {
-    attach_subscriber_with_permissions(st, subscriber, false)
+    attach_subscriber_with_permissions(st, subscriber, false, false)
 }
 
 /// The one place a pane's clipboard permission is decided. A pane that carries
@@ -2612,10 +2831,11 @@ fn attach_subscriber_with_permissions(
     st: &mut PaneState,
     subscriber: Sender<DaemonMsg>,
     allow_remote_clipboard_write: bool,
+    foreground_command: bool,
 ) -> u64 {
     st.subscriber_epoch += 1;
     set_clipboard_permission(st, allow_remote_clipboard_write);
-    replay_state(st, &subscriber);
+    replay_state(st, &subscriber, foreground_command);
     st.subscriber = Some(subscriber);
     st.subscriber_epoch
 }
@@ -2624,9 +2844,10 @@ fn observe_subscriber(
     st: &mut PaneState,
     observer: Sender<DaemonMsg>,
     gate: Arc<OutputGate>,
+    foreground_command: bool,
 ) -> u64 {
     st.observer_seq += 1;
-    replay_state(st, &observer);
+    replay_state(st, &observer, foreground_command);
     // The replay just queued the whole ring into this channel. Charge it, or
     // the first budget check would read zero while a full scrollback is already
     // sitting there unread — an observer that never drains would be allowed a
@@ -2878,13 +3099,65 @@ fn same_dir(a: &Path, b: &Path) -> bool {
         }
 }
 
+/// Take a batch of prompt marks out of the local line editor's reach.
+///
+/// Called when a foreground program owns the pty, which means the marks are
+/// being relayed — an `ssh` passing the far shell's prompt through, a nested
+/// shell drawing its own. The local editor must not engage on those, so
+/// `at_prompt` is cleared across the whole batch.
+///
+/// [`ShellState::mark_at_prompt`] is deliberately left standing: it is the
+/// same marks read for a different question, and on a remote pane it is the
+/// only thing this machine knows about the far shell (#840). Because of it,
+/// dedup has to compare what is actually emitted rather than the whole struct
+/// — two marks that used to collapse into one `Prompt` message must still
+/// collapse when only their unsuppressed twin tells them apart, and the
+/// survivor has to carry the *newest* twin: a whole turn can arrive in one read
+/// (`D`, the prompt's `A`/`B`, then the next command's `C`), and dropping the
+/// last entry's reading would hand the pane back a prompt it has already left.
+fn suppress_relayed_prompt_marks(shell: &mut Vec<ShellState>) {
+    for s in shell.iter_mut() {
+        s.at_prompt = false;
+    }
+    shell.dedup_by(|a, b| {
+        let same = a.active == b.active
+            && a.at_prompt == b.at_prompt
+            && a.last_exit_code == b.last_exit_code
+            && a.command == b.command;
+        // `dedup_by` keeps `b`, the earlier of the pair, and drops `a`. Move
+        // the reading over first so the collapse costs a `Prompt` message and
+        // nothing else.
+        if same {
+            b.mark_at_prompt = a.mark_at_prompt;
+        }
+        same
+    });
+}
+
 fn apply_remote_context(st: &mut PaneState, remote: Option<RemoteContext>) {
     if st.remote == remote {
         return;
     }
     st.cwd = None;
+    // A new far side has to prove its own shell integration. The mark that is
+    // standing right now belongs to whatever the pane was before this hop —
+    // the near shell's "I started `ssh`", or the previous host's prompt.
+    st.remote_prompt_seen = false;
     notify(st, DaemonMsg::RemoteContext(remote.clone()));
     st.remote = remote;
+}
+
+/// Record that this read carried a prompt mark while the pane was remote.
+///
+/// Called *after* [`apply_remote_context`], not with the signals: the read that
+/// first sees a pane as remote is very often the one carrying the far shell's
+/// opening prompt, and latching before the hop was applied would throw exactly
+/// that mark away — the reset above would clear it a line later. Ordering it
+/// here means the far side's first prompt counts, which is what makes a later
+/// "not at a prompt" mean "the remote is busy" rather than "we never heard
+/// from it" (#840).
+fn latch_remote_prompt(st: &mut PaneState, saw_prompt_mark: bool) {
+    st.remote_prompt_seen |= saw_prompt_mark && st.remote.is_some();
 }
 
 fn apply_agent(
@@ -3067,6 +3340,17 @@ fn foreground_agent(
 struct ShellState {
     active: bool,
     at_prompt: bool,
+    /// `at_prompt` as the marks themselves read it, kept out of the
+    /// suppression the reader applies when a foreground program is running.
+    ///
+    /// Two different questions share one pair of marks. "Should the local line
+    /// editor engage?" must say no while `ssh` owns the pty, whoever drew the
+    /// prompt — that is `at_prompt`. "Is anything running in this pane?" wants
+    /// the opposite: the prompt an `ssh` is relaying belongs to the shell that
+    /// is actually driving the pane, and it is the only thing this side can
+    /// read about the far one. Keeping both means neither answer has to be
+    /// derived from the other's.
+    mark_at_prompt: bool,
     last_exit_code: Option<i32>,
     command: Option<String>,
 }
@@ -3146,6 +3430,10 @@ fn handle_osc133(shell: &mut ShellState, rest: &[u8]) -> bool {
         }
         _ => return false,
     }
+    // The unsuppressed twin, set here so every arm gets it and no future arm
+    // can forget to. Suppression happens later, on the reader thread, and only
+    // ever touches `at_prompt`.
+    shell.mark_at_prompt = shell.at_prompt;
     true
 }
 
@@ -3851,6 +4139,95 @@ mod tests {
         assert!(text.contains("\x1b[?7h"), "put autowrap back");
         assert!(text.contains("\x1b[0m"), "drop any colour left mid-run");
         assert!(text.contains("this shell is new"));
+
+        // #850: the same argument, for the modes that make the terminal talk
+        // back. The snapshot ends inside a program that enabled mouse
+        // reporting and was killed before it could disable it, so replaying it
+        // leaves the emulator reporting every pointer move into a shell that
+        // never asked — the line fills with SGR reports as long as the pointer
+        // is over the pane. Focus reporting writes unprompted for the same
+        // reason; bracketed paste and DECCKM mangle what the user types.
+        for (seq, what) in [
+            ("\x1b[?9l", "X10 mouse reporting"),
+            ("\x1b[?1000l", "click reporting"),
+            ("\x1b[?1002l", "cell-motion reporting"),
+            ("\x1b[?1003l", "all-motion reporting"),
+            ("\x1b[?1005l", "the UTF-8 mouse encoding"),
+            ("\x1b[?1006l", "the SGR mouse encoding"),
+            ("\x1b[?1015l", "the urxvt mouse encoding"),
+            ("\x1b[?1016l", "the SGR-pixel mouse encoding"),
+            ("\x1b[?1004l", "focus reporting"),
+            ("\x1b[?2004l", "bracketed paste"),
+            ("\x1b[?1l", "application cursor keys"),
+            ("\x1b[=0;1u", "the kitty keyboard flags"),
+        ] {
+            assert!(
+                text.contains(seq),
+                "the preamble has to turn {what} off: the process that turned it \
+                 on was killed by a hangup with no grace period and never sent \
+                 its own reset, so the replay's last word on it is `on`"
+            );
+        }
+
+        // Not reset: alternate scroll is on in a default terminal, so clearing
+        // it would leave the pane further from the default than it started.
+        assert!(
+            !text.contains("\x1b[?1007l"),
+            "?1007 defaults to on; resetting it walks away from the default"
+        );
+    }
+
+    /// Whether the stream's last word on a private mode is `h`, `l`, or
+    /// nothing — which is all a client's emulator ends up remembering of it.
+    fn last_mode_switch(stream: &[u8], mode: &str) -> Option<u8> {
+        let last = |needle: Vec<u8>| {
+            stream
+                .windows(needle.len())
+                .rposition(|w| w == needle.as_slice())
+        };
+        let on = last(format!("\x1b[?{mode}h").into_bytes());
+        let off = last(format!("\x1b[?{mode}l").into_bytes());
+        match (on, off) {
+            (Some(h), Some(l)) => Some(if h > l { b'h' } else { b'l' }),
+            (Some(_), None) => Some(b'h'),
+            (None, Some(_)) => Some(b'l'),
+            (None, None) => None,
+        }
+    }
+
+    /// Issue #850, along the whole chain rather than at the preamble alone: a
+    /// snapshot is a raw byte stream, it seeds the restored pane's ring
+    /// verbatim, and the client feeds it straight to its parser. So a snapshot
+    /// whose last word on mouse reporting is `h` puts the *client* into mouse
+    /// reporting, against a shell that never asked, and every pointer move
+    /// over the pane is typed into its line as an SGR report.
+    #[test]
+    fn a_ring_restored_from_a_full_screen_snapshot_ends_with_reporting_off() {
+        let size = ws(80, 24);
+        // What the photograph of a pane running `claude`, `vim` or `btop`
+        // actually holds. There is no epilogue: `DaemonPane::kill` is a hangup
+        // with no grace period, so the program never sent its own `?1002l`,
+        // and the snapshot was taken before it could have anyway.
+        let snapshot = crate::daemon::scrollback::Segment {
+            size,
+            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1003h\x1b[?1006h\x1b[?1004h\
+\x1b[?2004hframe one\x1b[Hframe two"
+                .to_vec(),
+        };
+        let mut ring = ReplayRing::seeded(vec![snapshot], size);
+        ring.append(&restore_preamble(Some("the shell below is new")));
+        let replayed = ring.flatten();
+
+        for mode in [
+            "1000", "1002", "1003", "1005", "1006", "1004", "2004", "1049",
+        ] {
+            assert_eq!(
+                last_mode_switch(&replayed, mode),
+                Some(b'l'),
+                "a client replaying this ring ends with ?{mode} still on, which is \
+                 what types SGR reports into the restored shell (#850)"
+            );
+        }
     }
 
     /// The ConPTY constraint, from the daemon's side. A pane whose shell runs
@@ -4246,23 +4623,138 @@ mod tests {
 
         let ssh_running = is_foreground_command(Some(2000), Some(1000));
         if signals.shell.iter().any(|st| st.at_prompt) && ssh_running {
-            for st in signals.shell.iter_mut() {
-                st.at_prompt = false;
-            }
+            suppress_relayed_prompt_marks(&mut signals.shell);
         }
         assert!(
             !signals.shell.last().unwrap().at_prompt,
             "a foreground program's prompt marks must not engage the local editor"
         );
+        assert!(
+            signals.shell.last().unwrap().mark_at_prompt,
+            "the mark's own reading survives: over `ssh` it is the far shell speaking, and \
+             the only thing this side knows about whether it is busy (#840)"
+        );
 
         let mut local = s.feed(b"\x1b]133;A\x1b]133;B\x07");
         let shell_idle = is_foreground_command(Some(1000), Some(1000));
         if local.shell.iter().any(|st| st.at_prompt) && shell_idle {
-            for st in local.shell.iter_mut() {
-                st.at_prompt = false;
-            }
+            suppress_relayed_prompt_marks(&mut local.shell);
         }
         assert!(local.shell.last().unwrap().at_prompt);
+    }
+
+    /// The collapse that suppression performs must not hand the pane back a
+    /// prompt it has already left. A far shell's whole turn can arrive in one
+    /// read — the previous command's `D`, the prompt's `A`/`B`, then the next
+    /// command's `C` — and once `at_prompt` is cleared across the batch those
+    /// two entries differ only in the mark's own reading. The collapse keeps
+    /// the earlier entry, so that reading has to travel with it or freeness
+    /// answers `free` while a remote command is running (#840).
+    #[test]
+    fn suppression_collapses_a_batch_onto_its_newest_marks_reading() {
+        let mut s = OscSniffer::new();
+        // Bare `133;C`: nushell's integration emits it with no command name, as
+        // do several third-party ones, so `command` cannot tell the two entries
+        // apart either.
+        let mut turn = s.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07");
+        suppress_relayed_prompt_marks(&mut turn.shell);
+        assert_eq!(
+            turn.shell.len(),
+            1,
+            "still one `Prompt` message, exactly as before the mark was added"
+        );
+        assert!(
+            !turn.shell.last().unwrap().mark_at_prompt,
+            "the newest mark started a command, so the pane is not at a prompt"
+        );
+
+        // And the other order: a command that starts and finishes inside one
+        // read has to end at the prompt, not at the `C` that opened it.
+        let mut turn = s.feed(b"\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07");
+        suppress_relayed_prompt_marks(&mut turn.shell);
+        assert_eq!(turn.shell.len(), 1);
+        assert!(
+            turn.shell.last().unwrap().mark_at_prompt,
+            "the newest mark is the prompt the far shell just drew"
+        );
+    }
+
+    /// A prompt mark that arrives while the pane is pointed at a remote host
+    /// can only be the far shell's — the near one cannot be at a prompt while
+    /// the connection owns its pty. That is what proves the far side runs the
+    /// shell integration, and it is the difference between "the remote is
+    /// busy" and "we cannot tell" (#840).
+    #[test]
+    fn a_remote_panes_prompt_mark_latches_and_a_new_hop_clears_it() {
+        let mark = |mark_at_prompt: bool, command: Option<&str>| ShellState {
+            active: true,
+            at_prompt: false,
+            mark_at_prompt,
+            last_exit_code: None,
+            command: command.map(str::to_string),
+        };
+        let hop = |target: &str| RemoteContext {
+            kind: RemoteKind::Ssh,
+            argv: vec!["ssh".into(), target.into()],
+            target: target.into(),
+        };
+        /// One pass of the reader's ordering: signals, then the hop the same
+        /// read detected, then the latch.
+        fn read(st: &mut PaneState, shell: Vec<ShellState>, remote: Option<Option<RemoteContext>>) {
+            let saw_prompt_mark = shell.iter().any(|s| s.mark_at_prompt);
+            apply_signals(
+                st,
+                SniffSignals {
+                    shell,
+                    ..SniffSignals::default()
+                },
+            );
+            if let Some(remote) = remote {
+                apply_remote_context(st, remote);
+            }
+            latch_remote_prompt(st, saw_prompt_mark);
+        }
+
+        // Local: the same mark proves nothing about any far side.
+        let mut st = test_state(true);
+        read(&mut st, vec![mark(true, None)], None);
+        assert!(!st.remote_prompt_seen);
+
+        // The near shell's own "I started `ssh`" — no prompt in it — must not
+        // latch, even though the hop lands in the same read.
+        read(
+            &mut st,
+            vec![mark(false, Some("ssh build-box"))],
+            Some(Some(hop("build-box"))),
+        );
+        assert!(
+            !st.remote_prompt_seen,
+            "starting the connection is not evidence about what is behind it"
+        );
+
+        // The far shell's opening prompt does — including when it arrives in
+        // the very read that first sees the pane as remote, which on a unix
+        // host is the common case: the relayed prompt is suppressed, so it
+        // cannot trigger the immediate re-probe that would have split the two.
+        let mut fresh = test_state(true);
+        read(
+            &mut fresh,
+            vec![mark(true, None)],
+            Some(Some(hop("build-box"))),
+        );
+        assert!(fresh.remote_prompt_seen);
+        read(&mut st, vec![mark(true, None)], None);
+        assert!(st.remote_prompt_seen);
+
+        // A second hop has to prove itself over again.
+        read(&mut st, Vec::new(), Some(Some(hop("other-box"))));
+        assert!(!st.remote_prompt_seen);
+
+        // And coming back to the local shell clears it too.
+        read(&mut st, vec![mark(true, None)], None);
+        assert!(st.remote_prompt_seen);
+        read(&mut st, Vec::new(), Some(None));
+        assert!(!st.remote_prompt_seen);
     }
 
     #[test]
@@ -4429,6 +4921,8 @@ mod tests {
             cwd: None,
             osc_title: None,
             shell: ShellState::default(),
+            remote_prompt_seen: false,
+            modes: TerminalModes::default(),
             remote: None,
             agent: None,
             agent_session: None,
@@ -4930,6 +5424,94 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    /// Issue #711. A pane whose shell printed its prompt and then handed the
+    /// terminal to a full-screen program keeps `at_prompt` set for as long as
+    /// that program runs — nothing clears the flag but a `133;C` the program
+    /// has no reason to send. The live path already refuses to believe a
+    /// prompt mark that arrives while a foreground command owns the pty; the
+    /// replay used to re-assert the stored value regardless.
+    ///
+    /// What the client does with "at a prompt" is scrub the TUI modes it finds
+    /// in its grid — the alternate screen first (`\x1b[?1049l`) — because a
+    /// prompting shell means no full-screen program can own the pane. On a
+    /// replay that alternate screen is the one the ring just rebuilt, so the
+    /// scrub swapped it away and left the primary screen underneath: the shell
+    /// banner and the command line the pane was born with, with the program
+    /// still painting differential updates into a grid that no longer holds
+    /// what they are differences from.
+    #[test]
+    fn a_replay_does_not_claim_a_prompt_while_a_program_owns_the_pane() {
+        let mut st = test_state(true);
+        // The shell prompted, then `claude` took the terminal and entered the
+        // alternate screen. No `133;C` ever arrived, so the flag still stands.
+        st.shell = ShellState {
+            active: true,
+            at_prompt: true,
+            // The mark said the same thing; nothing has superseded it.
+            mark_at_prompt: true,
+            last_exit_code: Some(0),
+            command: None,
+        };
+        st.ring.append(b"\x1b[?1049h\x1b[2Jthe agent's screen");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, false, true);
+
+        let replayed = drain(&rx);
+        let prompt = replayed
+            .iter()
+            .find_map(|msg| match msg {
+                DaemonMsg::Prompt {
+                    active, at_prompt, ..
+                } => Some((*active, *at_prompt)),
+                _ => None,
+            })
+            .expect("shell integration is on, so the replay reports the prompt state");
+        assert_eq!(
+            prompt,
+            (true, false),
+            "a pane with a program in the foreground is not at a prompt, whatever the last \
+             OSC 133 mark said; claiming otherwise costs the client the screen the ring just \
+             replayed"
+        );
+    }
+
+    /// The other half of the same gate, and the reason it is a gate rather
+    /// than a deletion: an `ssh` that died mid-`vim` leaves `?1049h` in the
+    /// ring with no `?1049l` behind it, and the host shell's next prompt is
+    /// the only thing that says the alternate screen is stale. With nothing in
+    /// the foreground the report goes out as it always did, and a re-attach
+    /// still heals that pane.
+    #[test]
+    fn a_replay_still_reports_a_prompt_when_the_shell_owns_the_pane() {
+        let mut st = test_state(true);
+        st.shell = ShellState {
+            active: true,
+            at_prompt: true,
+            // The mark said the same thing; nothing has superseded it.
+            mark_at_prompt: true,
+            last_exit_code: Some(0),
+            command: None,
+        };
+        st.ring.append(b"\x1b[?1049hstranded alt screen");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber_with_permissions(&mut st, tx, false, false);
+
+        assert!(
+            drain(&rx).iter().any(|msg| matches!(
+                msg,
+                DaemonMsg::Prompt {
+                    active: true,
+                    at_prompt: true,
+                    ..
+                }
+            )),
+            "with no foreground command the stored prompt state is the truth, and the client \
+             needs it to leave a stranded alternate screen"
+        );
+    }
+
     #[test]
     fn attach_replays_initial_cwd_even_before_shell_reports_osc7() {
         let mut st = test_state(true);
@@ -4943,6 +5525,108 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Ok(DaemonMsg::Cwd(p)) if p == PathBuf::from("/Users/alice/clone/tty7"))
         );
+    }
+
+    /// Issue #774: `btop` sends its alternate-screen and mouse-reporting
+    /// prefix once, when it starts, and then refreshes for hours. The ring
+    /// holds the last few megabytes of those refreshes and nothing of the
+    /// prefix, so a client that rebuilt its terminal from replayed bytes alone
+    /// came back on the primary screen with reporting off — and its wheel,
+    /// reading those modes, scrolled the scrollback of a screen that has none.
+    #[test]
+    fn attach_restores_modes_whose_bytes_the_ring_has_dropped() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h\x1b[?1002h\x1b[?1006h");
+        // A long enough run of refreshes to push the prefix out of the front.
+        record_output(&mut st, &vec![b'.'; RING_CAP]);
+        assert!(
+            !st.ring.flatten().windows(8).any(|w| w == b"\x1b[?1049h"),
+            "the point of the test is that the prefix is gone from the ring"
+        );
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        // Ahead of the replayed screen, so the frames land in the buffer the
+        // modes put the client on.
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"\x1b[?1049h\x1b[?1002h\x1b[?1006h"),
+            "the modes the ring lost must be re-sent, in the order they were set"
+        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+    }
+
+    #[test]
+    fn a_pane_that_left_the_alternate_screen_restores_no_modes() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h\x1b[?1002hvim\x1b[?1002l\x1b[?1049l");
+        record_output(&mut st, b"$ ");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        // Straight to the ring: a shell prompt is not owed a mode frame, and
+        // sending one would put the pane on a screen it had left.
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))));
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// The other side of the same coin, and the common case: reconnect a minute
+    /// after opening `vim` and the ring still holds the whole session, prefix
+    /// included. Re-sending the prefix then would turn the ring's own `?1049h`
+    /// into a no-op, so the shell scrollback the ring holds ahead of it would be
+    /// painted into the alternate screen — which keeps no history and is thrown
+    /// away when the program exits, leaving the user back on a blank primary
+    /// buffer instead of the prompt they left behind.
+    #[test]
+    fn a_prefix_the_ring_still_carries_is_left_to_the_ring() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"$ vim notes.md\r\n");
+        record_output(&mut st, b"\x1b[?1049h\x1b[?1002h\x1b[?1006hthe file\r\n");
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Size(_))),
+            "the ring speaks for its own modes; nothing goes ahead of it"
+        );
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(_))));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A mode the ring half-carries is a mode the ring cannot set: the front
+    /// cuts wherever the cap fell, and the emulator will not act on the tail of
+    /// a sequence any more than the fold does.
+    #[test]
+    fn a_prefix_the_ring_cut_in_half_is_restored() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h");
+        // Four bytes over the cap, so the front eats exactly the `ESC [ ? 1`
+        // the sequence opens with and leaves the rest of it in place.
+        record_output(&mut st, &vec![b'.'; RING_CAP - 4]);
+        assert!(st.ring.flatten().starts_with(b"049h"));
+
+        let (tx, rx) = mpsc::channel();
+        attach_subscriber(&mut st, tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"\x1b[?1049h"),
+            "the bytes left in the ring put no client on the alternate screen"
+        );
+    }
+
+    /// An observer joins mid-session too, and reads the same pane state.
+    #[test]
+    fn observers_are_told_the_pane_modes_as_well() {
+        let mut st = test_state(true);
+        record_output(&mut st, b"\x1b[?1049h");
+        record_output(&mut st, &vec![b'.'; RING_CAP]);
+
+        let (tx, rx) = mpsc::channel();
+        observe_subscriber(&mut st, tx, Arc::new(OutputGate::new()), false);
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Snapshot(b)) if b == b"\x1b[?1049h"));
     }
 
     #[test]
@@ -4979,7 +5663,7 @@ mod tests {
         drain(&controller_rx);
 
         let (observer_tx, observer_rx) = mpsc::channel();
-        let id = observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+        let id = observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         assert_eq!(
             st.subscriber_epoch, epoch,
             "observing must not bump the controller epoch"
@@ -5018,7 +5702,7 @@ mod tests {
         drain(&first_rx);
 
         let (observer_tx, observer_rx) = mpsc::channel();
-        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         drain(&observer_rx);
 
         let (second_tx, second_rx) = mpsc::channel();
@@ -5050,7 +5734,7 @@ mod tests {
     fn a_gone_observer_is_pruned_on_the_next_broadcast() {
         let mut st = test_state(true);
         let (observer_tx, observer_rx) = mpsc::channel();
-        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         drop(observer_rx);
 
         notify(&mut st, DaemonMsg::Output(b"x".to_vec()));
@@ -5068,7 +5752,7 @@ mod tests {
         drain(&controller_rx);
 
         let (observer_tx, observer_rx) = mpsc::channel();
-        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+        observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         drain(&observer_rx);
 
         let pane_gate = OutputGate::new();
@@ -5107,7 +5791,7 @@ mod tests {
         let mut st = test_state(true);
         let (observer_tx, observer_rx) = mpsc::channel();
         let observer_gate = Arc::new(OutputGate::new());
-        observe_subscriber(&mut st, observer_tx, observer_gate.clone());
+        observe_subscriber(&mut st, observer_tx, observer_gate.clone(), false);
         drain(&observer_rx);
 
         let pane_gate = OutputGate::new();
@@ -5164,6 +5848,7 @@ mod tests {
             &mut with_observer_only.lock().unwrap(),
             observer_tx,
             Arc::new(OutputGate::new()),
+            false,
         );
         drain(&observer_rx);
         let (dead_tx, dead_rx) = mpsc::channel();
@@ -5184,7 +5869,7 @@ mod tests {
         {
             let mut st = with_both.lock().unwrap();
             attach_subscriber(&mut st, controller_tx);
-            observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+            observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         }
         drain(&controller_rx);
         drain(&observer_rx);
@@ -5230,6 +5915,91 @@ mod tests {
         assert_eq!(snap.agent, Some(CLIAgent::Claude));
         assert_eq!(snap.state.status, AgentStatus::Waiting);
         assert_eq!(snap.state.session_id.as_deref(), Some("sess-1"));
+    }
+
+    /// The foreground probe only ever runs on output, and the prompt a shell
+    /// draws after a command is the last output a pane produces until the user
+    /// types again. So an `ssh` that exited inside the poll interval used to
+    /// leave the pane reporting itself as remote indefinitely: nothing came
+    /// along to probe on. A prompt mark now forces the probe (#817).
+    #[test]
+    fn a_prompt_mark_reprobes_the_foreground_inside_the_poll_interval() {
+        /// Hands the reader one chunk per `read`, so two prompt marks arrive as
+        /// two passes through the loop a few microseconds apart — well inside
+        /// `REMOTE_CONTEXT_POLL_INTERVAL`.
+        struct Chunks(std::collections::VecDeque<Vec<u8>>);
+
+        impl Read for Chunks {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                match self.0.pop_front() {
+                    Some(chunk) => {
+                        buf[..chunk.len()].copy_from_slice(&chunk);
+                        Ok(chunk.len())
+                    }
+                    None => Ok(0),
+                }
+            }
+        }
+
+        let state = Arc::new(Mutex::new(test_state(true)));
+        let (sub_tx, sub_rx) = mpsc::channel();
+        state.lock().unwrap().subscriber = Some(sub_tx);
+
+        let probes_taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let taken = probes_taken.clone();
+        let remote = Box::new(move || {
+            // First probe: `ssh` holds the pty. Every one after: it is gone.
+            (taken.fetch_add(1, Ordering::SeqCst) == 0).then(|| RemoteContext {
+                kind: RemoteKind::Ssh,
+                argv: vec!["ssh".into(), "box".into()],
+                target: "box".into(),
+            })
+        });
+
+        let handle = DaemonPane::spawn_reader(
+            state.clone(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(OutputGate::new()),
+            Box::new(Chunks(
+                [
+                    b"\x1b]133;C;ssh box\x07".to_vec(),
+                    b"\x1b]133;D;0\x07".to_vec(),
+                ]
+                .into_iter()
+                .collect(),
+            )),
+            null_writer(),
+            || false,
+            ForegroundProbes {
+                remote,
+                agent: Box::new(|| None),
+                cwd: Box::new(|| None),
+            },
+            Arc::new(DeathReporter::new(|| {})),
+        );
+        handle.join().unwrap();
+
+        assert_eq!(
+            probes_taken.load(Ordering::SeqCst),
+            2,
+            "the prompt mark did not force a second probe"
+        );
+        assert!(
+            state.lock().unwrap().remote.is_none(),
+            "the pane still reports the ssh session it has already left"
+        );
+        let reported: Vec<Option<String>> = sub_rx
+            .try_iter()
+            .filter_map(|msg| match msg {
+                DaemonMsg::RemoteContext(ctx) => Some(ctx.map(|c| c.target)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            vec![Some("box".to_string()), None],
+            "the client was never told the pane came home"
+        );
     }
 
     #[test]
@@ -5597,7 +6367,7 @@ mod tests {
         let mut st = test_state(true);
         st.clipboard_write_from_spec = Some(true);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false);
+        attach_subscriber_with_permissions(&mut st, tx, false, false);
         assert!(st.allow_remote_clipboard_write);
 
         // And a profile that says no is not something an attaching client can
@@ -5605,17 +6375,17 @@ mod tests {
         let mut st = test_state(true);
         st.clipboard_write_from_spec = Some(false);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, true);
+        attach_subscriber_with_permissions(&mut st, tx, true, false);
         assert!(!st.allow_remote_clipboard_write);
 
         // A pane with no spec of its own — everything on a remote
         // `tty7-server` — is exactly as permitted as its controller says.
         let mut st = test_state(true);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, true);
+        attach_subscriber_with_permissions(&mut st, tx, true, false);
         assert!(st.allow_remote_clipboard_write);
         let (tx, _rx) = mpsc::channel();
-        attach_subscriber_with_permissions(&mut st, tx, false);
+        attach_subscriber_with_permissions(&mut st, tx, false, false);
         assert!(!st.allow_remote_clipboard_write);
     }
 
@@ -5628,8 +6398,8 @@ mod tests {
         let (observer_tx, observer_rx) = mpsc::channel();
         {
             let mut st = state.lock().unwrap();
-            attach_subscriber_with_permissions(&mut st, controller_tx, true);
-            observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()));
+            attach_subscriber_with_permissions(&mut st, controller_tx, true, false);
+            observe_subscriber(&mut st, observer_tx, Arc::new(OutputGate::new()), false);
         }
         drain(&controller_rx);
         drain(&observer_rx);
@@ -6425,6 +7195,7 @@ mod tests {
                 shell: vec![ShellState {
                     active: true,
                     at_prompt: true,
+                    mark_at_prompt: true,
                     last_exit_code: Some(0),
                     command: None,
                 }],

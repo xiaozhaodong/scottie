@@ -86,6 +86,11 @@ src/terminal/search.rs|.is_absolute()
 src/terminal/view.rs|std::fs::create_dir_all
 src/terminal/view.rs|std::fs::write
 
+# Asking whether a file would be *launched* rather than shown before handing it
+# to the desktop opener. Only reachable behind `host_id.is_local()` — a path on
+# another machine takes the earlier arm and never gets here.
+src/ui/code_editor.rs|std::fs::metadata
+
 # The source side of a file drop. What the desktop hands over is by
 # construction a path on the desktop's own machine, so reading it is a local
 # read even when the tree being dropped on is remote — the destination side of

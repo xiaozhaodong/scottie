@@ -20,6 +20,11 @@ use crate::core::config::Config;
 
 const DIM_OPACITY: f32 = 0.66;
 
+/// How much of the text's own colour a link's underline keeps before the
+/// modifier is down. Low enough to read as a hint rather than as markup, high
+/// enough to survive a light theme.
+const HELD_BACK_LINK_ALPHA: f32 = 0.45;
+
 #[derive(Clone, Copy, PartialEq, Default, Debug)]
 enum UnderlineKind {
     #[default]
@@ -32,7 +37,7 @@ enum UnderlineKind {
 }
 
 #[derive(Clone)]
-struct RenderCell {
+pub(super) struct RenderCell {
     c: char,
     marks: Option<Box<[char]>>,
     fg: Hsla,
@@ -149,9 +154,37 @@ fn build_font(base: &Font, bold: bool, italic: bool) -> Font {
         FontStyle::Normal
     };
     if f.features.tag_value_list().is_empty() {
-        f.features = gpui::FontFeatures::disable_ligatures();
+        f.features = ligatures_off();
     }
     f
+}
+
+/// The feature set that actually turns ligatures off in a terminal grid.
+///
+/// gpui's own `FontFeatures::disable_ligatures()` emits `calt: 0` and nothing
+/// else. `calt` is only the contextual-alternate feature a programming face
+/// drives `=>` and `!=` from; the `fi`/`ffl`/`ffi` ligatures live in `liga` and
+/// `clig`, which that call never mentions — so they were left at the shaper's
+/// default, and CoreText, DirectWrite and rustybuzz all default them on. A
+/// terminal cannot have them: a ligature is one glyph where the grid budgeted a
+/// cell per character, so the row drifts.
+///
+/// Naming all three is therefore the whole fix, and it is not platform
+/// specific. Windows is the sharpest case only because gpui's DirectWrite
+/// backend always attaches an `IDWriteTypography` to the run: an empty feature
+/// list leaves that object empty, which suppresses DirectWrite's own defaults,
+/// while any non-empty list has `liga: 1`/`clig: 1` appended to it
+/// (`gpui_windows/src/direct_write.rs`, `apply_font_features`). Asking for
+/// `calt: 0` there bought ligatures that asking for nothing would not have.
+///
+/// `rlig` is deliberately left alone: it carries the required ligatures a
+/// script cannot be written without.
+fn ligatures_off() -> gpui::FontFeatures {
+    gpui::FontFeatures(std::sync::Arc::new(vec![
+        ("calt".to_string(), 0),
+        ("liga".to_string(), 0),
+        ("clig".to_string(), 0),
+    ]))
 }
 
 fn snapshot_cell(
@@ -263,7 +296,7 @@ fn match_tint(cx: &gpui::App) -> u32 {
     }
 }
 
-struct PaintColors {
+pub(super) struct PaintColors {
     default_fg: Hsla,
     default_bg: Hsla,
     caret: Hsla,
@@ -373,7 +406,7 @@ fn blend_toward(c: Hsla, dim: f32, under: Rgba) -> Hsla {
 }
 
 impl PaintColors {
-    fn resolve(theme: &gpui_component::Theme, cx: &gpui::App) -> Self {
+    pub(super) fn resolve(theme: &gpui_component::Theme, cx: &gpui::App) -> Self {
         let default_fg = theme.foreground;
         let default_bg = theme.background;
         let caret = theme.caret;
@@ -809,8 +842,6 @@ fn segment_row(row: &[RenderCell]) -> Vec<RowSeg> {
 thread_local! {
                             static CHAR_STRINGS: RefCell<HashMap<char, SharedString>> = RefCell::new(HashMap::new());
 
-                        static GRID_BUF: RefCell<Vec<RenderCell>> = const { RefCell::new(Vec::new()) };
-
                         /// Measured ink extents and the font size they were measured at.
                         static INK_EXTENTS: RefCell<(Pixels, HashMap<(gpui::FontId, char), Option<Pixels>>)> =
                             RefCell::new((px(0.), HashMap::new()));
@@ -952,6 +983,19 @@ fn powerline_solid_edge(
     ))
 }
 
+/// What colour a hovered link's underline takes.
+///
+/// Until the modifier is down the link is only being pointed out, so it is
+/// drawn as the same underline held back. A cell carrying an underline of its
+/// own keeps the colour it was given: dimming that would be editing the
+/// application's output rather than annotating it.
+fn link_underline_color(cell: &RenderCell, armed: bool) -> Option<Hsla> {
+    if armed || cell.underline != UnderlineKind::None || cell.underline_color.is_some() {
+        return cell.underline_color;
+    }
+    Some(cell.fg.opacity(HELD_BACK_LINK_ALPHA))
+}
+
 fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
     // Special underlines are painted directly from the cell buffer, so a
     // shaped blank is only needed for decorations GPUI owns.
@@ -975,12 +1019,26 @@ fn native_cell_residue(style: &GlyphStyle) -> Option<char> {
 /// and letting it spill. This follows WezTerm, whose answer shows the glyph
 /// whole most often: a quarter cell of slack always, and a whole extra cell
 /// when the neighbouring cell is blank and has nothing to lose.
-fn seg_budget(solo: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
+fn seg_budget(solo: bool, measured: bool, cells: usize, room: bool, cell_width: Pixels) -> Pixels {
     if solo {
-        // Single-cell glyphs have always been allowed to lean into the next
-        // cell. Narrowing that here would shrink a pile of symbols that look
-        // fine today, so it stays a separate decision.
-        cell_width * 2.
+        // Single-cell glyphs are allowed to lean into the next cell — that is
+        // what keeps the pile of symbols that look fine today from shrinking —
+        // but only while that cell is empty. A Nerd Font icon pulled from a
+        // fallback face inks well past a narrow primary's cell (1.6 cells is
+        // typical), and where the next cell has a glyph of its own the lean is
+        // not a lean, it is an overlap: the neighbour is painted afterwards
+        // and lands on top of the overshoot. Hand those their own cell and let
+        // `fit_scale` bring them down into it, the way kitty and ghostty do.
+        //
+        // Only where the ink was measured, though. This number is the clip as
+        // well as the threshold to shrink at, so narrowing it for a segment
+        // nothing could measure would cut the glyph instead of scaling it —
+        // see `ink_covers_segment`.
+        if room || !measured {
+            cell_width * 2.
+        } else {
+            cell_width
+        }
     } else if room {
         cell_width * (cells as f32 + 1.)
     } else {
@@ -1037,6 +1095,118 @@ fn ink_extent(
     })
 }
 
+/// Where a shaped run stops standing over the cells it came from.
+///
+/// `force_width` puts the *n*th glyph at *n × cell_width*, which is the whole
+/// grid only while the shaper hands back one glyph per character. A ligature
+/// substitution collapses several characters into one glyph, and from there on
+/// every glyph is pulled left by the cells the substitution swallowed: the
+/// text after it overlaps the ligature's tail, and the caret — drawn at the
+/// grid column, not at the ink — stands past the end of the run with a gap.
+///
+/// Takes the glyphs' byte indices, which in a run are their columns, and
+/// answers with the first column that has drifted. Only a glyph that arrives
+/// later than its ordinal counts: a face that *adds* glyphs cannot be helped
+/// by cutting the run, and treating it as drift would cut at column zero
+/// forever.
+fn run_drift(indices: impl IntoIterator<Item = usize>) -> Option<usize> {
+    indices
+        .into_iter()
+        .enumerate()
+        .find_map(|(ordinal, index)| (index > ordinal).then_some(index))
+}
+
+/// One thing [`paint_run`] asks of the caller, in bytes into the run's text.
+///
+/// A run is ASCII, one byte per cell, so `at` is also a column offset and
+/// `len` is also a width in cells.
+#[derive(Debug, PartialEq)]
+enum RunStep {
+    /// Shape `text[at..at + len]` and answer [`run_drift`] for it.
+    Drift { at: usize, len: usize },
+    /// Shape and paint `text[at..at + len]` starting at column `col`.
+    Paint { col: usize, at: usize, len: usize },
+}
+
+/// Walk a run in the pieces that stand over their own cells.
+///
+/// A run that does not drift is one `Drift` and one `Paint` of the whole
+/// thing, which is every run in a monospace face. Where it drifts, the part
+/// in front of the drift is painted as a piece of its own — shaped on its
+/// own, which is the point: clipping the tail away would not help, because
+/// the tail drifted *left*, into the columns this piece is keeping. The
+/// remainder then starts over in the column the grid puts it in.
+///
+/// The loop is separated from the shaping so it can be tested at all: gpui's
+/// test text system hands back one glyph per character, so nothing shaped
+/// through it ever drifts and the interesting half would never run.
+fn paint_run(start: usize, len: usize, mut step: impl FnMut(RunStep) -> Option<usize>) {
+    let mut col = start;
+    let mut at = 0;
+    loop {
+        match step(RunStep::Drift { at, len: len - at }) {
+            None => {
+                step(RunStep::Paint {
+                    col,
+                    at,
+                    len: len - at,
+                });
+                return;
+            }
+            Some(drift) => {
+                step(RunStep::Paint {
+                    col,
+                    at,
+                    len: drift,
+                });
+                col += drift;
+                at += drift;
+            }
+        }
+    }
+}
+
+/// Shape one piece of a segment's text.
+///
+/// The whole of it keeps the string it arrived in; only a piece cut out of a
+/// drifted run has to be copied, and that happens where a ligature forced the
+/// cut. Repeat calls for the same piece within a frame are answered from
+/// gpui's line-layout cache rather than shaped again.
+fn shape_piece(
+    window: &mut Window,
+    run_buf: &mut [TextRun; 1],
+    text: &SharedString,
+    at: usize,
+    len: usize,
+    font_size: Pixels,
+    force_width: Option<Pixels>,
+) -> gpui::ShapedLine {
+    let piece = if at == 0 && len == text.len() {
+        text.clone()
+    } else {
+        SharedString::from(text[at..at + len].to_string())
+    };
+    run_buf[0].len = piece.len();
+    window
+        .text_system()
+        .shape_line(piece, font_size, run_buf, force_width)
+}
+
+/// Whether [`ink_extent`]'s answer speaks for the whole segment.
+///
+/// It measures the segment's first character in the run's first face. That is
+/// all of a one-character segment and only part of anything longer: a
+/// cluster's combining marks can ink well to the right of the base they hang
+/// off — Devanagari `\u{915}` + `\u{93E}` — and are not in the number. `None`
+/// is a face that answered no bounds at all, which is no measurement either.
+///
+/// Neither can be scaled to fit, so neither may be held to one cell: the
+/// budget doubles as the clip, and a segment that cannot shrink into a
+/// narrowed one is simply cut off at it.
+fn ink_covers_segment(ink: Option<Pixels>, text: &str) -> bool {
+    ink.is_some() && text.chars().nth(1).is_none()
+}
+
 /// Whether the cell after a segment is free for its glyph to lean into.
 ///
 /// A blank still owns its cell if it paints anything there: a background, a
@@ -1091,7 +1261,12 @@ fn paint_glyphs(
             // A `Run` is one glyph per cell in the main font, which by
             // definition already fits; the rest can carry a glyph from a
             // fallback face that is wider than the cells it was handed.
-            let fit = !matches!(seg, RowSeg::Run { .. });
+            //
+            // A run is also the only segment `segment_row` builds out of more
+            // than one cell of plain text, and it only batches ASCII: one
+            // byte, one character, one column. That is what lets `run_drift`
+            // read a glyph's byte index as the column it came from.
+            let run = matches!(seg, RowSeg::Run { .. });
             let (start, cells, text, force_width, solo) = match seg {
                 RowSeg::Run { start, cells, text } => (
                     start,
@@ -1173,22 +1348,60 @@ fn paint_glyphs(
             };
 
             let x = geom.origin.x + geom.cell_width * (start as f32);
-            let budget = if fit {
-                seg_budget(
-                    solo,
-                    cells,
-                    has_room_after(row_cells, start, cells),
-                    geom.cell_width,
-                )
-            } else {
-                geom.cell_width * cells as f32
-            };
+
+            // A run is walked in the pieces that stand over their own cells;
+            // every other segment is one shaping and one paint.
+            if run {
+                paint_run(start, text.len(), |step| match step {
+                    RunStep::Drift { at, len } => {
+                        let shaped =
+                            shape_piece(window, run_buf, &text, at, len, font_size, force_width);
+                        run_drift(
+                            shaped
+                                .runs
+                                .iter()
+                                .flat_map(|r| r.glyphs.iter().map(|g| g.index)),
+                        )
+                    }
+                    RunStep::Paint { col, at, len } => {
+                        let shaped =
+                            shape_piece(window, run_buf, &text, at, len, font_size, force_width);
+                        let x = geom.origin.x + geom.cell_width * (col as f32);
+                        let clip = Bounds::new(
+                            point(x, y),
+                            size(geom.cell_width * len as f32, geom.line_height),
+                        );
+                        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                            _ = shaped.paint(
+                                point(x, y),
+                                geom.line_height,
+                                TextAlign::Left,
+                                None,
+                                window,
+                                cx,
+                            );
+                        });
+                        None
+                    }
+                });
+                continue;
+            }
 
             let mut shaped =
                 window
                     .text_system()
                     .shape_line(text.clone(), font_size, run_buf, force_width);
-            if fit && let Some(ink) = ink_extent(cx, &shaped, &text, font_size) {
+            // Measured before the budget is set, because how far a solo glyph
+            // may reach turns on whether its ink is known at all.
+            let ink = ink_extent(cx, &shaped, &text, font_size);
+            let budget = seg_budget(
+                solo,
+                ink_covers_segment(ink, &text),
+                cells,
+                has_room_after(row_cells, start, cells),
+                geom.cell_width,
+            );
+            if let Some(ink) = ink {
                 let scale = fit_scale(ink, budget);
                 if scale < 1. {
                     shaped = window.text_system().shape_line(
@@ -1216,7 +1429,7 @@ fn paint_glyphs(
 }
 
 #[derive(Clone, Copy)]
-struct GridCursor {
+pub(super) struct GridCursor {
     row: usize,
     col: usize,
     // Where the IME candidate window should anchor: the fake caret drawn by
@@ -1356,7 +1569,8 @@ fn paint_marked(
     );
 }
 
-struct GridSnapshot {
+#[derive(Clone)]
+pub(super) struct GridSnapshot {
     cursor: Option<GridCursor>,
     sliver: Option<Vec<RenderCell>>,
     any_selected: bool,
@@ -1370,7 +1584,7 @@ struct GridSnapshot {
 }
 
 impl TerminalElement {
-    fn build_grid(
+    pub(super) fn build_grid(
         &self,
         colors: &PaintColors,
         buf: &mut Vec<RenderCell>,
@@ -1380,9 +1594,8 @@ impl TerminalElement {
         cx: &App,
         dim: f32,
         under: Rgba,
-    ) -> GridSnapshot {
-        buf.clear();
-        buf.resize(rows * cols, RenderCell::default());
+        must_block: bool,
+    ) -> Option<GridSnapshot> {
         let mut cursor: Option<GridCursor> = None;
         let mut sliver: Option<Vec<RenderCell>> = None;
         let mut any_selected = false;
@@ -1394,7 +1607,32 @@ impl TerminalElement {
                 palette[..16].copy_from_slice(&active.ansi16);
             }
             let term = self.view.read(cx).terminal.term.clone();
-            let term = term.lock();
+            // Rendering does not queue for the grid lock. Holding it is the
+            // pane's own reader, part-way through feeding a batch of output
+            // into the emulator — and one UI thread draws every pane in every
+            // window, so waiting here wires one pane's write speed to the frame
+            // rate of the whole window. That is the same illness as #709, which
+            // was this thread parked in `write(2)` for a stalled link; this is
+            // the read side of it. A frame that cannot have the lock paints the
+            // one before it, and nobody can see a frame of lag.
+            //
+            // `try_lock_unfair` rather than a lease: a painter that queued
+            // would make the reader wait for a frame it is not going to get
+            // anyway. Skipping the queue is safe precisely because it never
+            // waits.
+            let term = match term.try_lock_unfair() {
+                Some(term) => term,
+                // The two frames that have to have it: the first one, with no
+                // previous grid to fall back on, and the one after a resize,
+                // where the previous grid is the wrong shape. Both are rare and
+                // neither is in the steady state.
+                None if must_block => term.lock(),
+                None => return None,
+            };
+            // After the lock, not before: an early return must leave the
+            // previous frame's cells intact for the caller to paint again.
+            buf.clear();
+            buf.resize(rows * cols, RenderCell::default());
             let content = term.renderable_content();
             display_offset = content.display_offset as i32;
             history_size = term.grid().history_size();
@@ -1486,7 +1724,7 @@ impl TerminalElement {
         let (any_match, any_current) =
             self.flag_search_matches(buf, rows, cols, display_offset, cx);
         self.flag_hovered_link(buf, rows, cols, display_offset, cx);
-        GridSnapshot {
+        Some(GridSnapshot {
             cursor,
             sliver,
             any_selected,
@@ -1494,7 +1732,7 @@ impl TerminalElement {
             any_current,
             display_offset,
             history_size,
-        }
+        })
     }
 
     fn flag_hovered_link(
@@ -1526,7 +1764,9 @@ impl TerminalElement {
                 };
                 let mut col = col_start;
                 while col <= col_end && col < cols {
-                    buf[grid_row * cols + col].link_hover = true;
+                    let cell = &mut buf[grid_row * cols + col];
+                    cell.link_hover = true;
+                    cell.underline_color = link_underline_color(cell, link.armed);
                     col += 1;
                 }
             }
@@ -1610,6 +1850,16 @@ impl TerminalElement {
             let button = ev.button;
             let clicks = ev.click_count;
             view.update(cx, |v, cx| {
+                if button == MouseButton::Right {
+                    // Before anything else: gpui-component builds the popup
+                    // from a deferred callback, and by then the pointer is
+                    // only a memory. Reading the grid now is what lets the
+                    // menu name the file that was actually under the click.
+                    match should_show_context_menu(v.mouse_mode(), mods.shift) {
+                        true => v.record_menu_link(col, row, cx),
+                        false => v.forget_menu_link(),
+                    }
+                }
                 let link_modifier = mods.secondary() || v.link_modifier_down();
                 if link_modifier
                     && button == MouseButton::Left
@@ -1653,8 +1903,8 @@ impl TerminalElement {
                         if !mods.shift {
                             v.mouse_motion(col, row, &mods);
                         }
-                        let include_files = mods.secondary() || v.link_modifier_down();
-                        v.hover_link_at(col, row, include_files, cx);
+                        let armed = mods.secondary() || v.link_modifier_down();
+                        v.hover_link_at(col, row, armed, cx);
                     } else {
                         v.clear_hovered_link(cx);
                     }
@@ -1838,8 +2088,18 @@ impl Element for TerminalElement {
             (colors, 1., Rgba::default())
         };
 
-        let mut buf = GRID_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
-        let snap = self.build_grid(
+        // This pane's previous frame, borrowed for the duration of this one.
+        // `build_grid` overwrites it when it gets the terminal lock, and leaves
+        // it exactly as it is when it does not.
+        let mut buf = self
+            .view
+            .update(cx, |view, _| std::mem::take(&mut view.grid_buf));
+        let previous = self.view.read(cx).grid_snap.clone();
+        // The two frames with nothing to fall back on: the first one this pane
+        // ever paints, and the one after a resize, whose previous grid is the
+        // wrong shape to paint into these bounds. Those wait for the lock.
+        let must_block = previous.is_none() || buf.len() != geom.rows * geom.cols;
+        let built = self.build_grid(
             &colors,
             &mut buf,
             geom.rows,
@@ -1848,7 +2108,17 @@ impl Element for TerminalElement {
             cx,
             dim,
             under,
+            must_block,
         );
+        if let Some(snap) = &built {
+            let snap = snap.clone();
+            self.view.update(cx, |view, _| view.grid_snap = Some(snap));
+        }
+        // `must_block` above is exactly the condition under which `build_grid`
+        // is not allowed to come back empty, so one of the two is always here.
+        let Some(snap) = built.or(previous) else {
+            return;
+        };
         let cursor = snap.cursor;
         let sliver = snap.sliver.as_ref();
 
@@ -2044,12 +2314,12 @@ impl Element for TerminalElement {
             }
         });
 
-        GRID_BUF.with(|b| *b.borrow_mut() = buf);
+        self.view.update(cx, |view, _| view.grid_buf = buf);
 
         self.register_mouse_handlers(geom, bounds, prepaint.hitbox.id, window);
 
         let view = self.view.read(cx);
-        if view.hovered_link.is_some() {
+        if view.hovered_link.as_ref().is_some_and(|link| link.armed) {
             window.set_cursor_style(CursorStyle::PointingHand, &prepaint.hitbox);
         } else if !view.mouse_mode() {
             window.set_cursor_style(CursorStyle::IBeam, &prepaint.hitbox);
@@ -2358,7 +2628,7 @@ mod tests {
         let ink = px(18.75);
         let scale = |advance_em: f32, room: bool| {
             let cell = px(15. * advance_em);
-            fit_scale(ink, seg_budget(false, 2, room, cell))
+            fit_scale(ink, seg_budget(false, true, 2, room, cell))
         };
 
         // Menlo and friends: a quarter cell of slack is enough on its own.
@@ -2367,6 +2637,130 @@ mod tests {
         // shrink, but a blank one lends a whole cell and the emoji stays whole.
         assert!(scale(0.5, false) < 1.);
         assert_eq!(scale(0.5, true), 1.);
+    }
+
+    #[test]
+    fn a_run_that_keeps_one_glyph_per_cell_is_painted_whole() {
+        assert_eq!(run_drift([0, 1, 2, 3]), None);
+        assert_eq!(run_drift([0]), None);
+        assert_eq!(run_drift([0usize; 0]), None);
+    }
+
+    #[test]
+    fn a_ligature_cuts_the_run_at_the_column_that_drifted() {
+        // "office" through a face that ligates "ffi": the shaper answers with
+        // o, ffi, c, e, and `force_width` sits them on columns 0..4 — so 'c'
+        // lands two columns early, over the ligature's tail, and the row ends
+        // two columns short of where the caret is drawn.
+        assert_eq!(run_drift([0, 1, 4, 5]), Some(4));
+        // The remainder, restarted at column 4, lines up on its own.
+        assert_eq!(run_drift([0, 1]), None);
+        // A two-character ligature drifts by one: "afib" -> a, fi, b.
+        assert_eq!(run_drift([0, 1, 3]), Some(3));
+        // And a run can drift on its very first pair: "fib" -> fi, b.
+        assert_eq!(run_drift([0, 2]), Some(2));
+    }
+
+    /// Drives the loop `paint_glyphs` runs a `RowSeg::Run` through, with the
+    /// shaping stubbed out. `drifts` is what the shaper is pretending to
+    /// answer for each piece it is handed, in order.
+    fn run_steps(start: usize, text: &str, drifts: &[Option<usize>]) -> Vec<RunStep> {
+        let mut seen = Vec::new();
+        let mut answers = drifts.iter().copied();
+        paint_run(start, text.len(), |step| {
+            let drift = matches!(step, RunStep::Drift { .. })
+                .then(|| {
+                    answers
+                        .next()
+                        .expect("asked to shape more pieces than scripted")
+                })
+                .flatten();
+            seen.push(step);
+            drift
+        });
+        seen
+    }
+
+    /// What the caller is told to paint, as `(column, text)`.
+    fn painted<'a>(steps: &[RunStep], text: &'a str) -> Vec<(usize, &'a str)> {
+        steps
+            .iter()
+            .filter_map(|step| match *step {
+                RunStep::Paint { col, at, len } => Some((col, &text[at..at + len])),
+                RunStep::Drift { .. } => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_that_does_not_drift_is_shaped_once_and_painted_whole() {
+        let steps = run_steps(7, "hello", &[None]);
+        assert_eq!(
+            steps,
+            [
+                RunStep::Drift { at: 0, len: 5 },
+                RunStep::Paint {
+                    col: 7,
+                    at: 0,
+                    len: 5
+                }
+            ],
+            "no drift is one shaping and one paint, at the column it started in"
+        );
+    }
+
+    #[test]
+    fn a_drifted_run_paints_the_head_alone_and_restarts_at_its_own_column() {
+        // "office" through a face that ligates "ffi": the shaper answers with
+        // o, ffi, c, e, so 'c' arrives at byte 4 as the third glyph and the
+        // run has to be cut there.
+        let steps = run_steps(0, "office", &[Some(4), None]);
+        assert_eq!(
+            painted(&steps, "office"),
+            [(0, "offi"), (4, "ce")],
+            "the head is a piece of its own, and the rest starts at column 4"
+        );
+        // The head must be *shaped* as "offi", not painted as the whole run
+        // under a four-cell clip: 'c' and 'e' drifted left, into those very
+        // cells, so a clip would leave them on top of the ligature.
+        assert_eq!(
+            steps[1],
+            RunStep::Paint {
+                col: 0,
+                at: 0,
+                len: 4
+            }
+        );
+        // And the remainder is re-shaped on its own before it is painted, so
+        // its own drift is measured from its own column.
+        assert_eq!(steps[2], RunStep::Drift { at: 4, len: 2 });
+    }
+
+    #[test]
+    fn a_run_that_drifts_twice_keeps_advancing_and_finishes() {
+        // "affib" -> a, ffi, b cuts once; the tail "b" then stands on its own.
+        assert_eq!(
+            painted(&run_steps(3, "affib", &[Some(4), None]), "affib"),
+            [(3, "affi"), (7, "b")]
+        );
+        // Two cuts in a row: every piece moves the column on by its own width
+        // and the walk ends on the piece that does not drift.
+        assert_eq!(
+            painted(
+                &run_steps(0, "offifie", &[Some(4), Some(2), None]),
+                "offifie"
+            ),
+            [(0, "offi"), (4, "fi"), (6, "e")]
+        );
+    }
+
+    #[test]
+    fn a_face_that_adds_glyphs_is_left_alone() {
+        // Two glyphs for one character walk ahead of their columns, not
+        // behind them. Cutting there would restart the run where it already
+        // is and never finish.
+        assert_eq!(run_drift([0, 0, 1, 2]), None);
+        assert_eq!(run_drift([0, 1, 1, 2]), None);
     }
 
     #[test]
@@ -2463,6 +2857,33 @@ mod tests {
         let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
         row[2].c = '\0';
         assert_eq!(segment_row(&row), [run(0, 5, "ab cd")]);
+    }
+
+    /// `paint_glyphs` reads a glyph's byte index as the column it came from
+    /// and cuts a drifted run there, which only holds while a run is ASCII and
+    /// one byte wide per cell. Pin that here rather than in the paint code.
+    #[test]
+    fn a_run_is_as_long_in_bytes_as_it_is_wide_in_cells() {
+        let rows: [Vec<RenderCell>; 4] = [
+            " ab  cd  ".chars().map(cell).collect(),
+            "https://例/a".chars().map(cell).collect(),
+            {
+                let mut row: Vec<_> = "ab cd".chars().map(cell).collect();
+                for c in &mut row {
+                    c.underline = UnderlineKind::Single;
+                }
+                row
+            },
+            "x->y a//b".chars().map(cell).collect(),
+        ];
+        for row in rows {
+            for seg in segment_row(&row) {
+                if let RowSeg::Run { cells, text, .. } = seg {
+                    assert!(text.is_ascii(), "{text:?} is not ASCII");
+                    assert_eq!(text.len(), cells, "{text:?} does not span {cells} cells");
+                }
+            }
+        }
     }
 
     #[test]
@@ -2707,30 +3128,142 @@ mod tests {
     #[test]
     fn seg_budget_frees_solo_symbols_and_lends_a_cell_only_when_one_is_free() {
         let cell = px(10.);
-        assert_eq!(seg_budget(true, 1, false, cell), px(20.), "solo keeps two");
         assert_eq!(
-            seg_budget(false, 2, false, cell),
+            seg_budget(true, true, 1, true, cell),
+            px(20.),
+            "a solo glyph leans into a free cell"
+        );
+        assert_eq!(
+            seg_budget(true, true, 1, false, cell),
+            px(10.),
+            "but keeps to its own once the next cell is taken"
+        );
+        assert_eq!(
+            seg_budget(false, true, 2, false, cell),
             px(22.5),
             "a quarter cell"
         );
-        assert_eq!(seg_budget(false, 2, true, cell), px(30.), "a whole cell");
-        assert_eq!(seg_budget(false, 1, false, cell), px(12.5));
+        assert_eq!(
+            seg_budget(false, true, 2, true, cell),
+            px(30.),
+            "a whole cell"
+        );
+        assert_eq!(seg_budget(false, true, 1, false, cell), px(12.5));
     }
 
     #[test]
-    fn build_font_disables_ligatures_unless_features_are_configured() {
-        let font = build_font(&gpui::font("Test"), false, false);
-        assert_eq!(font.features.is_calt_enabled(), Some(false));
+    fn a_fallback_icon_is_fitted_to_its_cell_only_when_the_next_one_is_taken() {
+        // Measured on Windows: Maple Mono NF CN supplying U+F059 to a
+        // 15px Cascadia Mono grid inks 13.85px across an 8.79px cell.
+        let cell = px(8.789);
+        let ink = px(13.845);
 
-        let mut configured = gpui::font("Test");
-        configured.features = serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap();
-        let font = build_font(&configured, false, false);
-        assert_eq!(font.features.is_calt_enabled(), Some(true));
+        let leaning = fit_scale(ink, seg_budget(true, true, 1, true, cell));
+        assert_eq!(leaning, 1., "a blank neighbour still lends its cell");
+
+        let crowded = fit_scale(ink, seg_budget(true, true, 1, false, cell));
+        assert!(crowded < 1., "an occupied neighbour does not");
         assert!(
+            ink * crowded <= cell,
+            "and the icon has to end inside its own cell"
+        );
+    }
+
+    #[test]
+    fn a_solo_segment_is_held_to_its_cell_only_where_its_ink_was_measured() {
+        let cell = px(10.);
+        let budget = |ink, text| seg_budget(true, ink_covers_segment(ink, text), 1, false, cell);
+
+        // One character the face answered bounds for: the whole of it was
+        // measured, so `fit_scale` can bring it into one cell and the clip
+        // may be drawn there.
+        assert!(ink_covers_segment(Some(px(15.)), "\u{f059}"));
+        assert_eq!(budget(Some(px(15.)), "\u{f059}"), px(10.));
+
+        // A base with a combining mark hanging off it reaches paint_glyphs as
+        // a one-cell `Cluster`, which counts as solo. `ink_extent` read the
+        // base alone: Devanagari ka plus the aa matra inks to the right of the
+        // base, and none of that overhang is in the 9px. Nothing would shrink
+        // it, so a one-cell clip would cut the matra clean off.
+        assert!(!ink_covers_segment(Some(px(9.)), "\u{915}\u{93E}"));
+        assert_eq!(budget(Some(px(9.)), "\u{915}\u{93E}"), px(20.));
+
+        // A face that answers no bounds at all is the same story from the
+        // other side: `fit_scale` is never reached, so halving the clip only
+        // clips.
+        assert!(!ink_covers_segment(None, "\u{f059}"));
+        assert_eq!(budget(None, "\u{f059}"), px(20.));
+
+        // A free neighbour lends its cell either way \u2014 the measurement only
+        // decides whether the lean can be withdrawn.
+        for ink in [Some(px(15.)), None] {
+            for text in ["\u{f059}", "\u{915}\u{93E}"] {
+                assert_eq!(
+                    seg_budget(true, ink_covers_segment(ink, text), 1, true, cell),
+                    px(20.)
+                );
+            }
+        }
+    }
+
+    /// The emitted feature set is the whole contract with the shaper, so pin it
+    /// tag for tag rather than asking after one tag at a time.
+    ///
+    /// `calt: 0` alone is not "ligatures off" on any platform: it never asks
+    /// for `liga`/`clig`, which every shaper defaults on. Shaping "office
+    /// waffle fluffier" in Calibri through the real DirectWrite shaper gives 15
+    /// glyphs for 22 characters with `calt: 0`, and 22 once all three are named
+    /// zero.
+    #[test]
+    fn build_font_emits_the_pinned_feature_set_for_each_ligature_setting() {
+        fn tags(font: &Font) -> Vec<(&str, u32)> {
             font.features
                 .tag_value_list()
                 .iter()
-                .any(|(tag, value)| tag == "liga" && *value == 1)
+                .map(|(tag, value)| (tag.as_str(), *value))
+                .collect()
+        }
+
+        // Default config, and the settings toggle switched off: both leave
+        // `font_features` unset, so the terminal names its own.
+        let font = build_font(&gpui::font("Test"), false, false);
+        assert_eq!(
+            tags(&font),
+            vec![("calt", 0), ("liga", 0), ("clig", 0)],
+            "an unconfigured face must name every ligature feature off",
+        );
+        assert_eq!(font.features.is_calt_enabled(), Some(false));
+
+        // Every face the grid paints with gets the same set, not just the plain one.
+        for (bold, italic) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                tags(&build_font(&gpui::font("Test"), bold, italic)),
+                vec![("calt", 0), ("liga", 0), ("clig", 0)],
+                "bold={bold} italic={italic}",
+            );
+        }
+
+        // Explicitly on: what Settings → Appearance → Font ligatures writes.
+        let mut configured = gpui::font("Test");
+        configured.features = crate::core::config::gpui_font_features(
+            &serde_json::from_str(r#"{"calt":true,"liga":1}"#).unwrap(),
+        );
+        let font = build_font(&configured, false, false);
+        assert_eq!(
+            tags(&font),
+            vec![("calt", 1), ("liga", 1)],
+            "an explicit request for ligatures must survive untouched",
+        );
+        assert_eq!(font.features.is_calt_enabled(), Some(true));
+
+        // Explicitly off in `config.json`: also passed through unchanged.
+        let mut configured = gpui::font("Test");
+        configured.features = crate::core::config::gpui_font_features(
+            &serde_json::from_str(r#"{"calt":0,"liga":0,"clig":0}"#).unwrap(),
+        );
+        assert_eq!(
+            tags(&build_font(&configured, false, false)),
+            vec![("calt", 0), ("liga", 0), ("clig", 0)],
         );
     }
 
@@ -3509,6 +4042,36 @@ mod tests {
         assert!(
             dashed.iter().all(|r| r.size.width <= px(3.)),
             "each dash is at most three logical pixels wide at 2x"
+        );
+    }
+
+    #[test]
+    fn a_link_is_pointed_out_faintly_until_the_modifier_is_down() {
+        let mut plain = cell('l');
+        plain.fg = gpui::hsla(0., 0., 0.9, 1.);
+
+        assert_eq!(
+            link_underline_color(&plain, true),
+            None,
+            "armed, the underline is the text's own colour"
+        );
+        let held = link_underline_color(&plain, false).expect("a colour of its own");
+        assert!(
+            held.a < plain.fg.a,
+            "held back, it is the same colour with less of it"
+        );
+        assert_eq!(
+            (held.h, held.s, held.l),
+            (plain.fg.h, plain.fg.s, plain.fg.l)
+        );
+
+        let mut own = cell('l');
+        own.underline = UnderlineKind::Curly;
+        own.underline_color = Some(gpui::hsla(0.1, 1., 0.5, 1.));
+        assert_eq!(
+            link_underline_color(&own, false),
+            own.underline_color,
+            "a spelling mistake stays the colour the application painted it"
         );
     }
 

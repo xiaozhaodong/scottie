@@ -232,8 +232,57 @@ fn place_cursor(
     window.refresh();
 }
 
+/// Why the built-in editor could not take a file.
+enum EditorOpenError {
+    /// Not text, so the editor was never the right place for it.
+    NotText(PathBuf),
+    /// Something already worded for the user.
+    Message(String),
+}
+
 fn looks_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(8192).any(|b| *b == 0)
+}
+
+/// Whether handing this path to the desktop would run it rather than show it.
+///
+/// The execute bit is what `open` reads to decide between displaying a file
+/// and launching it; Windows has no such bit, so there the extension is the
+/// only thing that says so.
+fn is_program(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return std::fs::metadata(path)
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    }
+    #[cfg(not(unix))]
+    {
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            return false;
+        };
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "exe"
+                | "com"
+                | "bat"
+                | "cmd"
+                | "scr"
+                | "pif"
+                | "msi"
+                | "ps1"
+                | "vbs"
+                | "js"
+                | "jse"
+                | "wsf"
+                | "wsh"
+                | "cpl"
+                | "msc"
+                | "hta"
+                | "reg"
+                | "lnk"
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -523,47 +572,40 @@ impl Tty7App {
             host.clone(),
             window,
             cx,
-            move |h| -> Result<(PathBuf, String, Option<MTime>), String> {
+            move |h| -> Result<(PathBuf, String, Option<MTime>), EditorOpenError> {
                 let path = h.canonicalize(&p).unwrap_or(p);
                 let meta = match h.stat(&path) {
                     Ok(m) => m,
                     Err(e) => {
-                        return Err(t_fmt(
+                        return Err(EditorOpenError::Message(t_fmt(
                             L10nKey::EditorCantOpen,
                             &[("path", &path.display().to_string()), ("e", &e.to_string())],
-                        ));
+                        )));
                     }
                 };
                 if meta.len > MAX_FILE_BYTES {
-                    return Err(t_fmt(
+                    return Err(EditorOpenError::Message(t_fmt(
                         L10nKey::EditorFileTooLarge,
                         &[
                             ("path", &path.display().to_string()),
                             ("size", &(meta.len / (1024 * 1024)).to_string()),
                         ],
-                    ));
+                    )));
                 }
                 let bytes = match h.read_file(&path, MAX_FILE_BYTES) {
                     Ok(b) => b,
                     Err(e) => {
-                        return Err(t_fmt(
+                        return Err(EditorOpenError::Message(t_fmt(
                             L10nKey::EditorCantRead,
                             &[("path", &path.display().to_string()), ("e", &e.to_string())],
-                        ));
+                        )));
                     }
                 };
                 if looks_binary(&bytes) {
-                    return Err(t_fmt(
-                        L10nKey::EditorBinaryFile,
-                        &[("path", &path.display().to_string())],
-                    ));
+                    return Err(EditorOpenError::NotText(path));
                 }
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    t_fmt(
-                        L10nKey::EditorNotUtf8,
-                        &[("path", &path.display().to_string())],
-                    )
-                })?;
+                let text =
+                    String::from_utf8(bytes).map_err(|_| EditorOpenError::NotText(path.clone()))?;
                 Ok((path, text, meta.mtime))
             },
             move |app, opened, window, cx| match opened {
@@ -574,9 +616,56 @@ impl Tty7App {
                     // would otherwise lose the line it asked for.
                     app.apply_pending_cursor(host_id, &requested, &path, window, cx);
                 }
-                Err(message) => window.push_notification(message, cx),
+                Err(EditorOpenError::NotText(path)) => {
+                    app.open_outside_the_editor(host_id, &path, window, cx);
+                }
+                Err(EditorOpenError::Message(message)) => {
+                    window.push_notification(message, cx);
+                }
             },
         );
+    }
+
+    /// What to do with a file the built-in editor cannot show.
+    ///
+    /// A click on a PNG or a `.zip` meant "open this", not "tell me it is not
+    /// text", and on this machine the desktop knows how. A file on another
+    /// machine has nobody here to hand it to, so that one gets the words.
+    ///
+    /// A program does not: `open` on a Mach-O binary runs it, and a build's
+    /// output is full of paths to programs. Clicking a word in a terminal
+    /// must not be a way to execute one, so those keep the words too.
+    fn open_outside_the_editor(
+        &mut self,
+        host_id: HostId,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !host_id.is_local() || !self.can_spawn_locally(cx) || is_program(path) {
+            window.push_notification(
+                t_fmt(
+                    L10nKey::EditorBinaryFile,
+                    &[("path", &path.display().to_string())],
+                ),
+                cx,
+            );
+            return;
+        }
+        // The OS association can fail to spawn like any other opener (#542).
+        if let Err(e) = crate::terminal::view::open_file_path(path) {
+            log::warn!("failed to open {}: {e}", path.display());
+            window.push_notification(
+                t_fmt(
+                    L10nKey::LinkFileOpenFailed,
+                    &[
+                        ("path", &path.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
+                ),
+                cx,
+            );
+        }
     }
 
     fn editor_activate_open(
@@ -1440,6 +1529,32 @@ impl Tty7App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Handing a file the editor cannot read to the desktop is how a click
+    /// opens a PNG. It must not be how a click runs a build's output.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_the_desktop_would_run_is_not_handed_to_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("tty7-program-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let image = dir.join("shot.png");
+        let program = dir.join("built");
+        std::fs::write(&image, b"\x89PNG\0\0").expect("write image");
+        std::fs::write(&program, b"\x7fELF\0\0").expect("write program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("mark executable");
+
+        assert!(!is_program(&image), "a picture is only ever shown");
+        assert!(is_program(&program), "a binary would be launched");
+        assert!(
+            !is_program(&dir),
+            "a directory is not a program, whatever its mode says"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn language_map_covers_common_extensions() {

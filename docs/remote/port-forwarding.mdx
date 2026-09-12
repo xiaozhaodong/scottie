@@ -3,6 +3,37 @@ title: "Port forwarding"
 description: "Local, remote, and dynamic forwards — preconfigured or added mid-session."
 ---
 
+## Ports you did not ask to forward
+
+When a pane is on a remote machine, tty7 watches what its processes are
+listening on and forwards those ports for you. Start a dev server on the remote
+`:3000` and a moment later a notice says it is at `http://localhost:3000` —
+same number, no rule to write.
+
+The **Ports** section of the Info panel is the whole list: one row per listener,
+the process that owns it, and where it comes out on this machine. The globe
+opens it in a browser, the copy tile takes the address that works from here,
+and ✕ takes the forward back down.
+
+Ports are forwarded once each. Remove one and it stays removed — the offer is
+made a single time per port, not on every poll.
+
+The local port matches the remote one whenever it is free here. When it is not —
+something else on this machine already has `:3000` — the OS picks another and
+the row says which.
+
+Turn the whole thing off under **Settings → Terminal → Links → Forward remote
+ports** (`ssh_loopback_forward: false`).
+
+<Note>
+  In a remote workspace the ports are found by the **`tty7-server` on that
+  machine** — the panes are its, and this machine's daemon has never heard of
+  them. A server too old to answer says so in the Ports section rather than
+  showing an empty list; updating it is what fixes that. Panes that ssh'd
+  somewhere from inside a local pane are a different case: those processes
+  belong to no tty7 server, so nothing lists them.
+</Note>
+
 ## The three kinds
 
 | | What it does |
@@ -25,23 +56,26 @@ later `8080 → 3000` explains nothing.
 
 ## Adding one mid-session
 
-*SSH: Port Forwarding* in the command palette opens the **Forwards** panel for
-the current connection. Add a rule there and it starts immediately; remove it
-and it stops. These live only as long as the session unless you save them into
-the profile.
+The **+** on the Ports section — or *SSH: Port Forwarding* in the command
+palette — opens a form asking for one thing: the port the remote is serving on.
+It comes out here under the same number, and the form says so before you commit
+to it.
 
-<Frame caption="Placeholder — screenshot: the Forwards panel with a local and a dynamic rule">
-  <img src="/images/placeholder.svg" alt="The forwards panel" />
+**Advanced** opens the rest of the grammar: remote and dynamic forwards, a bind
+host other than loopback, a target on some third machine, a description. You
+need it about as often as you need `ssh -R`.
+
+These live only as long as the session unless you save them into the profile.
+
+<Frame caption="Placeholder — screenshot: the Ports section with a forwarded port and a dynamic rule">
+  <img src="/images/placeholder.svg" alt="The ports section" />
 </Frame>
 
-## The one-click shortcut
+## Links in the terminal
 
-<kbd>⌘</kbd>-clicking a `localhost:PORT` link inside an SSH pane can open a
-temporary forward for exactly that port and then open the browser — turn on
-**Settings → Terminal → Links → Forward SSH loopback links**.
-
-That is the right tool for "let me look at this dev server once". For something
-you use every day, put it in the profile.
+<kbd>⌘</kbd>-clicking a `localhost:PORT` link inside a remote pane opens the
+forward for that port if there is not one yet, then the browser. Same machinery
+as the Ports list, reached from the output instead of the panel.
 
 ## Jump hosts and proxies
 

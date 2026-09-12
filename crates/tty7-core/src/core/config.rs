@@ -236,6 +236,22 @@ pub struct Config {
     pub scm_graph_expanded: bool,
     #[serde(default, deserialize_with = "de_lenient")]
     pub sidebar_grouping: SidebarGrouping,
+    /// Which sidebar groups are folded shut, by group key: the repo root the
+    /// group is named after, or the empty string for the scratch group, which
+    /// has no root of its own and no real key can ever collide with.
+    ///
+    /// Kept as a list of the folded ones rather than a flag per group because
+    /// groups come and go with the tabs — a group nobody has opened yet has to
+    /// start expanded, and an entry for a repo that is no longer around costs
+    /// one dead path in the file.
+    ///
+    /// `String`, not `PathBuf`: serde refuses to serialize a non-UTF-8
+    /// `PathBuf`, and `Config::save` turns that refusal into one `warn!` and
+    /// a return — so a single repo root with odd bytes in it would silently
+    /// stop the *whole* config being written from then on. A lossy spelling
+    /// of such a root at worst folds two of them together.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub sidebar_collapsed_groups: Vec<String>,
     #[serde(default = "default_true")]
     pub sidebar_diff_preview: bool,
     #[serde(default, deserialize_with = "de_lenient")]
@@ -633,7 +649,7 @@ impl Default for Config {
             link_url: true,
             link_file_open: Some(LinkFileOpen::Internal),
             link_file_command: None,
-            ssh_loopback_forward: false,
+            ssh_loopback_forward: true,
             cursor_blink: true,
             scrollback_limit: 10_000,
             new_tab_position: NewTabPosition::AfterCurrent,
@@ -648,6 +664,7 @@ impl Default for Config {
             document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
             sidebar_grouping: SidebarGrouping::Repo,
+            sidebar_collapsed_groups: Vec::new(),
             sidebar_diff_preview: true,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,

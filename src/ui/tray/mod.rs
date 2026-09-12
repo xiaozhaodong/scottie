@@ -43,8 +43,9 @@ pub(crate) fn icon_is_up() -> bool {
 }
 
 /// A sender for the current tray dispatch loop, if one is running.
-// Only the platform notification callbacks call this, and those are compiled
-// out of test builds so unit tests never raise a real toast.
+// Only the platform notification callbacks call this. The Windows one is
+// compiled out of test builds so unit tests never raise a real toast; the macOS
+// one is not, but no test sends a notification there either.
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn sender() -> Option<smol::channel::Sender<TrayAction>> {
     SENDER.lock().ok()?.clone()

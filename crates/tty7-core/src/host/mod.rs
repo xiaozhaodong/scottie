@@ -173,6 +173,15 @@ pub trait WatchHandle: Send + Sync {
 pub trait Host: Send + Sync + 'static {
     fn id(&self) -> HostId;
 
+    /// How far away this host is: the round trip to it, measured now.
+    ///
+    /// `None` from a host with no link to measure — the local one, whose
+    /// "peer" is this process's own daemon over a Unix socket — and from a
+    /// remote one whose link is down or has not answered a ping yet.
+    fn link_rtt(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     fn separator(&self) -> char;
 
     fn join(&self, dir: &Path, name: &str) -> PathBuf {
@@ -259,6 +268,20 @@ pub trait Host: Send + Sync + 'static {
 
     fn is_connected(&self) -> bool {
         true
+    }
+
+    /// What is running inside one of this host's panes, and what it is
+    /// listening on — or `None` where this host cannot say.
+    ///
+    /// `None` is not "nothing is running": it is the answer from a host whose
+    /// panes are somebody else's to describe. The local host gives it, because
+    /// its panes belong to the daemon the caller asks directly; so does a peer
+    /// too old to know the request. Callers must keep the two apart — an empty
+    /// list means the pane really is serving nothing, and drawing "no ports"
+    /// over "we could not ask" is how a remote pane came to look idle while a
+    /// dev server was up in it.
+    fn pane_procs(&self, _pane_id: u64) -> Option<crate::daemon::protocol::PaneProcs> {
+        None
     }
 }
 

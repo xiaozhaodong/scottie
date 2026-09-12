@@ -4,7 +4,7 @@ use gpui::{
     div, img, prelude::*, px, relative, rgb,
 };
 use gpui_component::InteractiveElementExt as _;
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::link::Link;
@@ -215,8 +215,21 @@ fn ui_scale(cx: &App) -> f32 {
     cx.global::<Config>().ui_font_size / UI_FONT_SIZE_DEFAULT
 }
 
+/// How wide a control in the right-hand column is.
+///
+/// One number for the whole of settings, across every sub-page. It used to be
+/// three: text fields took 260, sliders 240 and dropdowns 180, each picked
+/// where it was written. Every row still ended on the same right edge, so on
+/// any one page the difference read as controls that had been aligned
+/// carelessly rather than as controls of different kinds — and moving between
+/// Appearance and Terminal, where the mix differs, the column visibly changed
+/// width. 260 is the widest of the three because it is the one with a
+/// requirement behind it: a font name or a shell path has to be readable
+/// without being truncated.
+const FIELD_W: f32 = 260.;
+
 /// Width a settings row needs before its label and its control fit side by
-/// side: a 260px control, the `gap_8` between them, and enough left for a
+/// side: a [`FIELD_W`] control, the `gap_8` between them, and enough left for a
 /// description to read as prose rather than as a column of words.
 const STACK_ROW_BELOW: f32 = 500.;
 
@@ -600,6 +613,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Agents,
+            title: SettingsAgentTraeCode,
+            keywords: SettingsSearchTraeCodeKeywords,
+        },
+        SearchEntry {
+            section: Agents,
             title: SettingsAgentCopilotCli,
             keywords: SettingsSearchCopilotCliKeywords,
         },
@@ -647,6 +665,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Agents,
             title: SettingsAgentKimiCode,
             keywords: SettingsSearchKimiCodeKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsAgentQoderCLI,
+            keywords: SettingsSearchQoderCLIKeywords,
         },
         SearchEntry {
             section: WindowTabs,
@@ -2343,7 +2366,7 @@ impl Tty7App {
         let font_dropdown = |state: &Entity<SelectState<SearchableVec<String>>>| {
             Select::new(state)
                 .small()
-                .w(px(180.))
+                .w(px(FIELD_W))
                 .h(control_h)
                 .search_placeholder(crate::ui::i18n::t(crate::ui::i18n::L10nKey::SearchFonts))
                 .menu_max_h(px(224.))
@@ -2359,7 +2382,7 @@ impl Tty7App {
             .into_any_element();
         let language_control = Select::new(&language_select)
             .small()
-            .w(px(180.))
+            .w(px(FIELD_W))
             .h(control_h)
             .menu_max_h(px(224.))
             .into_any_element();
@@ -2493,7 +2516,7 @@ impl Tty7App {
         let opacity_control = h_flex()
             .items_center()
             .gap_3()
-            .w(px(240.))
+            .w(px(FIELD_W))
             .max_w_full()
             .child(div().flex_1().child(Slider::new(&slider)))
             .child(
@@ -2522,7 +2545,7 @@ impl Tty7App {
             {
                 Some(select) => Select::new(&select)
                     .small()
-                    .w(px(180.))
+                    .w(px(FIELD_W))
                     .h(px(24.))
                     .menu_max_h(px(224.))
                     .into_any_element(),
@@ -2660,7 +2683,7 @@ impl Tty7App {
             let image_control = h_flex()
                 .items_center()
                 .gap_2()
-                .w(px(240.))
+                .w(px(FIELD_W))
                 .child(
                     Button::new("pick-theme-image")
                         .label(if image.is_some() {
@@ -2696,7 +2719,7 @@ impl Tty7App {
                 let control = h_flex()
                     .items_center()
                     .gap_3()
-                    .w(px(240.))
+                    .w(px(FIELD_W))
                     .child(div().flex_1().child(Slider::new(&slider)))
                     .child(
                         div()
@@ -4355,7 +4378,7 @@ impl Tty7App {
                     t(L10nKey::SettingsName),
                     t(L10nKey::SettingsNameDesc),
                     div()
-                        .w(px(260.))
+                        .w(px(FIELD_W))
                         .max_w_full()
                         .child(Input::new(&form.name).small())
                         .into_any_element(),
@@ -4397,7 +4420,7 @@ impl Tty7App {
                     t(L10nKey::SettingsUser),
                     t(L10nKey::SettingsUserDesc),
                     div()
-                        .w(px(260.))
+                        .w(px(FIELD_W))
                         .max_w_full()
                         .child(Input::new(&form.user).small())
                         .into_any_element(),
@@ -4414,7 +4437,7 @@ impl Tty7App {
                     // width, the way the other long-form pickers on this page do.
                     Select::new(&form.auth_select)
                         .small()
-                        .w(px(260.))
+                        .w(px(FIELD_W))
                         .max_w_full()
                         .into_any_element(),
                     cx,
@@ -4514,7 +4537,7 @@ impl Tty7App {
                     t(L10nKey::SettingsJumpHostDesc),
                     v_flex()
                         .gap_1()
-                        .w(px(260.))
+                        .w(px(FIELD_W))
                         .max_w_full()
                         .child(Input::new(&form.jump).small())
                         .when_some(error, |col, line| col.child(line))
@@ -4782,7 +4805,7 @@ impl Tty7App {
                 label.to_string(),
                 desc.to_string(),
                 div()
-                    .w(px(260.))
+                    .w(px(FIELD_W))
                     .max_w_full()
                     .child(Input::new(input).small())
                     .into_any_element(),
@@ -4809,7 +4832,7 @@ impl Tty7App {
                 desc.to_string(),
                 v_flex()
                     .gap_1()
-                    .w(px(260.))
+                    .w(px(FIELD_W))
                     .max_w_full()
                     .child(Input::new(input).small())
                     .when_some(line, |col, line| col.child(line))
@@ -5143,13 +5166,25 @@ impl Tty7App {
         let program_picker = crate::ui::tab_strip::hit_target(
             Button::new("shell-program-detected")
                 .icon(IconName::ChevronDown)
-                .ghost()
+                // No fill in any state, so it reads the way `Select` draws its
+                // own chevron: a mark inside the field, not a control sitting
+                // on top of one. `ghost` gave it a filled rounded rectangle
+                // while the menu was open, and `hit_target` sizes it to the
+                // 24px accessibility floor — which is exactly the field's inner
+                // height, so that fill met the border top and bottom and looked
+                // like a patch stuck over the field's right end. The field's
+                // own border and the tooltip carry the affordance.
+                .custom(ButtonCustomVariant::new(cx).foreground(muted_fg))
                 .xsmall(),
         )
         .disabled(shells.is_empty())
         .tooltip(t(L10nKey::SettingsShellDetected))
         .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _window, _cx| {
-            let mut menu = menu.min_w(px(200.));
+            // As wide as the field it drops out of. Anchored `TopRight` on a
+            // chevron that sits *inside* the field, a 200px menu hung off the
+            // field's right half with its left edge 110px in from the field's
+            // own — a menu that looked like it belonged to something else.
+            let mut menu = menu.min_w(px(FIELD_W));
             let pick = |program: String| {
                 let app = picker_app.clone();
                 let input = picker_input.clone();
@@ -5178,7 +5213,7 @@ impl Tty7App {
             menu
         });
         let program_control = div()
-            .w(px(260.))
+            .w(px(FIELD_W))
             .max_w_full()
             .child(Input::new(&program_input).small().suffix(program_picker))
             .into_any_element();
@@ -5194,7 +5229,7 @@ impl Tty7App {
             .then(|| field_error(t(L10nKey::SettingsArgumentsInvalid), cx));
         let args_control = v_flex()
             .gap_1()
-            .w(px(260.))
+            .w(px(FIELD_W))
             .max_w_full()
             .child(Input::new(&args_input).small())
             .when_some(args_error, |this, line| this.child(line))
@@ -5236,7 +5271,7 @@ impl Tty7App {
                 .then(|| field_error(t(L10nKey::SettingsWdPathInvalid), cx));
             v_flex()
                 .gap_1()
-                .w(px(260.))
+                .w(px(FIELD_W))
                 .max_w_full()
                 .child(Input::new(&wd_path_input).small())
                 .when_some(wd_path_error, |this, line| this.child(line))
@@ -5457,7 +5492,7 @@ impl Tty7App {
         let scroll_control = h_flex()
             .items_center()
             .gap_3()
-            .w(px(240.))
+            .w(px(FIELD_W))
             .max_w_full()
             .child(div().flex_1().child(Slider::new(&scroll_slider)))
             .child(
@@ -6993,7 +7028,7 @@ impl Tty7App {
             http_proxy_invalid.then(|| field_error(t(L10nKey::SettingsAppHttpProxyInvalid), cx));
         let http_proxy_control = v_flex()
             .gap_1()
-            .w(px(260.))
+            .w(px(FIELD_W))
             .max_w_full()
             .child(Input::new(&http_proxy_input).small())
             .when_some(http_proxy_error, |this, line| this.child(line))
@@ -7041,6 +7076,40 @@ impl Tty7App {
                     .text_color(muted_fg)
                     .child(t(L10nKey::SettingsAboutDesc1)),
             )
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(self.section_rule(cx)).child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(foreground)
+                                .child(t(L10nKey::SettingsDefaultTerminal)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted_fg)
+                                .child(t(L10nKey::SettingsDefaultTerminalDesc)),
+                        )
+                        .child(
+                            Button::new("set-default-terminal")
+                                .label(t(L10nKey::SettingsDefaultTerminalSet))
+                                .small()
+                                .on_click(cx.listener(|_, _, window, cx| {
+                                    let message = match crate::core::default_terminal::set_as_default_terminal() {
+                                        Ok(()) => t(L10nKey::SettingsDefaultTerminalSetSuccess).to_string(),
+                                        Err(error) => t_fmt(
+                                            L10nKey::SettingsDefaultTerminalSetFailed,
+                                            &[("error", &error)],
+                                        ),
+                                    };
+                                    window.push_notification(message, cx);
+                                })),
+                        ),
+                )
+            })
             .child(self.section_rule(cx))
             .child(self.section_header(t(L10nKey::SettingsUpdates), cx))
             .child(

@@ -34,7 +34,16 @@ use super::protocol::{MAX_FRAME, read_frame, write_frame};
 /// refusing to kill a server it has nothing to replace with — can be exercised
 /// against the v6 servers already deployed. A number is the only way to reach
 /// that path, and a mismatch nobody can reproduce is a mismatch nobody can fix.
-pub const CONTROL_VERSION: u32 = 7;
+///
+/// v8 added the project verbs; v9 takes them back out. The dialect this build
+/// speaks is v7's again, message for message, but the number does not go back
+/// to 7 with it: v8 is deployed, and a number that moves backwards stops being
+/// an identity and becomes a coincidence. A 7 on the wire would then mean
+/// either "before projects" or "after them" depending on which build put it
+/// there, and the handshake — which has nothing but the number — cannot tell
+/// the two apart. A v8 peer meeting this one must be turned away, and only a
+/// number it has never seen does that.
+pub const CONTROL_VERSION: u32 = 9;
 
 const DIALECT_MARKER: &str = "speaks control v";
 
@@ -117,6 +126,11 @@ pub mod feature {
     pub const HOST_RPC: &str = "host-rpc";
     pub const MACHINE_TREE: &str = "machine-tree";
     pub const STDIO_BRIDGE: &str = "stdio-bridge";
+    /// The peer can say what is running inside one of its panes, and what that
+    /// is listening on. Without it a remote pane's processes and ports are
+    /// simply unknown here: the pane lives in the peer's registry, and the
+    /// local daemon this client would otherwise ask has never heard of it.
+    pub const PANE_PROCS: &str = "pane-procs";
 }
 
 pub use crate::host::{Entry, MTime, Meta, Output, SearchHit};
@@ -300,6 +314,12 @@ pub enum ControlRequest {
     },
 
     AgentStates,
+    /// What is running inside one of the peer's panes, and what it is
+    /// listening on. `pane_id` is the peer's own id for it — the same one the
+    /// client spawned the pane with.
+    PaneProcs {
+        pane_id: u64,
+    },
     Routes,
     Status,
 }
@@ -344,7 +364,11 @@ impl ControlRequest {
             | RepoRoot { .. }
             | WatchOpen { .. }
             | WatchSet { .. }
-            | WatchClose { .. } => Duration::from_secs(5),
+            | WatchClose { .. }
+            // A poll, on a two-second timer: waiting longer than the gap
+            // between asks would only stack up requests behind a peer that has
+            // stopped answering.
+            | PaneProcs { .. } => Duration::from_secs(5),
             ReadFile { .. } | WriteFile { .. } => Duration::from_secs(30),
             CreateFileNew { .. } | CreateDir { .. } | Rename { .. } | Remove { .. } => {
                 Duration::from_secs(10)
@@ -421,6 +445,7 @@ pub enum ReplyOk {
     TabTree(Box<Tab>),
     Panes(Vec<u64>),
     AgentStates(Vec<PaneAgentState>),
+    PaneProcs(crate::daemon::protocol::PaneProcs),
     Routes(Vec<RouteInfo>),
     Status(ServerStatus),
 }
@@ -913,6 +938,11 @@ struct ClientInner {
     blobs: Mutex<HashMap<u64, Vec<u8>>>,
     connected: AtomicBool,
     last_inbound: Mutex<Instant>,
+    /// How long the last `Ping` took to come back, in microseconds; zero until
+    /// one has. Only `Ping` is timed: every other request does work on the far
+    /// side, so its round trip measures that work and not the link, and a
+    /// `ReadFile` of a large file would report the network as seconds slow.
+    last_rtt_us: AtomicU64,
     hello: ControlHelloOk,
     shutdown: Option<Arc<dyn LinkShutdown>>,
     reader_done: Mutex<bool>,
@@ -991,6 +1021,7 @@ impl ControlClient {
             blobs: Mutex::new(HashMap::new()),
             connected: AtomicBool::new(true),
             last_inbound: Mutex::new(Instant::now()),
+            last_rtt_us: AtomicU64::new(0),
             hello: ok,
             shutdown,
             reader_done: Mutex::new(false),
@@ -1034,6 +1065,19 @@ impl ControlClient {
             .unwrap_or_default()
     }
 
+    /// The last measured round trip to the peer, or `None` on a link nothing
+    /// has pinged yet.
+    ///
+    /// Fed by every [`ControlRequest::Ping`] that comes back — the keepalive's
+    /// as well as any a caller sends itself — so a link that is being kept
+    /// alive already carries a number without anyone asking for one.
+    pub fn last_rtt(&self) -> Option<Duration> {
+        match self.inner.last_rtt_us.load(Ordering::Relaxed) {
+            0 => None,
+            us => Some(Duration::from_micros(us)),
+        }
+    }
+
     pub fn call(&self, req: ControlRequest) -> io::Result<ReplyOk> {
         self.call_full(req, &[]).map(|r| r.reply)
     }
@@ -1061,6 +1105,9 @@ impl ControlClient {
         }
 
         let req_id = self.inner.next_req_id.fetch_add(1, Ordering::Relaxed);
+        // Read off before `req` is moved into the message below.
+        let timed = matches!(req, ControlRequest::Ping);
+        let sent_at = Instant::now();
         log::debug!(target: "tty7::control", "#{req_id} {req:?}");
         let (tx, rx) = sync_channel(1);
         self.inner.pending()?.insert(req_id, tx);
@@ -1083,9 +1130,21 @@ impl ControlClient {
         match rx.recv_timeout(deadline) {
             Ok(reply) => {
                 let blob = self.inner.take_blob(req_id);
-                reply
+                let out = reply
                     .into_result()
-                    .map(|reply| ControlResponse { reply, blob })
+                    .map(|reply| ControlResponse { reply, blob });
+                // Only a ping that actually came back. A timeout leaves the
+                // last good number in place rather than recording the deadline
+                // as the link's latency, and a refusal measures the peer's
+                // opinion of the request rather than the distance to it.
+                if timed && out.is_ok() {
+                    let us = sent_at.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    // Zero means "never measured", so a sub-microsecond round
+                    // trip on a loopback link rounds up rather than reading as
+                    // no measurement at all.
+                    self.inner.last_rtt_us.store(us.max(1), Ordering::Relaxed);
+                }
+                out
             }
             Err(RecvTimeoutError::Timeout) => {
                 self.inner.forget(req_id);
@@ -1318,6 +1377,7 @@ mod tests {
             blobs: Mutex::new(HashMap::new()),
             connected: AtomicBool::new(true),
             last_inbound: Mutex::new(Instant::now()),
+            last_rtt_us: AtomicU64::new(0),
             hello: ControlHelloOk {
                 control_version: CONTROL_VERSION,
                 protocol_version: 0,
@@ -1487,6 +1547,7 @@ mod tests {
                 workspace: None,
             },
             ControlRequest::AgentStates,
+            ControlRequest::PaneProcs { pane_id: 7 },
             ControlRequest::Routes,
             ControlRequest::Status,
         ]
@@ -2219,6 +2280,7 @@ mod tests {
                 s(5),
             ),
             (R::AgentStates, s(5)),
+            (R::PaneProcs { pane_id: 7 }, s(5)),
             (R::Routes, s(5)),
             (R::Status, s(5)),
         ];

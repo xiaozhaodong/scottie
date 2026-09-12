@@ -69,11 +69,18 @@ pub fn available_hosts(cx: &App) -> Vec<HostChoice> {
 /// exists, the target's own spelling when that is human-readable, and the
 /// deleted-profile placeholder for the bare-UUID case (#485).
 pub fn target_label(cx: &App, target: &RemoteTarget) -> String {
-    if let Some(choice) = available_hosts(cx)
-        .into_iter()
-        .find(|h| h.target == *target)
-    {
-        return choice.label;
+    label_from_hosts(&available_hosts(cx), target)
+}
+
+/// `target_label`'s rule applied to a listing the caller already has. The
+/// switcher builds `available_hosts` once per frame and names several targets
+/// from it; re-listing per target would re-read `~/.ssh/config` off the disk
+/// on the render path, which is the cost `route_label` goes out of its way to
+/// avoid. One rule, two entry points — so a name shown next to a pane and the
+/// same name shown in the switcher cannot drift apart (#485).
+pub fn label_from_hosts(hosts: &[HostChoice], target: &RemoteTarget) -> String {
+    if let Some(choice) = hosts.iter().find(|h| h.target == *target) {
+        return choice.label.clone();
     }
     match target {
         RemoteTarget::Profile { .. } => t(L10nKey::RemoteProfileGone).to_string(),
@@ -835,6 +842,36 @@ pub fn restart_server_blocking(header: RouteHeader, label: &str) -> Result<(), S
 mod tests {
     use super::*;
 
+    /// The one rule for "what do we call a target we cannot resolve" (#485),
+    /// pinned where both `target_label` and the switcher's group listing read
+    /// it from.
+    #[test]
+    fn an_unresolvable_profile_is_named_never_spelled_as_its_uuid() {
+        let id = uuid::Uuid::new_v4();
+        let gone = RemoteTarget::Profile { id };
+
+        let label = label_from_hosts(&[], &gone);
+        assert!(
+            !label.contains(&id.to_string()),
+            "a bare profile UUID reached the UI: {label}"
+        );
+        assert_eq!(label, t(L10nKey::RemoteProfileGone));
+
+        // While the profile is configured, its own name wins.
+        let listed = vec![HostChoice {
+            target: gone.clone(),
+            label: "lager".into(),
+            detail: "qhw@222.29.101.16".into(),
+        }];
+        assert_eq!(label_from_hosts(&listed, &gone), "lager");
+
+        // Targets that spell themselves readably never need the placeholder.
+        let alias = RemoteTarget::Alias {
+            alias: "build-box".into(),
+        };
+        assert_eq!(label_from_hosts(&[], &alias), "build-box");
+    }
+
     fn request() -> InstallRequest {
         InstallRequest {
             host: "me@build-box:22".into(),
@@ -960,6 +997,7 @@ mod tests {
 
     fn native_spec(user: &str, host: &str, port: u16) -> NativeSshSpec {
         let mut profile = crate::core::ssh_profile::SshProfile::new(host.to_string());
+        profile.host = host.to_string();
         profile.user = user.to_string();
         profile.port = port;
         crate::ui::ssh_connect::build_native_ssh_spec(
@@ -970,6 +1008,36 @@ mod tests {
         )
     }
 
+    /// `SshProfile::new` takes a *name*, and the address lives in a separate
+    /// `host` field; every production caller assigns both. `native_spec` used
+    /// to assign only the name, so the spec it handed back addressed nobody
+    /// and `ConnectionKey::from_spec` spelled it `me@:22` — one key for every
+    /// machine in this module that talks to port 22.
+    ///
+    /// `ORIGINS` is keyed by exactly that string, so the two tests below that
+    /// note an origin and read it back were writing to and reading from the
+    /// same slot. Whichever noted last won, and the other was handed the wrong
+    /// machine: 17 failures in 20 runs of this module alone, 6 in 20 of the
+    /// whole binary, and none when either test ran by itself.
+    #[test]
+    fn two_machines_do_not_share_one_route_origin_key() {
+        use crate::daemon::router::RouteTarget;
+
+        let build = RouteTarget::Ssh(Box::new(native_spec("me", "build-box", 22)));
+        let twin = RouteTarget::Ssh(Box::new(native_spec("me", "twin-box", 22)));
+
+        assert_eq!(
+            build.origin_key(),
+            "me@build-box:22",
+            "a route origin key names the machine it dials"
+        );
+        assert_ne!(
+            build.origin_key(),
+            twin.origin_key(),
+            "two machines sharing one key make `note_origin` overwrite the other's"
+        );
+    }
+
     #[test]
     fn a_routed_auth_prompt_carries_the_machine_that_raised_it() {
         let _turn = claim_mailbox();
@@ -978,6 +1046,7 @@ mod tests {
         let route =
             crate::daemon::router::RouteTarget::Ssh(Box::new(native_spec("me", "build-box", 22)));
         note_origin(&route, &target);
+        let origin_key = route.origin_key();
 
         let handle = std::thread::spawn(move || {
             use crate::daemon::router::RouteAuthResponder as _;
@@ -1005,7 +1074,12 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         };
-        assert_eq!(pending.host, target.host_id());
+        assert_eq!(
+            pending.host,
+            target.host_id(),
+            "the prompt names the machine noted under {:?}",
+            origin_key
+        );
         pending.answer(AuthResponse::Secret("hunter2".into()));
         assert_eq!(
             handle.join().unwrap(),

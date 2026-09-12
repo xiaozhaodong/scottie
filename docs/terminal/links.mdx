@@ -82,12 +82,16 @@ that did not moves to the built-in editor.
 <kbd>⌘</kbd>-clicking `localhost:3000` opens it in your browser, which is only
 useful if the server is on this machine.
 
-When the pane is inside an SSH session it usually is not. Turn on **Settings →
-Terminal → Links → Forward SSH loopback links** (`ssh_loopback_forward: true`)
-and Scottie opens a temporary port forward through that connection first, so the
-link reaches the server on the remote machine.
+When the pane is inside an SSH session it usually is not, so Scottie opens a port
+forward through that connection first and points the browser at the local end.
+The forward is built on the click if it is not there already.
+
+This is on by default; **Settings → Terminal → Links → Forward remote ports**
+(`ssh_loopback_forward`) turns it off, along with the automatic forwarding of
+ports a remote pane starts serving.
 
 <Tip>
-  For a forward you want to keep, set one up properly instead —
-  [port forwarding](/remote/port-forwarding).
+  Every port a remote pane is listening on is listed in the Info panel, whether
+  or not its URL was ever printed — see [port
+  forwarding](/remote/port-forwarding).
 </Tip>

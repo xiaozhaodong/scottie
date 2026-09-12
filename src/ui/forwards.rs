@@ -1,15 +1,13 @@
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
-};
+use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
 use crate::terminal::view::TerminalView;
-use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty7App};
+use crate::ui::app::{CONTENT_INSET, Tty7App};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{META, TEXT, TEXT_MONO};
+use crate::ui::right_panel::{META, TEXT_MONO};
 
 /// How far a forward's target endpoint fades when the rule is Dynamic and has
 /// no target to name. The rules editor in Settings and the live Forwards panel
@@ -23,6 +21,9 @@ pub(crate) const NO_TARGET_FADE: f32 = 0.4;
 /// rule, and `forward_form` needs to know whether there is one yet — that is
 /// what decides whether Add is live and whether the form says what is missing.
 pub(crate) struct ForwardFields {
+    /// Whether the whole `ssh -L` grammar is on screen. With it off the form
+    /// is one number and the rule is derived from it.
+    pub(crate) advanced: bool,
     pub(crate) kind: SshForwardKind,
     pub(crate) bind_host: String,
     pub(crate) bind_port: String,
@@ -41,6 +42,9 @@ impl ForwardFields {
     /// OS to pick the port, and there is nowhere in either form to say which
     /// one it picked.
     pub(crate) fn collect(&self) -> Option<SshForwardRule> {
+        if !self.advanced {
+            return self.simple_rule();
+        }
         let bind_port: u16 = self.bind_port.trim().parse().ok().filter(|p| *p > 0)?;
         let (target_host, target_port) = if self.kind == SshForwardKind::Dynamic {
             (String::new(), 0)
@@ -69,10 +73,36 @@ impl ForwardFields {
         })
     }
 
+    /// The rule the short form's single number describes: bring the far
+    /// side's own `:port` over to the same number here.
+    ///
+    /// The bind port is that same number rather than 0 so the address is one
+    /// anybody can predict — remote :3000 is localhost:3000. When it is taken
+    /// on this machine `add_managed_forward` retries with 0 and the OS picks,
+    /// which is a better answer than handing the collision back to be solved
+    /// by hand.
+    fn simple_rule(&self) -> Option<SshForwardRule> {
+        let port: u16 = self.target_port.trim().parse().ok().filter(|p| *p > 0)?;
+        Some(SshForwardRule {
+            kind: SshForwardKind::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: port,
+            target_host: "localhost".to_string(),
+            target_port: port,
+            // No field for it on screen, so nothing to carry: a description
+            // left over from a trip through the advanced form is not something
+            // this rule was given.
+            description: None,
+        })
+    }
+
     /// Whether the form is still empty enough that saying what is missing
     /// would be nagging rather than helping — the same restraint the settings
     /// sheet shows through `ForwardRuleForm::is_blank`.
     pub(crate) fn is_blank(&self) -> bool {
+        if !self.advanced {
+            return self.target_port.trim().is_empty();
+        }
         [
             &self.bind_host,
             &self.bind_port,
@@ -148,28 +178,13 @@ impl Tty7App {
             .and_then(|id| uuid::Uuid::parse_str(&id).ok());
 
         let theme = cx.theme();
+        let (danger, foreground) = (theme.danger, theme.foreground);
 
-        let bar = h_flex()
-            .occlude()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_1p5()
-            .rounded_lg()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.danger.opacity(0.4))
-            .shadow_md()
-            // Off the right panel's ramp on purpose: this bar floats over the
-            // terminal, not inside the panel, and it is sized against the
-            // terminal's own text. `app.rs` draws it, `render_panel_info` does
-            // not.
-            .text_xs()
-            .text_color(theme.muted_foreground)
+        let bar = crate::ui::notice::pill(danger, cx)
             .child(
                 div()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.foreground)
+                    .text_color(foreground)
                     .child(if host.is_empty() {
                         t(L10nKey::ForwardDisconnected).to_string()
                     } else {
@@ -186,7 +201,7 @@ impl Tty7App {
                     .id("ssh-strip-reason")
                     .max_w(px(360.))
                     .truncate()
-                    .text_color(theme.danger)
+                    .text_color(danger)
                     .tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
                     })
@@ -219,86 +234,13 @@ impl Tty7App {
                         this.open_ssh_profile_in_settings(id, window, cx)
                     }))
             }));
-        Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_4()
-                .flex()
-                .justify_center()
-                .child(bar)
-                .into_any_element(),
-        )
+        // The bar only. `body_area` anchors it, together with whatever else is
+        // floating down there — this used to place itself at `bottom_4` and so
+        // did the remote input notice, on the same container.
+        Some(bar.into_any_element())
     }
 
-    pub(crate) fn forwards_section(
-        &self,
-        pane_id: Option<u64>,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let pane_id = pane_id?;
-        let open = self.loopback_panel.form_pane_id == Some(pane_id);
-        // The section's own affordance, and the same 24px chrome tile the Info
-        // tab's cwd actions use. It used to be built by hand — a 32px tile
-        // forced down to 24 and then set `.xsmall()`, which quietly overrode
-        // the 13px the icon asked for with the button size's own 12, so the
-        // glyph never was the size the code claimed. `chrome_tile_sized`
-        // derives it instead: `TILE_GLYPH_SM / BUTTON_ICON_SCALE` of the button
-        // size, the same pair every other 24px tile in the panel is on.
-        let add = crate::ui::tab_strip::chrome_tile_sized(
-            Button::new(("ssh-forward-add-toggle", pane_id))
-                .icon(Icon::empty().path("icons/plus.svg")),
-            TILE_SIZE_SM,
-            TILE_GLYPH_SM,
-            open,
-            cx,
-        )
-        .rounded_md()
-        .tooltip(if open {
-            t(L10nKey::Cancel)
-        } else {
-            t(L10nKey::ForwardTooltipAdd)
-        })
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.toggle_managed_forward_form(pane_id, window, cx)
-        }))
-        .into_any_element();
-
-        let managed: Vec<ManagedForward> = self
-            .loopback_panel
-            .managed
-            .iter()
-            .filter(|m| m.pane_id == pane_id)
-            .cloned()
-            .collect();
-
-        let mono = cx.theme().mono_font_family.clone();
-        let mut list = v_flex().px(px(CONTENT_INSET - 4.)).py(px(2.)).gap(px(1.));
-        for forward in &managed {
-            list = list.child(self.forward_row(forward, &mono, cx));
-        }
-
-        Some(
-            v_flex()
-                .child(self.panel_subtitle(t(L10nKey::ForwardPanelTitle), true, Some(add), cx))
-                .when(managed.is_empty() && !open, |this| {
-                    this.child(
-                        div()
-                            .px(px(CONTENT_INSET))
-                            .py(px(2.))
-                            .text_size(rems(TEXT))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(crate::ui::i18n::t(crate::ui::i18n::L10nKey::None)),
-                    )
-                })
-                .when(!managed.is_empty(), |this| this.child(list))
-                .when(open, |this| this.child(self.forward_form(pane_id, cx)))
-                .into_any_element(),
-        )
-    }
-
-    fn forward_row(
+    pub(crate) fn forward_row(
         &self,
         forward: &ManagedForward,
         mono: &gpui::SharedString,
@@ -411,19 +353,27 @@ impl Tty7App {
             )
     }
 
-    fn forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
+    /// The form that adds a forward.
+    ///
+    /// Short by default — one number, because "bring the remote's :3000 over
+    /// here" is what nearly every hand-built forward is, and collecting one
+    /// number through five fields is what made this read like paperwork. The
+    /// full `ssh -L` grammar is one disclosure away for the rest.
+    pub(crate) fn forward_form(&self, pane_id: u64, cx: &mut Context<Self>) -> Div {
         let theme = cx.theme();
         let muted = theme.muted_foreground;
         let danger = theme.danger;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let kind = self.loopback_panel.mf_kind;
         let editing = self.loopback_panel.mf_editing.is_some();
+        let advanced = self.loopback_panel.mf_advanced;
         let fields = self.managed_forward_fields(cx);
         // The form used to accept a click on Add and then do nothing at all
         // when the fields did not make a rule. Now Add is only live when there
         // is something to add, and the line below the form says what is still
         // missing — but not while the form has barely been touched.
-        let complete = fields.collect().is_some();
+        let rule = fields.collect();
+        let complete = rule.is_some();
         let incomplete = !complete && !fields.is_blank();
         let selected = match kind {
             SshForwardKind::Local => 0,
@@ -456,49 +406,98 @@ impl Tty7App {
             .pt(px(6.))
             .pb(px(2.))
             .gap(px(5.))
-            .child(self.segmented_on(
-                sf,
-                "ssh-managed-forward-kind",
-                &[
-                    t(L10nKey::ForwardLocal),
-                    t(L10nKey::ForwardRemote),
-                    t(L10nKey::ForwardDynamic),
-                ],
-                selected,
-                cx,
-                move |this, ix, _window, cx| {
-                    let kind = match ix {
-                        1 => SshForwardKind::Remote,
-                        2 => SshForwardKind::Dynamic,
-                        _ => SshForwardKind::Local,
-                    };
-                    this.set_managed_forward_kind(kind, cx);
-                },
-            ))
-            .child(pair(
-                t(L10nKey::ForwardBindLabel),
-                &self.loopback_panel.mf_bind_host,
-                &self.loopback_panel.mf_bind_port,
-            ))
-            .child(
-                div()
-                    .opacity(if needs_target { 1.0 } else { NO_TARGET_FADE })
-                    .child(pair(
-                        if needs_target {
-                            t(L10nKey::ForwardToLabel)
-                        } else {
-                            t(L10nKey::ForwardSocksLabel)
-                        },
-                        &self.loopback_panel.mf_target_host,
-                        &self.loopback_panel.mf_target_port,
-                    )),
+            // Escape backs out of the form, the way it backs out of the sftp
+            // edit box and every sheet the app puts up. Return is answered by
+            // the boxes themselves — see `arm_managed_forward_form` — because
+            // an Input takes Return before it can bubble to here.
+            .on_key_down(
+                cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
+                    if ev.keystroke.key == "escape" {
+                        this.close_managed_forward_form(window, cx);
+                    }
+                }),
             )
-            .child(Input::new(&self.loopback_panel.mf_description).xsmall())
+            .when(!advanced, |form| {
+                form.child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(rems(META))
+                                .text_color(muted)
+                                .child(t(L10nKey::ForwardPortLabel)),
+                        )
+                        .child(
+                            div()
+                                .w(px(64.))
+                                .child(Input::new(&self.loopback_panel.mf_target_port).xsmall()),
+                        )
+                        // Where the port will come out, said before the click
+                        // rather than after it. The number is the same one on
+                        // both ends unless it is taken here, which is the case
+                        // the row itself reports once the forward exists.
+                        .children(rule.as_ref().map(|r| {
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(rems(META))
+                                .text_color(muted)
+                                .child(t_fmt(
+                                    L10nKey::ForwardPortHere,
+                                    &[("port", &r.bind_port.to_string())],
+                                ))
+                        })),
+                )
+            })
+            .when(advanced, |form| {
+                form.child(self.segmented_on(
+                    sf,
+                    "ssh-managed-forward-kind",
+                    &[
+                        t(L10nKey::ForwardLocal),
+                        t(L10nKey::ForwardRemote),
+                        t(L10nKey::ForwardDynamic),
+                    ],
+                    selected,
+                    cx,
+                    move |this, ix, _window, cx| {
+                        let kind = match ix {
+                            1 => SshForwardKind::Remote,
+                            2 => SshForwardKind::Dynamic,
+                            _ => SshForwardKind::Local,
+                        };
+                        this.set_managed_forward_kind(kind, cx);
+                    },
+                ))
+                .child(pair(
+                    t(L10nKey::ForwardBindLabel),
+                    &self.loopback_panel.mf_bind_host,
+                    &self.loopback_panel.mf_bind_port,
+                ))
+                .child(
+                    div()
+                        .opacity(if needs_target { 1.0 } else { NO_TARGET_FADE })
+                        .child(pair(
+                            if needs_target {
+                                t(L10nKey::ForwardToLabel)
+                            } else {
+                                t(L10nKey::ForwardSocksLabel)
+                            },
+                            &self.loopback_panel.mf_target_host,
+                            &self.loopback_panel.mf_target_port,
+                        )),
+                )
+                .child(Input::new(&self.loopback_panel.mf_description).xsmall())
+            })
             .when(incomplete, |form| {
                 form.child(div().text_size(rems(META)).text_color(danger).child(
-                    match needs_target {
-                        true => t(L10nKey::SettingsFwdNeedsBoth),
-                        false => t(L10nKey::SettingsFwdNeedsListen),
+                    match (advanced, needs_target) {
+                        (false, _) => t(L10nKey::ForwardNeedsPort),
+                        (true, true) => t(L10nKey::SettingsFwdNeedsBoth),
+                        (true, false) => t(L10nKey::SettingsFwdNeedsListen),
                     },
                 ))
             })
@@ -507,31 +506,54 @@ impl Tty7App {
             })
             .child(
                 h_flex()
-                    .justify_end()
+                    .items_center()
+                    .justify_between()
                     .gap(px(4.))
                     .pt(px(1.))
+                    // An edit is always shown whole — the short form cannot
+                    // spell what an existing rule may contain — so there is
+                    // nothing to disclose and no toggle to offer.
+                    .child(div().when(!editing, |slot| {
+                        slot.child(
+                            Button::new(("ssh-managed-forward-advanced", pane_id))
+                                .label(if advanced {
+                                    t(L10nKey::ForwardSimpleToggle)
+                                } else {
+                                    t(L10nKey::ForwardAdvancedToggle)
+                                })
+                                .ghost()
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.toggle_managed_forward_advanced(cx)
+                                })),
+                        )
+                    }))
                     .child(
-                        Button::new(("ssh-managed-forward-cancel", pane_id))
-                            .label(t(L10nKey::Cancel))
-                            .ghost()
-                            .xsmall()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.close_managed_forward_form(window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new(("ssh-managed-forward-add", pane_id))
-                            .label(if editing {
-                                t(L10nKey::Save)
-                            } else {
-                                t(L10nKey::ForwardAdd)
-                            })
-                            .primary()
-                            .xsmall()
-                            .disabled(!complete)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.add_managed_forward(pane_id, window, cx)
-                            })),
+                        h_flex()
+                            .gap(px(4.))
+                            .child(
+                                Button::new(("ssh-managed-forward-cancel", pane_id))
+                                    .label(t(L10nKey::Cancel))
+                                    .ghost()
+                                    .xsmall()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.close_managed_forward_form(window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(("ssh-managed-forward-add", pane_id))
+                                    .label(if editing {
+                                        t(L10nKey::Save)
+                                    } else {
+                                        t(L10nKey::ForwardAdd)
+                                    })
+                                    .primary()
+                                    .xsmall()
+                                    .disabled(!complete)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.add_managed_forward(pane_id, window, cx)
+                                    })),
+                            ),
                     ),
             )
     }
@@ -543,6 +565,7 @@ mod tests {
 
     fn fields(kind: SshForwardKind, bind_port: &str, host: &str, port: &str) -> ForwardFields {
         ForwardFields {
+            advanced: true,
             kind,
             bind_host: "127.0.0.1".to_string(),
             bind_port: bind_port.to_string(),
@@ -615,6 +638,42 @@ mod tests {
                 .collect()
                 .is_none()
         );
+    }
+
+    /// The short form: one number, and the rule it makes reaches the far
+    /// side's own loopback and comes out here under the same number.
+    #[test]
+    fn one_number_is_a_whole_rule_in_the_short_form() {
+        let mut form = fields(SshForwardKind::Local, "", "", "3000");
+        form.advanced = false;
+        // Whatever a trip through the advanced form left behind is not part of
+        // what the short form was asked for.
+        form.bind_host = "0.0.0.0".to_string();
+        form.description = "left over".to_string();
+        let rule = form.collect().expect("a port is enough");
+        assert_eq!(rule.kind, SshForwardKind::Local);
+        assert_eq!(rule.bind_host, "127.0.0.1");
+        assert_eq!(rule.bind_port, 3000, "the address has to be predictable");
+        assert_eq!(rule.target_host, "localhost");
+        assert_eq!(rule.target_port, 3000);
+        assert_eq!(rule.description, None);
+    }
+
+    #[test]
+    fn the_short_form_is_blank_until_the_port_is_typed() {
+        let mut form = fields(SshForwardKind::Local, "8080", "10.0.0.5", "");
+        form.advanced = false;
+        assert!(
+            form.is_blank(),
+            "fields the short form does not show cannot make it dirty"
+        );
+        assert!(form.collect().is_none());
+        form.target_port = "http".to_string();
+        assert!(
+            !form.is_blank(),
+            "a typed port that is not one still counts"
+        );
+        assert!(form.collect().is_none());
     }
 
     #[test]

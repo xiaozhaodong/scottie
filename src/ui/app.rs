@@ -26,7 +26,7 @@ use crate::core::ssh_config;
 use crate::core::window_state::{WindowGeometry as _, WindowState};
 use crate::daemon::protocol::{RemoteContext, ShellSpec, ssh_option_takes_value};
 use crate::daemon::spawn::DaemonMismatch;
-use crate::terminal::view::{ChildExited, PaneName, TerminalView};
+use crate::terminal::view::{ChildExited, TerminalView};
 use crate::ui::forwards::{ForwardFields, added_forward, rule_of};
 use crate::ui::host_registry::HostId;
 use crate::ui::i18n::{L10nKey, set_locale, t, t_fmt, t_plural};
@@ -337,6 +337,34 @@ fn strip_band(viewport: Size<Pixels>, pad: Edges<Pixels>) -> Bounds<Pixels> {
 
 pub(crate) const WINDOW_MARK_SIZE: f32 = 20.;
 
+/// A transparent sheet that answers one question: is the pointer inside the
+/// box it covers. Lay it over a region as that region's *last* child and read
+/// the flag to reveal chrome only while the pointer is there.
+///
+/// The obvious way to write this is `group_hover` on the region itself, and it
+/// does not work. Group hover asks whether the group's *hitbox* is the one
+/// under the pointer, and gpui's hit test stops at the first `occlude()`d
+/// element it meets on the way down. Tab chips and the chrome tiles are all
+/// occluding, so the region stopped counting as hovered the instant the
+/// pointer reached the very button it was revealing, and the button vanished
+/// from under the cursor. Painted last, this sheet's own hitbox sits in front
+/// of all of them, and it blocks nothing — it is not opaque, so the rows,
+/// chips and tiles underneath keep their clicks, cursors and tooltips.
+pub(crate) fn hover_sheet(id: &'static str, flag: &Rc<Cell<bool>>) -> gpui::Stateful<gpui::Div> {
+    use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+    let flag = flag.clone();
+    gpui::div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .on_hover(move |over, window, _cx| {
+            if flag.get() != *over {
+                flag.set(*over);
+                window.refresh();
+            }
+        })
+}
+
 pub(crate) fn title_bar_drag(
     row: gpui::Stateful<gpui::Div>,
     key: &'static str,
@@ -424,7 +452,7 @@ pub struct Tab {
     pub(crate) zoomed: Option<Entity<TerminalView>>,
     pub(crate) diff_overlay: Option<crate::ui::diff_overlay::DiffOverlayState>,
     pub(crate) code: Option<Box<crate::ui::code_editor::TabCode>>,
-    pub(crate) sidebar_group: std::cell::RefCell<Option<std::path::PathBuf>>,
+    pub(crate) sidebar_group: std::cell::RefCell<Option<crate::core::group_key::GroupKey>>,
     pub(crate) overlay_top: OverlayTop,
     /// Whether this tab's document fills the workspace or docks beside the
     /// terminal, once the tab has been told. `None` follows `document_layout`
@@ -440,6 +468,24 @@ pub struct Tab {
     /// Monotonic stamp of when this tab was last activated, used to order the
     /// switcher's tab column most-recently-used first. Zero means never.
     pub(crate) last_used: std::cell::Cell<u64>,
+    /// Where a directional focus move started, keyed by the pane it landed on
+    /// and the direction that undoes it, so reversing a move comes back here
+    /// instead of wherever geometry ranks first (#738). Per tab because the
+    /// panes are.
+    ///
+    /// Keyed by pane and not by direction alone: one slot per direction is
+    /// overwritten by the next move the same way, so a walk of two steps left
+    /// and two back right ends somewhere other than it started — the very drift
+    /// this is here to stop. A pane remembering its own way in retraces the
+    /// whole walk.
+    ///
+    /// A recorded pane only ever breaks a tie between the panes already next to
+    /// the one focus is leaving, so an entry left over from an older layout — or
+    /// from before a click moved focus somewhere else entirely — can at worst
+    /// pick a different neighbour, never a distant one. Entries naming a pane
+    /// the tab no longer holds are dropped as the next one is written, so a
+    /// closed pane leaves nothing behind either.
+    focus_origin: std::collections::HashMap<(gpui::EntityId, Dir), gpui::EntityId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -463,6 +509,7 @@ impl Tab {
             sidebar_group: std::cell::RefCell::new(None),
             tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         }
     }
 
@@ -477,10 +524,13 @@ impl Tab {
             overlay_top: OverlayTop::default(),
             document_layout: None,
             sidebar_group: std::cell::RefCell::new(
-                tree.sidebar_group.clone().map(std::path::PathBuf::from),
+                tree.sidebar_group
+                    .as_deref()
+                    .and_then(crate::core::group_key::GroupKey::decode),
             ),
             tree_id: std::cell::Cell::new(tree.id),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         }
     }
 
@@ -489,6 +539,28 @@ impl Tab {
             Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
             None => self.pane.first_leaf(),
         }
+    }
+
+    /// The pane a move in `dir` out of `at` should return to, if it reverses
+    /// the move that brought focus to `at`.
+    fn focus_origin(&self, at: gpui::EntityId, dir: Dir) -> Option<gpui::EntityId> {
+        self.focus_origin.get(&(at, dir)).copied()
+    }
+
+    /// Remember that a move in `dir` carried focus from `from` to `to`, so the
+    /// move back out of `to` returns. `live` names the panes the tab holds now:
+    /// anything the layout has moved on from is forgotten here rather than
+    /// accumulating for the life of the window.
+    fn remember_focus_origin(
+        &mut self,
+        from: gpui::EntityId,
+        to: gpui::EntityId,
+        dir: Dir,
+        live: &[gpui::EntityId],
+    ) {
+        self.focus_origin
+            .retain(|(at, _), origin| live.contains(at) && live.contains(origin));
+        self.focus_origin.insert((to, dir.opposite()), from);
     }
 
     pub(crate) fn detail_pane(
@@ -520,43 +592,12 @@ impl Tab {
     /// and all.
     ///
     /// The sidebar's search matches against this rather than against
-    /// [`Self::leaf_display_name`] on purpose: a query should still find a
+    /// [`Self::label_view`] on purpose: a query should still find a
     /// pane by the `user@host:` head its row does not show.
     pub(crate) fn leaf_title(&self, window: Option<&Window>, cx: &App) -> String {
         self.title_leaf(window, cx)
             .map(|l| l.read(cx).title.clone())
             .unwrap_or_default()
-    }
-
-    /// What this tab is named after, and what a `~` in it would mean — one
-    /// leaf lookup, so the name and the home shortening it can never come
-    /// from different panes (#580).
-    ///
-    /// The name itself is [`TerminalView::display_source`], the same choice
-    /// the window chrome makes, so a chip and the chrome cannot disagree about
-    /// what they are naming. It comes back *ranked* rather than as bare text
-    /// because the rank decides how it may be cut: prose loses its tail and a
-    /// path loses its head, which is what [`PaneName::label`] applies. Only the
-    /// width differs after that — the strip caps it, the sidebar elides against
-    /// real glyphs, and the chrome elides from the front.
-    ///
-    /// `None` when the pane has said nothing and has no directory either. Each
-    /// caller spells its own placeholder for that — a tab counts, while the
-    /// window chrome falls back to the app's name.
-    pub(crate) fn leaf_display_name(
-        &self,
-        window: Option<&Window>,
-        cx: &App,
-    ) -> (Option<PaneName>, Option<std::path::PathBuf>) {
-        let Some(leaf) = self.title_leaf(window, cx) else {
-            return (None, None);
-        };
-        let leaf = leaf.read(cx);
-        let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
-        (
-            leaf.display_source_with_activity(show_activity_prefix),
-            leaf.display_home(cx),
-        )
     }
 
     /// Whether this tab's label says anything a line of its path would not.
@@ -568,18 +609,63 @@ impl Tab {
     /// question and stopped tracking it once a pane with an agent beside it
     /// could be labelled after its own cwd.
     ///
-    /// So put the question to the pane the label came from —
-    /// [`TerminalView::named_by_its_place`], which knows both the name and the
-    /// directory and compares them as places rather than by which rank the
-    /// name arrived by. A tab with nothing to go on at all is labelled by a
-    /// count ("Shell 2"), which tells you no place, so it keeps its subtitle.
+    /// So put the question to the label ladder itself —
+    /// [`names_more_than_its_place`](crate::ui::tab_strip::names_more_than_its_place),
+    /// which knows both the name and the directory and compares them as places
+    /// rather than by which rank the name arrived by. A tab with nothing to go
+    /// on at all is labelled by a count ("Shell 2"), which tells you no place,
+    /// so it keeps its subtitle.
     pub(crate) fn names_more_than_its_place(&self, window: Option<&Window>, cx: &App) -> bool {
-        if self.name.as_deref().is_some_and(|n| !n.trim().is_empty()) {
-            return true;
-        }
-        !self
-            .title_leaf(window, cx)
-            .is_some_and(|leaf| leaf.read(cx).named_by_its_place(cx))
+        let (view, home) = self.label_view(window, cx);
+        crate::ui::tab_strip::names_more_than_its_place(&view, home.as_deref())
+    }
+
+    /// This tab as the shared label ladder reads it, together with what a `~`
+    /// in whatever it ends up named would mean.
+    ///
+    /// [`TabView`](tty7_core::core::tab_view::TabView) is how a tab looks to
+    /// someone who is *not* the window showing it — the switcher listing
+    /// another window's workspace, `tty7 tab ls` on the far side of a socket.
+    /// Building one here from the live pane is what stops this window having a
+    /// second opinion: both sides then rank a given name, a title, an agent and
+    /// a directory through
+    /// [`TabView::label`](tty7_core::core::tab_view::TabView::label), so the
+    /// strip's answer to "which repo is this?" is the switcher's answer too.
+    ///
+    /// Everything comes off the one leaf the tab names itself after, so the
+    /// title and the directory standing in for it can never describe different
+    /// panes (#580).
+    pub(crate) fn label_view(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> (
+        tty7_core::core::tab_view::TabView,
+        Option<std::path::PathBuf>,
+    ) {
+        let name = self.name.clone();
+        let Some(leaf) = self.title_leaf(window, cx) else {
+            return (
+                tty7_core::core::tab_view::TabView {
+                    id: self.tree_id.get(),
+                    name,
+                    title: String::new(),
+                    osc_title: None,
+                    cwd: None,
+                    agent: None,
+                    session_id: None,
+                    last_task_title: None,
+                    explicit_task_title: None,
+                    status: None,
+                    live: false,
+                    panes: 0,
+                },
+                None,
+            );
+        };
+        let leaf = leaf.read(cx);
+        let view = leaf.tab_view(self.tree_id.get(), name, self.pane.terminals().len());
+        (view, leaf.display_home(cx))
     }
 
     pub(crate) fn git_status(
@@ -661,6 +747,35 @@ impl Tab {
     }
 }
 
+/// What a rename box's contents mean for the tab's name.
+#[derive(Debug, PartialEq, Eq)]
+enum Rename {
+    /// The box still holds what it was seeded with, so nothing was asked for.
+    Unchanged,
+    /// Emptied on purpose: the tab goes back to following its pane.
+    Cleared,
+    /// A name the user typed.
+    Named(String),
+}
+
+/// Read a rename box against the label it was seeded with.
+///
+/// The box is prefilled with the label as rendered, so it is never empty when
+/// it opens and a commit cannot tell "left alone" from "typed the same thing"
+/// by looking at the value alone. `Blur` commits as readily as Enter does, so
+/// without the comparison, opening the box and clicking away stored the label
+/// as a name — and a name is a different thing from the title it was copied
+/// from: it stops following the pane, freezing the tab on whatever it happened
+/// to say at that moment, with no way to undo it.
+fn rename_outcome(value: &str, prefill: &str) -> Rename {
+    let value = value.trim();
+    match value {
+        v if v == prefill.trim() => Rename::Unchanged,
+        "" => Rename::Cleared,
+        v => Rename::Named(v.to_string()),
+    }
+}
+
 pub(crate) struct Renaming {
     /// The tab being renamed, by tree id rather than index: an index drifts
     /// the moment any other tab closes or the strip reorders, which used to
@@ -668,12 +783,29 @@ pub(crate) struct Renaming {
     /// and left a window where the commit landed on the wrong tab (#598).
     pub(crate) tab: tty7_core::core::machine::TabId,
     pub(crate) input: Entity<InputState>,
+    /// What the box was prefilled with, so a commit can tell an untouched box
+    /// from a typed one. The box is seeded with the label already on screen,
+    /// which means it is never empty and every commit would otherwise store a
+    /// name — including the ones the user never typed.
+    prefill: String,
     _subs: Vec<Subscription>,
 }
 
 pub(crate) struct WorkspaceRename {
     pub(crate) input: Entity<InputState>,
     _subs: Vec<Subscription>,
+}
+
+pub(crate) struct GroupRename {
+    /// The group being renamed, by the key it had when the box opened.
+    ///
+    /// A custom group *is* its name — there is no group record anywhere for
+    /// an id to point at, only the tabs that claim it. So renaming one means
+    /// rewriting every tab that says the old name, and this is what says
+    /// which those are.
+    pub(crate) key: crate::core::group_key::GroupKey,
+    pub(crate) input: Entity<InputState>,
+    pub(crate) _subs: Vec<Subscription>,
 }
 
 pub(crate) struct LoopbackForwardPanelState {
@@ -692,6 +824,18 @@ pub(crate) struct LoopbackForwardPanelState {
     /// Why the last Add or Save did not take, in the far side's own words.
     /// Cleared the moment the form is closed or the edit is abandoned.
     pub(crate) mf_error: Option<String>,
+    /// Return, on each of the boxes. Held here for the same reason the sftp
+    /// form holds its own: a live subscription on a box nothing is showing
+    /// would answer Return for a form that is gone.
+    pub(crate) mf_subs: Vec<Subscription>,
+    /// Whether the form is showing all five fields rather than the one.
+    ///
+    /// Almost every forward anyone builds by hand is "bring the remote's :3000
+    /// over here", which is one number — and asking for five fields to collect
+    /// one number is what made the panel feel like paperwork. The rest of the
+    /// `ssh -L` grammar is still here, one disclosure away, for the forwards
+    /// that really do need it.
+    pub(crate) mf_advanced: bool,
 }
 
 pub struct Tty7App {
@@ -752,6 +896,13 @@ pub struct Tty7App {
     pub(crate) editor: crate::ui::code_editor::EditorPanelState,
     pub(crate) sidebar_width: Rc<Cell<f32>>,
     pub(crate) sidebar_dragging: Rc<Cell<bool>>,
+    /// Whether the pointer is over the sidebar and over the tab strip. The
+    /// chrome tiles in each — new tab, the panel toggles, the app menu — are
+    /// drawn only while its own flag is set, so a window nobody is pointing at
+    /// carries no buttons at all. The right panel's own title bar is the
+    /// exception: its tiles are always painted while the panel is open.
+    pub(crate) sidebar_chrome_hover: Rc<Cell<bool>>,
+    pub(crate) strip_chrome_hover: Rc<Cell<bool>>,
     /// How much width a settings row will actually get, measured once per
     /// render. `settings_row` is called from page builders that never see the
     /// window, and the answer differs per page — the SSH page spends a host
@@ -806,6 +957,12 @@ pub struct Tty7App {
     /// the sidebar — and takes no part in the reading.
     pub(crate) strip_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// Where each custom group's block was drawn last frame, so a tab held
+    /// over one can be told which group it is over. Only custom groups are
+    /// here: a repo group's membership is decided by cwd, so dropping a tab
+    /// into one has no meaning to record.
+    pub(crate) sidebar_group_slots:
+        Rc<RefCell<Vec<(crate::core::group_key::GroupKey, Bounds<Pixels>)>>>,
     /// Where the active tab's panes were last drawn, which is the frame of
     /// reference a drag's landing is worked out in.
     pub(crate) pane_area: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -822,6 +979,7 @@ pub struct Tty7App {
     window_bounds: Bounds<Pixels>,
     pub(crate) workspace: WorkspaceId,
     pub(crate) workspace_rename: Option<WorkspaceRename>,
+    pub(crate) group_rename: Option<GroupRename>,
     window_title: std::cell::RefCell<String>,
     pub(crate) connect: Option<crate::ui::remote_workspace::ConnectFlow>,
     pub(crate) switcher: Option<crate::ui::switcher::Switcher>,
@@ -1344,6 +1502,8 @@ impl Tty7App {
                 mf_description,
                 mf_editing: None,
                 mf_error: None,
+                mf_subs: Vec::new(),
+                mf_advanced: false,
             },
             sftp_panel,
             right_panel: Default::default(),
@@ -1360,6 +1520,8 @@ impl Tty7App {
             editor,
             sidebar_width: Rc::new(Cell::new(sidebar_width)),
             sidebar_dragging: Rc::new(Cell::new(false)),
+            sidebar_chrome_hover: Rc::new(Cell::new(false)),
+            strip_chrome_hover: Rc::new(Cell::new(false)),
             settings_row_width: Cell::new(f32::MAX),
             settings_viewport_w: Cell::new(f32::MAX),
             settings_hit_anchored: Cell::new(false),
@@ -1378,6 +1540,7 @@ impl Tty7App {
             pane_detach: Cell::new(None),
             strip_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_slots: Rc::new(RefCell::new(Vec::new())),
+            sidebar_group_slots: Rc::new(RefCell::new(Vec::new())),
             pane_area: Rc::new(Cell::new(None)),
             sidebar_search,
             _sidebar_search_sub: sidebar_search_sub,
@@ -1389,6 +1552,7 @@ impl Tty7App {
             window_bounds: window_bounds_to_remember(window),
             workspace,
             workspace_rename: None,
+            group_rename: None,
             window_title: std::cell::RefCell::new(String::new()),
             connect: None,
             switcher: None,
@@ -1441,29 +1605,8 @@ impl Tty7App {
 
         let weak_app = cx.weak_entity();
         window.on_window_should_close(cx, move |_window, cx| {
-            let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
             if let Some(app) = weak_app.upgrade() {
-                app.update(cx, |app, cx| app.detach_workspace(cx));
-            }
-            if last_window {
-                // With a tray icon, closing the last window retires to the
-                // tray: the daemon stays reachable (show / quit-and-stop)
-                // instead of being orphaned behind a dead icon. Without one
-                // the app quits — the only way it stays visible at all.
-                //
-                // The icon has to actually be up, not merely asked for: the
-                // backend can fail for the whole run (a Linux session with no
-                // StatusNotifier host), and retiring into an icon that never
-                // appeared leaves a process with no window and no tray — no
-                // way back in, and the daemon still held.
-                let retire_to_tray =
-                    cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
-                if !retire_to_tray {
-                    cx.spawn(async move |cx| {
-                        let _ = cx.update(|cx| cx.quit());
-                    })
-                    .detach();
-                }
+                app.update(cx, |app, cx| app.prepare_window_close(cx));
             }
             true
         });
@@ -1512,6 +1655,52 @@ impl Tty7App {
         crate::ui::windows::WindowRegistry::unregister(cx, self.workspace);
         crate::ui::tree_sync::forget(cx, self.workspace);
         crate::ui::windows::refresh_menu(cx);
+    }
+
+    /// Opens a second window, on a workspace of its own.
+    ///
+    /// A window on *this* workspace is not the other reading of "new window";
+    /// it is a thing the app cannot hold. `WindowRegistry` is keyed by
+    /// workspace — `window_for`, `app_for`, `unregister` and `rebind` all
+    /// address a window by the workspace it shows — and `windows::open`
+    /// answers a workspace that already has a window by activating it. Asking
+    /// for the current one here would raise the window you are already in.
+    ///
+    /// So this is the same call the switcher makes for "Open in New Window",
+    /// with no workspace named: a fresh one, which is also what a new window
+    /// holds everywhere else it is offered.
+    pub(crate) fn new_window(&self, cx: &mut App) {
+        crate::ui::windows::open(cx, None);
+    }
+
+    fn prepare_window_close(&self, cx: &mut App) {
+        let last_window = crate::ui::windows::WindowRegistry::count(cx) <= 1;
+        self.detach_workspace(cx);
+        if last_window {
+            // With a tray icon, closing the last window retires to the
+            // tray: the daemon stays reachable (show / quit-and-stop)
+            // instead of being orphaned behind a dead icon. Without one
+            // the app quits — the only way it stays visible at all.
+            //
+            // The icon has to actually be up, not merely asked for: the
+            // backend can fail for the whole run (a Linux session with no
+            // StatusNotifier host), and retiring into an icon that never
+            // appeared leaves a process with no window and no tray — no
+            // way back in, and the daemon still held.
+            let retire_to_tray =
+                cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
+            if !retire_to_tray {
+                cx.spawn(async move |cx| {
+                    let _ = cx.update(|cx| cx.quit());
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn close_window(&self, window: &mut Window, cx: &mut App) {
+        self.prepare_window_close(cx);
+        window.remove_window();
     }
 
     pub(crate) fn teardown_workspace_forwards(&self, cx: &gpui::App) {
@@ -1702,6 +1891,7 @@ impl Tty7App {
                 sidebar_group: std::cell::RefCell::new(st.sidebar_group),
                 tree_id: std::cell::Cell::new(tty7_core::core::machine::TabId::new()),
                 last_used: std::cell::Cell::new(0),
+                focus_origin: Default::default(),
             },
         );
         self.active = insert_at;
@@ -2683,6 +2873,7 @@ impl Tty7App {
     pub(crate) fn managed_forward_fields(&self, cx: &gpui::App) -> ForwardFields {
         let val = |input: &Entity<InputState>| input.read(cx).value().to_string();
         ForwardFields {
+            advanced: self.loopback_panel.mf_advanced,
             kind: self.loopback_panel.mf_kind,
             bind_host: val(&self.loopback_panel.mf_bind_host),
             bind_port: val(&self.loopback_panel.mf_bind_port),
@@ -2698,9 +2889,8 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use crate::daemon::protocol::ForwardStatus;
-
-        let Some(rule) = self.managed_forward_fields(cx).collect() else {
+        let fields = self.managed_forward_fields(cx);
+        let Some(rule) = fields.collect() else {
             // Add is disabled while the fields do not make a rule and the form
             // already says what is missing, so there is nothing to do here and
             // nothing left to explain.
@@ -2727,31 +2917,32 @@ impl Tty7App {
             self.loopback_panel.managed = list;
         }
 
-        let before: Vec<u64> = self.loopback_panel.managed.iter().map(|m| m.id).collect();
-        let mut failure = None;
-        match route.add(rule) {
-            // The request never got an answer. An empty list here is not "this
-            // pane has no forwards", it is "nobody said" — assigning it is what
-            // used to blank the panel on a dropped connection.
-            None => failure = Some(t(L10nKey::ForwardRequestFailed).to_string()),
-            Some(list) => {
-                // A rule that could not be started is registered all the same,
-                // with the reason in its status, so whether the add worked is a
-                // question about the entry it appended rather than about
-                // whether the call returned.
-                let broken = added_forward(&before, &list).and_then(|added| match &added.status {
-                    ForwardStatus::Error(msg) => Some((added.id, msg.clone())),
-                    ForwardStatus::Listening => None,
-                });
-                self.loopback_panel.managed = list;
-                if let Some((id, msg)) = broken {
-                    if let Some(list) = route.remove(id) {
-                        self.loopback_panel.managed = list;
-                    }
-                    failure = Some(msg);
+        // The short form aims at the same number on both ends because that is
+        // the address people can predict. When it is already taken here, the
+        // useful answer is another port rather than a complaint: somebody who
+        // typed one number to forward one port has not been asked to care
+        // which local port it lands on, and the row says where it came out.
+        let retry_free_port = !fields.advanced && rule.bind_port != 0;
+        let mut failure = match self.place_forward(&route, rule.clone()) {
+            PlaceOutcome::Placed => None,
+            // Nobody answered, so nothing was bound and nothing would be bound
+            // by asking again — a second round trip would only spend another
+            // timeout on the way to the same sentence.
+            PlaceOutcome::Unreachable(msg) => Some(msg),
+            PlaceOutcome::Rejected(msg) if !retry_free_port => Some(msg),
+            PlaceOutcome::Rejected(_) => {
+                match self.place_forward(
+                    &route,
+                    crate::daemon::protocol::SshForwardRule {
+                        bind_port: 0,
+                        ..rule.clone()
+                    },
+                ) {
+                    PlaceOutcome::Placed => None,
+                    PlaceOutcome::Rejected(msg) | PlaceOutcome::Unreachable(msg) => Some(msg),
                 }
             }
-        }
+        };
 
         if let Some(msg) = failure {
             // Put back what the edit took out, so the worst a failed Save can
@@ -2789,6 +2980,41 @@ impl Tty7App {
         cx.notify();
     }
 
+    /// Ask the far side for one rule, and say what became of it.
+    ///
+    /// A rule that could not be started is registered all the same, with the
+    /// reason in its status, so whether the add worked is a question about the
+    /// entry it appended rather than about whether the call returned. The dead
+    /// entry is taken back out — a forward listed as listening on nothing is
+    /// worse than no forward.
+    fn place_forward(
+        &mut self,
+        route: &ForwardRoute,
+        rule: crate::daemon::protocol::SshForwardRule,
+    ) -> PlaceOutcome {
+        use crate::daemon::protocol::ForwardStatus;
+
+        let before: Vec<u64> = self.loopback_panel.managed.iter().map(|m| m.id).collect();
+        // The request never got an answer. An empty list here is not "this
+        // pane has no forwards", it is "nobody said" — assigning it is what
+        // used to blank the panel on a dropped connection.
+        let Some(list) = route.add(rule) else {
+            return PlaceOutcome::Unreachable(t(L10nKey::ForwardRequestFailed).to_string());
+        };
+        let broken = added_forward(&before, &list).and_then(|added| match &added.status {
+            ForwardStatus::Error(msg) => Some((added.id, msg.clone())),
+            ForwardStatus::Listening => None,
+        });
+        self.loopback_panel.managed = list;
+        let Some((id, msg)) = broken else {
+            return PlaceOutcome::Placed;
+        };
+        if let Some(list) = route.remove(id) {
+            self.loopback_panel.managed = list;
+        }
+        PlaceOutcome::Rejected(msg)
+    }
+
     pub(crate) fn edit_managed_forward(
         &mut self,
         forward: crate::daemon::protocol::ManagedForward,
@@ -2798,6 +3024,10 @@ impl Tty7App {
         self.loopback_panel.mf_kind = forward.kind;
         self.loopback_panel.form_pane_id = Some(forward.pane_id);
         self.loopback_panel.mf_error = None;
+        // A rule that already exists is shown whole: the short form cannot
+        // spell a bind host or a remote forward, so editing one through it
+        // would silently rewrite the parts it cannot see.
+        self.loopback_panel.mf_advanced = true;
         let target_port = if forward.target_port == 0 {
             String::new()
         } else {
@@ -2863,12 +3093,19 @@ impl Tty7App {
     }
 
     pub(crate) fn show_ssh_forwards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((pane_id, _)) = self.active_connected_native_ssh_pane(window, cx) else {
+        // Whatever the panel would let this pane forward, which is a wider set
+        // than "a connected native-ssh pane": a pane in a remote workspace
+        // forwards over the workspace's own connection, and the command used
+        // to do nothing at all there while the panel beside it worked.
+        let Some(ctx) = self.pane_forward_ctx(window, cx) else {
             return;
         };
+        if ctx.route.is_none() {
+            return;
+        }
         self.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx);
-        if self.loopback_panel.form_pane_id != Some(pane_id) {
-            self.toggle_managed_forward_form(pane_id, window, cx);
+        if self.loopback_panel.form_pane_id != Some(ctx.pane_id) {
+            self.toggle_managed_forward_form(ctx.pane_id, window, cx);
         }
     }
 
@@ -2883,8 +3120,59 @@ impl Tty7App {
             return;
         }
         self.loopback_panel.form_pane_id = Some(pane_id);
+        self.loopback_panel.mf_advanced = false;
+        self.loopback_panel.mf_kind = crate::daemon::protocol::SshForwardKind::Local;
         self.cancel_managed_forward_edit(window, cx);
         self.refresh_managed_forwards(pane_id, cx);
+        self.arm_managed_forward_form(pane_id, window, cx);
+    }
+
+    /// Opens the form focused and listening for Return.
+    ///
+    /// It had neither. Every other form in the app opens with the caret in the
+    /// first field and answers Return — this one opened cold, so adding a rule
+    /// meant clicking into Bind first, and once you were there the only way to
+    /// commit was the mouse again. Escape did nothing either, which is handled
+    /// on the form itself in `forwards.rs`; a key event only reaches it while
+    /// something inside it holds focus, so the focus below is what makes that
+    /// work too.
+    fn arm_managed_forward_form(
+        &mut self,
+        pane_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let inputs = [
+            self.loopback_panel.mf_bind_host.clone(),
+            self.loopback_panel.mf_bind_port.clone(),
+            self.loopback_panel.mf_target_host.clone(),
+            self.loopback_panel.mf_target_port.clone(),
+            self.loopback_panel.mf_description.clone(),
+        ];
+        self.loopback_panel.mf_subs = inputs
+            .iter()
+            .map(|input| {
+                cx.subscribe_in(
+                    input,
+                    window,
+                    move |this, _input, ev: &InputEvent, window, cx| {
+                        if let InputEvent::PressEnter { .. } = ev {
+                            // A no-op when the fields do not make a rule yet:
+                            // `add_managed_forward` already guards on that and
+                            // the form already says what is missing.
+                            this.add_managed_forward(pane_id, window, cx);
+                        }
+                    },
+                )
+            })
+            .collect();
+        inputs[0].update(cx, |s, cx| s.focus(window, cx));
+    }
+
+    pub(crate) fn toggle_managed_forward_advanced(&mut self, cx: &mut Context<Self>) {
+        self.loopback_panel.mf_advanced = !self.loopback_panel.mf_advanced;
+        self.loopback_panel.mf_error = None;
+        cx.notify();
     }
 
     pub(crate) fn close_managed_forward_form(
@@ -2892,8 +3180,14 @@ impl Tty7App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.loopback_panel.form_pane_id = None;
+        let was_open = self.loopback_panel.form_pane_id.take().is_some();
+        self.loopback_panel.mf_subs.clear();
         self.cancel_managed_forward_edit(window, cx);
+        if was_open {
+            // The form held the focus, so taking it down has to hand it back —
+            // otherwise the next keystroke goes nowhere until the user clicks.
+            self.focus_active(window, cx);
+        }
     }
 
     fn open_typed_ssh_connect(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -3209,6 +3503,16 @@ impl Tty7App {
         }
     }
 
+    /// Sample which pane holds focus right now and record it against the
+    /// active tab.
+    ///
+    /// A sample only ever writes the truth, but it can only write it when
+    /// there is one to read: with focus one handle off the panes it finds no
+    /// leaf and leaves the field alone. That is why it is no longer the only
+    /// writer (see [`Tty7App::remember_focused_leaf`]) — it stays because the
+    /// callers below want the answer settled at a named moment, before a pane
+    /// is detached or a tab is torn down and the layout stops being able to
+    /// answer at all.
     pub(crate) fn remember_active_pane(&mut self, window: &Window, cx: &App) {
         let active = self.active;
         if let Some(tab) = self.tabs.get_mut(active) {
@@ -3216,6 +3520,24 @@ impl Tty7App {
                 tab.last_focused = Some(leaf.entity_id());
             }
         }
+    }
+
+    /// Record `leaf` as the pane its tab comes back to, as focus arrives in it.
+    ///
+    /// Sampling at switch time asks which leaf holds focus *at that instant*,
+    /// and by then focus is routinely somewhere else: the switcher's own
+    /// search input, a palette that just closed, the tab strip, a pane
+    /// restored and never clicked. The sample then wrote nothing and the tab
+    /// kept a stale pane — or the `None` it was born with — and came back to
+    /// its first leaf instead of the one the reader was working in (#843).
+    ///
+    /// Focus-in is the one moment that knows the answer without having to
+    /// guess when to look, so it is the primary writer now. The tab is found
+    /// by the leaf rather than assumed to be the active one: a pane dragged
+    /// into another tab is focused after the move, and it is the tab holding
+    /// it now that has to remember it.
+    pub(crate) fn remember_focused_leaf(&mut self, leaf: gpui::EntityId) {
+        remember_leaf_in(&mut self.tabs, leaf);
     }
 
     fn focus_leaf(&self, leaf: &PaneSlot, window: &mut Window, cx: &mut App) {
@@ -3269,9 +3591,7 @@ impl Tty7App {
             view.read(cx).run_command_line(&cmd);
         }
         let slot = PaneSlot::Ready(view.clone());
-        self.tabs
-            .iter_mut()
-            .any(|tab| tab.pane.replace_leaf(slot_id, slot.clone()));
+        replace_leaf_in(&mut self.tabs, slot_id, slot.clone());
         if was_focused {
             self.focus_leaf(&slot, window, cx);
         }
@@ -3303,6 +3623,41 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) {
         self.new_tab_with_cwd(Some(cwd), None, window, cx);
+    }
+
+    /// Opens a new local shell in `cwd`, then types a command only after the
+    /// pane exists. LaunchServices uses this for a script/executable selected
+    /// in Finder and for `x-man-page:` requests.
+    ///
+    /// A tab that did not open takes the command with it. `new_tab_with_cwd`
+    /// returns early when the spawn fails or the workspace cannot host a local
+    /// shell, and writing anyway would type the command into whatever pane was
+    /// focused before — a shell the user is mid-line in, or an agent.
+    pub(crate) fn new_tab_running(
+        &mut self,
+        cwd: std::path::PathBuf,
+        command: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.tabs.len();
+        self.new_tab_with_cwd(Some(cwd), None, window, cx);
+        if self.tabs.len() == before {
+            log::warn!("no tab opened for {command:?}; not writing it to another pane");
+            return;
+        }
+        if let Some(terminal) = self.focused_leaf(window, cx) {
+            terminal.read(cx).run_command_line(&command);
+        }
+    }
+
+    /// Uses the terminal that a newly-created window already opened. This keeps
+    /// a cold LaunchServices request to one tab rather than creating the
+    /// window's default shell and then a second shell for the requested item.
+    pub(crate) fn run_in_active_terminal(&self, command: &str, window: &Window, cx: &App) {
+        if let Some(terminal) = self.focused_leaf(window, cx) {
+            terminal.read(cx).run_command_line(command);
+        }
     }
 
     pub(crate) fn new_tab_with_shell(
@@ -3440,14 +3795,11 @@ impl Tty7App {
                 return;
             }
         };
-        for tab in &mut self.tabs {
-            if tab
-                .pane
-                .replace_leaf(dead.entity_id(), PaneSlot::Ready(fresh.clone()))
-            {
-                break;
-            }
-        }
+        replace_leaf_in(
+            &mut self.tabs,
+            dead.entity_id(),
+            PaneSlot::Ready(fresh.clone()),
+        );
         self.maximized = None;
         self.focus_leaf(&PaneSlot::Ready(fresh), window, cx);
         self.save_session(cx);
@@ -3653,13 +4005,22 @@ impl Tty7App {
     }
 
     fn focus_pane_dir(&mut self, dir: Dir, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self
-            .tabs
-            .get(self.active)
-            .and_then(|tab| tab.pane.neighbor_in_dir(dir, window, cx))
-        else {
+        let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
+        let Some(from) = tab.pane.focused_leaf(window, cx) else {
+            return;
+        };
+        let back = tab.focus_origin(from.entity_id(), dir);
+        let Some(target) = tab.pane.neighbor_in_dir(dir, back, window, cx) else {
+            return;
+        };
+        let live: Vec<gpui::EntityId> = tab.pane.leaves().iter().map(|l| l.entity_id()).collect();
+        let (from, to) = (from.entity_id(), target.entity_id());
+        let active = self.active;
+        if let Some(tab) = self.tabs.get_mut(active) {
+            tab.remember_focus_origin(from, to, dir, &live);
+        }
         self.maximized = None;
         self.focus_leaf(&target, window, cx);
         cx.notify();
@@ -4184,6 +4545,27 @@ impl Tty7App {
             self.save_session(cx);
             cx.notify();
         }
+    }
+
+    /// Whether tab `index` has a pane zoomed over hidden siblings — what the
+    /// chrome marks so the state is readable without toggling it (#752).
+    ///
+    /// Zoom rides with its tab (#599): the active tab's lives in
+    /// `self.maximized`, every other tab's is parked in `Tab::zoomed`. Either
+    /// can name a pane that exited while nobody was looking, which is why the
+    /// answer is asked of the layout rather than of the handle alone.
+    pub(crate) fn tab_is_zoomed(&self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        let zoom = match index == self.active {
+            true => self.maximized.as_ref(),
+            false => tab.zoomed.as_ref(),
+        };
+        zoom.is_some_and(|zoom| {
+            tab.pane
+                .zoom_hides_siblings(|slot| slot.entity_id() == zoom.entity_id())
+        })
     }
 
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4743,6 +5125,7 @@ impl Tty7App {
             return;
         }
         let current = self.tab_label(&self.tabs[index], index, Some(&*window), cx);
+        let prefill = current.to_string();
         let input = Self::rename_box(current, window, cx);
         let subs = vec![cx.subscribe_in(
             &input,
@@ -4755,6 +5138,7 @@ impl Tty7App {
         self.renaming = Some(Renaming {
             tab: self.tabs[index].tree_id.get(),
             input,
+            prefill,
             _subs: subs,
         });
         cx.notify();
@@ -4795,13 +5179,25 @@ impl Tty7App {
         let Some(renaming) = self.renaming.take() else {
             return;
         };
-        let value = renaming.input.read(cx).value().trim().to_string();
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|t| t.tree_id.get() == renaming.tab)
-        {
-            tab.name = if value.is_empty() { None } else { Some(value) };
+        let value = renaming.input.read(cx).value();
+        match rename_outcome(&value, &renaming.prefill) {
+            Rename::Unchanged => {
+                self.focus_active(window, cx);
+                cx.notify();
+                return;
+            }
+            outcome => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|t| t.tree_id.get() == renaming.tab)
+                {
+                    tab.name = match outcome {
+                        Rename::Named(name) => Some(name),
+                        _ => None,
+                    };
+                }
+            }
         }
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
@@ -4953,9 +5349,11 @@ impl Tty7App {
         match kind {
             NewTab => self.new_tab(window, cx),
             NewWorkspace => self.open_workspace_form(window, cx),
+            NewWindow => self.new_window(cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
+            CloseWindow => self.close_window(window, cx),
             SplitRight => self.split(Axis::Horizontal, window, cx),
             SplitDown => self.split(Axis::Vertical, window, cx),
             ClosePane => self.close_pane(window, cx),
@@ -6720,10 +7118,15 @@ impl Tty7App {
     }
 
     fn assign_keybinding(&mut self, action: String, spec: String, cx: &mut Context<Self>) {
+        // Compared as chords, not as spellings: a recorded `secondary-}` and a
+        // config's `secondary-shift-]` are one keystroke written two ways, and
+        // only `same_chord` sees it. Compared as text, the displacement never
+        // fires and both bindings survive onto that keystroke, where which one
+        // wins is arbitrary (#750).
         let displaced = crate::ui::keymap::effective_bindings(cx)
             .into_iter()
             .chain(crate::ui::keymap::extra_bindings(cx))
-            .find(|(a, k)| *k == spec && *a != action)
+            .find(|(a, k)| *a != action && crate::ui::keymap::same_chord(k, &spec))
             .map(|(a, _)| a);
         // A trailing "…" on an action name marks a command that opens
         // something; it is not punctuation, and inside a sentence it reads as
@@ -6904,34 +7307,23 @@ impl Tty7App {
             ),
             None => message,
         };
-        let bar = gpui_component::v_flex()
+        let bar = crate::ui::remote_workspace::status_card(cx)
             .occlude()
-            .gap(px(6.))
-            .px_3()
-            .py_1p5()
-            .rounded_lg()
-            .bg(theme.popover)
-            .border_1()
-            .border_color(theme.border)
             .shadow_md()
-            .text_xs()
-            .text_color(theme.muted_foreground)
             .child(
-                gpui_component::h_flex()
-                    .items_center()
-                    .gap_2()
+                crate::ui::remote_workspace::status_row()
                     .child(gpui_component::Icon::new(gpui_component::IconName::Globe))
                     .child(
-                        div()
+                        crate::ui::remote_workspace::status_message(message)
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(message),
+                            .text_color(theme.foreground),
                     )
                     .when_some(action, |this, (label, action)| {
                         use gpui_component::Sizable as _;
                         use gpui_component::button::ButtonVariants as _;
                         this.child(
                             gpui_component::button::Button::new("remote-status-action")
+                                .flex_shrink_0()
                                 .label(label)
                                 .primary()
                                 .small()
@@ -6962,31 +7354,11 @@ impl Tty7App {
             return None;
         }
         let notice = self.remote_status(cx)?.input_notice()?;
-        let theme = cx.theme();
+        // The pill only. `body_area` anchors it, together with whatever else
+        // is floating down there — see `ui::notice`.
         Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom_4()
-                .flex()
-                .justify_center()
-                .child(
-                    gpui_component::h_flex()
-                        .occlude()
-                        .items_center()
-                        .gap_2()
-                        .px_3()
-                        .py_1p5()
-                        .rounded_lg()
-                        .bg(theme.popover)
-                        .border_1()
-                        .border_color(theme.warning.opacity(0.4))
-                        .shadow_md()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(notice),
-                )
+            crate::ui::notice::pill(cx.theme().warning, cx)
+                .child(notice)
                 .into_any_element(),
         )
     }
@@ -6998,7 +7370,43 @@ pub(crate) struct ForwardRoute {
     workspace: Option<crate::terminal::PaneWorkspace>,
 }
 
+/// What came of asking the far side to put one forward up.
+enum PlaceOutcome {
+    Placed,
+    /// The far side answered and the rule could not be started — a bind that
+    /// collided, a port this process may not have. Another bind port might.
+    Rejected(String),
+    /// Nobody answered. Nothing was bound, and nothing about the rule is what
+    /// went wrong.
+    Unreachable(String),
+}
+
+/// Who a set of forwards belongs to on the far side.
+///
+/// A workspace's forwards outlive any one of its panes and are shared between
+/// all of them, so "have we already offered to forward :3000" is a question
+/// about the workspace — asking it per pane made switching tabs re-announce
+/// every port the workspace had already forwarded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ForwardOwnerKey {
+    Pane(u64),
+    Workspace(crate::core::session::WorkspaceId),
+}
+
 impl ForwardRoute {
+    pub(crate) fn new(pane_id: u64, workspace: Option<crate::terminal::PaneWorkspace>) -> Self {
+        Self { pane_id, workspace }
+    }
+
+    /// Which side of the daemon's own forward registry this route addresses —
+    /// the same split `ForwardOwner` makes there.
+    pub(crate) fn owner_key(&self) -> ForwardOwnerKey {
+        match &self.workspace {
+            Some(ws) => ForwardOwnerKey::Workspace(ws.workspace),
+            None => ForwardOwnerKey::Pane(self.pane_id),
+        }
+    }
+
     fn workspace_op(
         &self,
         op: crate::daemon::protocol::WorkspaceOp,
@@ -7060,6 +7468,37 @@ impl ForwardRoute {
             return Vec::new();
         };
         Self::forwards(crate::terminal::RemoteTerminal::on_workspace(req)).unwrap_or_default()
+    }
+
+    /// The local port that reaches `remote_host:remote_port` over this route,
+    /// building the forward if there is not one yet.
+    ///
+    /// The far side keeps one automatic forward per endpoint and hands the
+    /// same port back on the next ask, so callers may treat this as "what is
+    /// the address here" rather than as an action with a cost — which is what
+    /// lets the Ports list call it on a click and the watcher call it on a
+    /// port it has only just noticed.
+    pub(crate) fn ensure_loopback(
+        &self,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> anyhow::Result<crate::daemon::protocol::LoopbackForward> {
+        let Some(req) = self.workspace_op(crate::daemon::protocol::WorkspaceOp::EnsureLoopback {
+            remote_host: remote_host.to_string(),
+            remote_port,
+        }) else {
+            return crate::terminal::RemoteTerminal::ensure_loopback_forward(
+                self.pane_id,
+                remote_host,
+                remote_port,
+            );
+        };
+        match crate::terminal::RemoteTerminal::on_workspace(req)? {
+            crate::daemon::protocol::DaemonMsg::LoopbackForward(f) => Ok(f),
+            other => Err(anyhow::anyhow!(
+                "unexpected reply to EnsureLoopback: {other:?}"
+            )),
+        }
     }
 
     pub(crate) fn remove(
@@ -7174,16 +7613,26 @@ impl Render for Tty7App {
         self.touch_active_tab();
         self.declare_displayed_panes(cx);
         self.scm_sync_watchers(window, cx);
+        // Keeps looking for new listening ports on the pane in front, panel
+        // open or not — a port that appears while the panel is shut is exactly
+        // the one worth forwarding unasked.
+        self.sync_port_watch(window, cx);
         if cx.has_active_drag() {
             crate::ui::reorder::clear_pending(&self.reorder);
             crate::ui::pane_drag::clear_landing(&self.pane_drag);
         } else {
             // Taken first either way: this is what ends the drag, and the merge
             // below must not find the tab it just moved still in the air.
-            let order = crate::ui::reorder::take_pending(&self.reorder);
+            let landed = crate::ui::reorder::take_landed(&self.reorder);
             if let Some((tab, zone)) = self.tab_merge.take() {
                 self.merge_tab(tab, zone, window, cx);
-            } else if let Some(order) = order {
+            } else if let Some((tab, key)) = landed.regroup {
+                // A drop into another group outranks the reordering the drag
+                // did on its way out of the one it came from. The pointer
+                // left that group; the shuffle it caused before leaving is
+                // not what was being asked for.
+                self.regroup_tab(tab, key, cx);
+            } else if let Some(order) = landed.order {
                 self.apply_tab_order(&order, cx);
             }
             // Also what ends the pane drag, so it is taken whichever of the two
@@ -7292,13 +7741,23 @@ impl Render for Tty7App {
             .child(body)
             .when_some(self.pane_landing(window, cx), |this, el| this.child(el))
             .when_some(tab_landing, |this, el| this.child(el))
-            .when_some(ssh_status, |this, el| this.child(el))
             .when_some(self.render_remote_workspace_strip(cx), |this, el| {
                 this.child(el)
             })
-            .when_some(self.render_remote_input_notice(cx), |this, el| {
-                this.child(el)
-            });
+            // Both of these used to anchor themselves at `bottom_4` and centre
+            // themselves, as siblings here — so a remote workspace whose ssh
+            // link had also dropped drew them one on top of the other. One
+            // anchor now, and it stacks. The ssh strip goes last because it is
+            // the one carrying buttons.
+            .when_some(
+                crate::ui::notice::anchor(
+                    [self.render_remote_input_notice(cx), ssh_status]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                ),
+                |this, el| this.child(el),
+            );
 
         // One decision for the whole document surface. Docked, exactly one of
         // the two surfaces is drawn — a column has one child, and two `flex_1`
@@ -7558,6 +8017,12 @@ impl Render for Tty7App {
                 .on_action(cx.listener(|this, _: &NewWorkspace, window, cx| {
                     this.open_workspace_form(window, cx);
                 }))
+                .on_action(cx.listener(|this, _: &NewWindow, _window, cx| {
+                    this.new_window(cx);
+                }))
+                .on_action(
+                    cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)),
+                )
                 .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                     if !this.editor_close_active_if_focused(window, cx) {
                         this.close_pane(window, cx)
@@ -8082,6 +8547,7 @@ fn tabs_from_session(
                     .unwrap_or_else(tty7_core::core::machine::TabId::new),
             ),
             last_used: std::cell::Cell::new(0),
+            focus_origin: Default::default(),
         });
     }
     let active = session.active.min(tabs.len().saturating_sub(1));
@@ -8239,6 +8705,8 @@ pub(crate) fn new_terminal(
         },
     )
     .detach();
+    let handle = pending.read(cx).focus_handle.clone();
+    watch_pane_focus(&handle, pending.entity_id(), window, cx);
     start_pane_spawn(pending.clone(), window, cx);
     Ok(PaneSlot::Connecting(pending))
 }
@@ -8304,7 +8772,8 @@ fn build_terminal_view(
     )
     .detach();
     watch_open_file_requests(&view, window, cx);
-    watch_pane_focus(&view, window, cx);
+    let handle = view.read(cx).focus_handle.clone();
+    watch_pane_focus(&handle, view.entity_id(), window, cx);
     view
 }
 
@@ -8332,13 +8801,66 @@ fn watch_open_file_requests(
     .detach();
 }
 
-fn watch_pane_focus(view: &Entity<TerminalView>, window: &mut Window, cx: &mut Context<Tty7App>) {
-    let handle = view.read(cx).focus_handle.clone();
+/// Record `leaf` as the pane the tab holding it comes back to.
+///
+/// Which tab that is gets asked of the layout rather than assumed to be the
+/// active one: a pane dragged into another tab takes focus with it, and it is
+/// the tab holding it now whose memory the arrival should change. A leaf no
+/// tab holds — one that has just closed, or arrived after its slot went away —
+/// is recorded nowhere.
+fn remember_leaf_in(tabs: &mut [Tab], leaf: gpui::EntityId) {
+    let held = tabs
+        .iter_mut()
+        .find(|tab| tab.pane.leaves().iter().any(|l| l.entity_id() == leaf));
+    if let Some(tab) = held {
+        tab.last_focused = Some(leaf);
+    }
+}
+
+/// Put `new` where the slot `old` named stood, carrying that tab's focus
+/// memory across with it.
+///
+/// The memory has to move because the id it holds does not survive the swap.
+/// Focus arriving in a pane that is still coming up is recorded against the
+/// *pending* slot — that is why connecting slots are watched at all — and that
+/// slot's id dies the moment the pane lands. Left behind, the memory names an
+/// entity no tab holds, `focus_target` falls through `leaf_matching_or_first`,
+/// and the tab comes back to its first leaf: #843 again, one landing later.
+///
+/// Nothing else writes the answer down in that case. `land_pane` re-focuses
+/// the pane it built only when the pending slot still held focus, and with
+/// focus off the panes the switch-away sample has nothing to read either.
+fn replace_leaf_in(tabs: &mut [Tab], old: gpui::EntityId, new: PaneSlot) {
+    for tab in tabs.iter_mut() {
+        if tab.pane.replace_leaf(old, new.clone()) {
+            if tab.last_focused == Some(old) {
+                tab.last_focused = Some(new.entity_id());
+            }
+            break;
+        }
+    }
+}
+
+/// Repaint the chrome that marks the focused pane, and record the leaf as the
+/// one its tab returns to (#843).
+///
+/// Every leaf is watched, connecting slots included: a pane can be focused
+/// while it is still coming up, and if the tab is left in that moment the
+/// answer has to already be written down.
+fn watch_pane_focus(
+    handle: &gpui::FocusHandle,
+    leaf: gpui::EntityId,
+    window: &mut Window,
+    cx: &mut Context<Tty7App>,
+) {
     let app = cx.weak_entity();
     window
-        .on_focus_in(&handle, cx, move |_window, cx| {
+        .on_focus_in(handle, cx, move |_window, cx| {
             if let Some(app) = app.upgrade() {
-                app.update(cx, |_, cx| cx.notify());
+                app.update(cx, |app, cx| {
+                    app.remember_focused_leaf(leaf);
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -8370,7 +8892,8 @@ pub(crate) fn new_terminal_native(
     )
     .detach();
     watch_open_file_requests(&view, window, cx);
-    watch_pane_focus(&view, window, cx);
+    let handle = view.read(cx).focus_handle.clone();
+    watch_pane_focus(&handle, view.entity_id(), window, cx);
     Ok(view)
 }
 
@@ -8873,15 +9396,89 @@ mod window_drag_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseReason, DOCUMENT_MIN_W, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, TabAgentSession,
-        clear_window_override_values, close_prompt, document_column_px, join_shell_args,
-        leaf_shares_the_window_daemon, mru_order, pane_free_for, parse_ssh_connect_input,
-        parse_ssh_option_words, side_panel_max, split_shell_args, strip_band, wd_path_saveable,
+        CloseReason, DOCUMENT_MIN_W, Dir, Pane, Rename, TERMINAL_MIN_W, TITLE_BAR_HEIGHT, Tab,
+        TabAgentSession, clear_window_override_values, close_prompt, document_column_px,
+        join_shell_args, leaf_shares_the_window_daemon, mru_order, pane_free_for,
+        parse_ssh_connect_input, parse_ssh_option_words, rename_outcome, side_panel_max,
+        split_shell_args, strip_band, wd_path_saveable,
     };
     use gpui::{Edges, point, px, size};
 
+    #[test]
+    fn a_rename_box_left_alone_is_not_a_rename() {
+        // The box opens holding the label already on screen, and `Blur`
+        // commits — so this is what happens when the user opens it, thinks
+        // better of it, and clicks away.
+        assert_eq!(
+            rename_outcome("api", "api"),
+            Rename::Unchanged,
+            "an untouched box asked for nothing"
+        );
+        assert_eq!(
+            rename_outcome("  api  ", "api"),
+            Rename::Unchanged,
+            "whitespace either side is not an edit"
+        );
+    }
+
+    #[test]
+    fn an_emptied_rename_box_gives_the_tab_back_to_its_pane() {
+        // The only way to remove a name once set, so it has to survive the
+        // comparison above.
+        assert_eq!(rename_outcome("", "api"), Rename::Cleared);
+        assert_eq!(rename_outcome("   ", "api"), Rename::Cleared);
+    }
+
+    #[test]
+    fn a_typed_rename_box_names_the_tab() {
+        assert_eq!(
+            rename_outcome("billing", "api"),
+            Rename::Named("billing".into())
+        );
+        assert_eq!(
+            rename_outcome("  billing  ", "api"),
+            Rename::Named("billing".into()),
+            "the name is stored trimmed"
+        );
+    }
+
     const SIDEBAR_MIN: f32 = crate::ui::tab_sidebar::MIN_SIDEBAR_WIDTH;
     const PANEL_MIN: f32 = crate::ui::right_panel::MIN_WIDTH;
+
+    /// #738: which pane a directional move came from is remembered against the
+    /// pane it landed on, not against the direction alone.
+    ///
+    /// One slot per direction is enough for a single move and back, but the
+    /// second step of a walk overwrites the first: left off `3` onto `2` and
+    /// left again onto `1` would leave only `1 -> 2`, and the second move back
+    /// right — the one out of `2` — would be handed no origin and fall to the
+    /// geometry that sent the user to the wrong pane in the first place.
+    #[test]
+    fn each_pane_remembers_the_move_that_landed_on_it() {
+        fn id(n: u64) -> gpui::EntityId {
+            gpui::EntityId::from(n)
+        }
+        let mut tab = Tab::new(Pane::Empty);
+        let live = [id(1), id(2), id(3)];
+
+        tab.remember_focus_origin(id(3), id(2), Dir::Left, &live);
+        tab.remember_focus_origin(id(2), id(1), Dir::Left, &live);
+
+        // Walking back retraces both steps rather than only the last one.
+        assert_eq!(tab.focus_origin(id(1), Dir::Right), Some(id(2)));
+        assert_eq!(tab.focus_origin(id(2), Dir::Right), Some(id(3)));
+        // Nothing is claimed about a direction no move went in, or about a pane
+        // no move has landed on.
+        assert_eq!(tab.focus_origin(id(2), Dir::Left), None);
+        assert_eq!(tab.focus_origin(id(3), Dir::Right), None);
+
+        // A pane the tab no longer holds takes its entries with it, on either
+        // side: with `3` closed, `2` no longer remembers having come from it,
+        // and the move back out of `2` is left to geometry.
+        tab.remember_focus_origin(id(1), id(2), Dir::Right, &[id(1), id(2)]);
+        assert_eq!(tab.focus_origin(id(2), Dir::Right), None);
+        assert_eq!(tab.focus_origin(id(2), Dir::Left), Some(id(1)));
+    }
 
     /// #679: the band now starts at the frame padding rather than at the
     /// window's corner, and off Linux CSD there is no padding to start at —
@@ -9449,14 +10046,13 @@ pub(crate) mod test_window {
     }
 
     /// A window carrying `n` quiet tabs, active on the first.
-    #[cfg(unix)]
     pub(crate) fn harness_with_tabs(
         cx: &mut TestAppContext,
         n: usize,
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        Vec<std::os::unix::net::UnixStream>,
+        Vec<crate::daemon::transport::Stream>,
     ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
@@ -9483,13 +10079,12 @@ pub(crate) mod test_window {
         (app, vcx, streams)
     }
 
-    #[cfg(unix)]
     pub(crate) fn harness_with_pane(
         cx: &mut TestAppContext,
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
@@ -9577,7 +10172,6 @@ pub(crate) mod test_window {
     /// another frame 250ms later. So the sleep below is load-bearing too, and
     /// a round that drew nothing is not on its own enough to stop on — a burst
     /// still open is a frame already owed.
-    #[cfg(unix)]
     pub(crate) fn quiesce(vcx: &mut VisualTestContext, cwd: Option<&std::path::Path>) {
         use crate::terminal::git_data::ScmData;
         use crate::terminal::git_status::GitStatusCache;
@@ -9689,7 +10283,7 @@ mod cursor_blink_gpui_tests {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod ssh_rebuild_gpui_tests {
     use super::test_window::harness_with_pane;
     use crate::core::session::{
@@ -10126,9 +10720,7 @@ mod shell_menu_gpui_tests {
     }
 }
 
-// `harness_with_tabs` hands back the panes' `UnixStream`s, so it exists only
-// on unix — same as `ssh_rebuild_gpui_tests` below it.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod rename_gpui_tests {
     use gpui::TestAppContext;
 
@@ -10210,8 +10802,8 @@ mod rename_gpui_tests {
 // A pane wears its name in three places at three widths: the tab chip, the
 // sidebar row, and the window chrome when it is the only visible pane.
 // Which *name* that is has to be one decision, made in
-// `TerminalView::display_source` and reached from here through
-// `Tab::leaf_display_name`. It briefly was two: the window title fell back
+// `TerminalView::tab_view` and rendered by `tab_strip::rendered_label`,
+// reached from here through `Tab::label_view`. It briefly was two: the window title fell back
 // to the working directory once nothing had titled the pane, while the
 // chip read `title` raw and printed the app's own name, so a tab read
 // `~/repo` in one surface and `Scottie` in the other.
@@ -10221,7 +10813,7 @@ mod pane_name_gpui_tests {
 
     use crate::core::cli_agent::CLIAgent;
     use crate::daemon::protocol::DaemonMsg;
-    use crate::terminal::view::{PaneName, TerminalView};
+    use crate::terminal::view::TerminalView;
     use crate::ui::app::test_window::{harness_with_pane, harness_with_split};
 
     /// The tab's nth pane, in the order a split lays them out.
@@ -10297,9 +10889,9 @@ mod pane_name_gpui_tests {
                 header.label,
                 "and the chip above it says the same thing"
             );
-            let (shown, _) = tab.leaf_display_name(None, cx);
+            let (view, _) = tab.label_view(None, cx);
             assert_eq!(
-                shown.map(PaneName::into_text).unwrap_or_default(),
+                crate::ui::tab_strip::source_of(&view, false).unwrap_or_default(),
                 header.source,
                 "both start from the one source the sidebar elides too"
             );
@@ -10343,9 +10935,9 @@ mod pane_name_gpui_tests {
                 "the agent says more than the directory it was launched from"
             );
             assert_eq!(app.tab_label(tab, 0, None, cx), header.label);
-            let (shown, _) = tab.leaf_display_name(None, cx);
+            let (view, _) = tab.label_view(None, cx);
             assert_eq!(
-                shown.map(PaneName::into_text).unwrap_or_default(),
+                crate::ui::tab_strip::source_of(&view, false).unwrap_or_default(),
                 header.source
             );
         });
@@ -10476,7 +11068,7 @@ mod pane_name_gpui_tests {
 // everything else hidden; a pane nobody has declared — or whose id nobody
 // registered — must err toward displayed, because the failure direction that
 // matters is a visible pane that stops repainting.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod displayed_gpui_tests {
     use gpui::TestAppContext;
 
@@ -10577,7 +11169,7 @@ mod displayed_gpui_tests {
 
 // Zoom is a tab's view state: it rides with the tab across a switch, while a
 // layout change (drag, split, close) still clears it.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod zoom_gpui_tests {
     use gpui::TestAppContext;
 
@@ -10619,15 +11211,95 @@ mod zoom_gpui_tests {
             );
         });
     }
+
+    /// The mark the chrome wears (#752) has to go out again by every road the
+    /// zoom itself leaves by, and it has to name the right tab while several
+    /// tabs are each holding one.
+    #[gpui::test]
+    fn the_zoom_mark_is_on_whichever_tabs_are_hiding_panes(cx: &mut TestAppContext) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            // A zoom only hides something where there is a sibling to hide, so
+            // tabs 0 and 1 get a second pane and tab 2 stays single.
+            let mut held = Vec::new();
+            for tab in 0..2 {
+                let (view, stream) = quiet_test_pane(90 + tab as u64, window, cx);
+                held.push(stream);
+                let first = app.tabs[tab].pane.first_leaf().expect("tab has a pane");
+                app.tabs[tab].pane = Pane::split_node(
+                    gpui::Axis::Horizontal,
+                    0.5,
+                    Pane::leaf(first),
+                    Pane::leaf(PaneSlot::Ready(view)),
+                );
+            }
+
+            for i in 0..app.tabs.len() {
+                assert!(!app.tab_is_zoomed(i), "nothing is zoomed yet");
+            }
+
+            // Zooming marks the tab it happened in, and only that one.
+            app.toggle_maximize(window, cx);
+            assert!(app.tab_is_zoomed(0), "the zoomed tab wears the mark");
+            assert!(!app.tab_is_zoomed(1));
+            assert!(!app.tab_is_zoomed(2));
+
+            // And un-zooming takes it away again.
+            app.toggle_maximize(window, cx);
+            assert!(!app.tab_is_zoomed(0), "un-zooming clears the mark");
+
+            // The mark rides with its tab across a switch (#599) — an inactive
+            // tab holding a zoom still wears it — and two tabs can wear one at
+            // the same time, each reading its own handle.
+            app.toggle_maximize(window, cx);
+            app.activate(1, window, cx);
+            assert!(app.tab_is_zoomed(0), "the parked zoom is still a zoom");
+            assert!(!app.tab_is_zoomed(1));
+            app.toggle_maximize(window, cx);
+            assert!(app.tab_is_zoomed(0) && app.tab_is_zoomed(1));
+            assert!(!app.tab_is_zoomed(2), "a single-pane tab hides nothing");
+
+            // A parked zoom naming a pane that has since left the tab is no
+            // zoom: it would not come back on a switch, so it is not marked.
+            let parked = app.tabs[0].zoomed.clone().expect("tab 0 parked a zoom");
+            let elsewhere = app.tabs[2]
+                .pane
+                .first_leaf()
+                .and_then(|slot| slot.terminal().cloned());
+            app.tabs[0].zoomed = elsewhere;
+            assert!(
+                !app.tab_is_zoomed(0),
+                "a zoom over a pane this tab does not hold is not marked"
+            );
+            app.tabs[0].zoomed = Some(parked.clone());
+            assert!(app.tab_is_zoomed(0));
+
+            // Nor is a zoom over the last pane standing: its siblings closed
+            // while the tab was away, and the tab now looks like — and draws
+            // as — an ordinary single pane.
+            app.tabs[0].pane = Pane::leaf(PaneSlot::Ready(parked));
+            assert!(
+                !app.tab_is_zoomed(0),
+                "a zoom that covers nothing stops being marked"
+            );
+
+            assert!(!app.tab_is_zoomed(9), "there is no tab 9 to mark");
+            drop(held);
+        });
+    }
 }
 
 // A test window has no daemon behind it — its socket path is under the pinned
 // test config dir and nothing is listening on it — so every forward request
 // fails. That is exactly the case these are about: what the panel and the form
 // are left holding when the far side does not answer.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod managed_forward_gpui_tests {
-    use gpui::TestAppContext;
+    use gpui::{Focusable as _, TestAppContext};
     use gpui_component::input::InputState;
 
     use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
@@ -10647,6 +11319,57 @@ mod managed_forward_gpui_tests {
         }
     }
 
+    /// The form had no keyboard contract at all: no Return, no Escape, and it
+    /// opened cold, with the caret still in the terminal behind it. Every
+    /// sibling form in the app has all three.
+    ///
+    /// Escape is a `on_key_down` on the form itself and only fires while
+    /// something inside it holds focus, so the focus below is what makes both
+    /// halves work; the subscriptions are what answer Return. Asserting on
+    /// both together is the point — arming one without the other is the state
+    /// this test exists to catch.
+    #[gpui::test]
+    fn opening_the_forward_form_arms_the_keyboard_and_closing_disarms_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(
+                app.loopback_panel.mf_subs.is_empty(),
+                "nothing is listening before the form is up"
+            );
+
+            app.toggle_managed_forward_form(1, window, cx);
+
+            assert_eq!(
+                app.loopback_panel.form_pane_id,
+                Some(1),
+                "the form is up for the pane that asked"
+            );
+            assert_eq!(
+                app.loopback_panel.mf_subs.len(),
+                5,
+                "Return has to be answered on every box, not just the first"
+            );
+            assert!(
+                app.loopback_panel
+                    .mf_bind_host
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window),
+                "the form opens with the caret in Bind, so Escape reaches it too"
+            );
+
+            app.close_managed_forward_form(window, cx);
+
+            assert_eq!(app.loopback_panel.form_pane_id, None);
+            assert!(
+                app.loopback_panel.mf_subs.is_empty(),
+                "a live subscription on a box nothing is showing would answer \
+                 Return for a form that is gone"
+            );
+        });
+    }
+
     #[gpui::test]
     fn an_add_that_never_reaches_the_session_leaves_the_panel_as_it_was(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
@@ -10654,6 +11377,9 @@ mod managed_forward_gpui_tests {
         app.update_in(&mut vcx, |app, window, cx| {
             app.loopback_panel.managed = vec![listening(1)];
             app.loopback_panel.form_pane_id = Some(1);
+            // These three fields are the long form's; without this the short
+            // form would read them as the one number it asks for.
+            app.loopback_panel.mf_advanced = true;
             let typed: [(&gpui::Entity<InputState>, &str); 3] = [
                 (&app.loopback_panel.mf_bind_port, "9000"),
                 (&app.loopback_panel.mf_target_host, "127.0.0.1"),
@@ -10690,6 +11416,7 @@ mod managed_forward_gpui_tests {
             app.loopback_panel.managed = vec![listening(1)];
             app.loopback_panel.form_pane_id = Some(1);
             app.loopback_panel.mf_editing = Some(listening(1));
+            app.loopback_panel.mf_advanced = true;
             let typed: [(&gpui::Entity<InputState>, &str); 3] = [
                 (&app.loopback_panel.mf_bind_port, "8080"),
                 (&app.loopback_panel.mf_target_host, "10.0.0.6"),
@@ -10711,6 +11438,481 @@ mod managed_forward_gpui_tests {
                 "the form is still editing it"
             );
             assert!(app.loopback_panel.mf_error.is_some());
+        });
+    }
+}
+
+#[cfg(test)]
+mod new_window_action_tests {
+    use crate::core::actions::NewWindow;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::windows::WindowRegistry;
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+
+    /// `NewWindow` has to open a window, not merely exist.
+    ///
+    /// Everything else about the action is a table entry — the `actions!`
+    /// row, the keymap slot, the palette command — and every one of those can
+    /// be there while the action reaches nothing. This drives the real
+    /// dispatch path and then asks the registry, so the assertion is "a second
+    /// window is open, on a workspace of its own, and the first one is still
+    /// here": the same `windows::open` the switcher calls for "Open in New
+    /// Window", with no workspace named.
+    #[gpui::test]
+    fn dispatching_new_window_opens_a_second_window_beside_the_first(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+        // Registered the way an opened window registers itself; without it the
+        // registry cannot tell the two windows apart afterwards.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.background_executor.run_until_parked();
+        let first = app.update(&mut vcx, |app, _| app.workspace);
+        assert_eq!(
+            vcx.update(|_, cx| WindowRegistry::count(cx)),
+            1,
+            "the harness starts with exactly the one window"
+        );
+
+        vcx.dispatch_action(NewWindow);
+        vcx.background_executor.run_until_parked();
+
+        let open = vcx.update(|_, cx| WindowRegistry::open_windows(cx));
+        assert_eq!(
+            open.len(),
+            2,
+            "NewWindow has to reach windows::open; it opened {} window(s)",
+            open.len()
+        );
+        assert!(
+            open.iter().any(|(id, _)| *id == first),
+            "the window the action was fired from must survive it"
+        );
+        // The registry is keyed by workspace, so a second window on the
+        // current one is not a thing it could tell apart from the first.
+        assert!(
+            open.iter().any(|(id, _)| *id != first),
+            "the new window belongs on a workspace of its own"
+        );
+    }
+
+    /// The windowless state is the one `NewWindow` exists for.
+    ///
+    /// `show_tray_icon` is on by default, so closing the last window retires
+    /// tty7 to the tray rather than quitting it: the process is alive, the
+    /// menu bar is still tty7's, and there is nothing on screen. A listener
+    /// that lives only on `Tty7App`'s render root reaches nothing there, and
+    /// the chord that means "give me a window" is the one chord that has to
+    /// answer. `App::dispatch_action` falls through to the global listeners
+    /// when no window is active, which is where `keymap::init` puts this one.
+    #[gpui::test]
+    fn new_window_answers_with_no_window_to_dispatch_it(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+            assert_eq!(
+                WindowRegistry::count(cx),
+                0,
+                "the retired-to-tray state this covers has no window in it"
+            );
+            cx.dispatch_action(&NewWindow);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert_eq!(
+                WindowRegistry::count(cx),
+                1,
+                "NewWindow has to reach windows::open with no window to bubble through"
+            );
+        });
+    }
+}
+
+#[cfg(test)]
+mod close_window_action_tests {
+    use crate::core::actions::CloseWindow;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty7App;
+    use crate::ui::windows::WindowRegistry;
+    use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+
+    /// `CloseWindow` has to close the window, and close it the way the red
+    /// button does.
+    ///
+    /// The action is otherwise all table entries — the `actions!` row, the
+    /// keymap slot, the palette command, the Keybindings label — and every one
+    /// of those can be in place while the action reaches nothing at all. So
+    /// this drives the real dispatch path and then asks two separate
+    /// questions: the window is gone from gpui, *and* it left the
+    /// `WindowRegistry` on the way out. The second is what makes it the same
+    /// close as the native one — `detach_workspace` is where the session is
+    /// saved and the workspace is retired, and a `remove_window` that skipped
+    /// it would still pass the first assertion while quietly dropping a
+    /// window's tabs on the floor.
+    #[gpui::test]
+    fn dispatching_close_window_takes_the_window_down_with_its_registration(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            WindowRegistry::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty7App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty7App>()
+                    .ok()
+                    .expect("window root wraps a Tty7App")
+            })
+            .unwrap();
+        // Registered the way an opened window registers itself; the registry
+        // is where the close has to show up, so an unregistered window would
+        // make the assertion below pass for the wrong reason.
+        let handle = window.into();
+        let weak = app.downgrade();
+        app.update(cx, |app, cx| {
+            WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.background_executor.run_until_parked();
+        assert_eq!(
+            vcx.update(|_, cx| WindowRegistry::count(cx)),
+            1,
+            "the harness starts with exactly the one window"
+        );
+
+        vcx.dispatch_action(CloseWindow);
+        drop(vcx);
+
+        assert!(
+            cx.update(|cx| cx.windows().is_empty()),
+            "CloseWindow has to reach `remove_window`; the window is still open"
+        );
+        assert!(
+            cx.update(|cx| WindowRegistry::open_windows(cx).is_empty()),
+            "the close has to run the same cleanup the red button runs, \
+             which is what takes the window out of the registry"
+        );
+    }
+}
+
+/// #843: which pane a tab comes back to.
+#[cfg(test)]
+mod tab_focus_memory_tests {
+    use super::{Pane, PaneSlot, Tab, remember_leaf_in, replace_leaf_in};
+    use crate::ui::pending_pane::{PendingPane, PendingSpawn};
+    use gpui::{
+        AppContext as _, Axis, Context, Entity, IntoElement, Render, Styled as _, TestAppContext,
+        Window, div,
+    };
+
+    /// A window has to exist for focus to live in, but nothing this file asks
+    /// is about what a pane paints.
+    struct Blank;
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    /// A leaf that owns a real focus handle without owning a shell. Focus
+    /// tracking asks the slot, not the terminal behind it, so a connecting
+    /// pane answers every question here exactly as a running one would — and
+    /// connecting panes are watched for focus now too, so this is not a
+    /// stand-in for the case under test but one of its cases.
+    fn leaf(cx: &mut Context<Blank>) -> Entity<PendingPane> {
+        cx.new(|cx| {
+            PendingPane::new(
+                "test",
+                PendingSpawn {
+                    workspace: None,
+                    working_directory: None,
+                    restore_pane: None,
+                    shell: None,
+                    agent: None,
+                    agent_session_id: None,
+                    agent_launch_argv: None,
+                    owner: None,
+                    font_size: 14.,
+                },
+                cx,
+            )
+        })
+    }
+
+    fn two_pane_tab(a: &Entity<PendingPane>, b: &Entity<PendingPane>) -> Tab {
+        Tab::new(Pane::split_node(
+            Axis::Horizontal,
+            0.5,
+            Pane::Leaf(PaneSlot::Connecting(a.clone())),
+            Pane::Leaf(PaneSlot::Connecting(b.clone())),
+        ))
+    }
+
+    fn one_pane_tab(a: &Entity<PendingPane>) -> Tab {
+        Tab::new(Pane::Leaf(PaneSlot::Connecting(a.clone())))
+    }
+
+    /// The mechanism behind the report: `remember_active_pane`'s sample asks
+    /// which leaf holds focus *at that instant*, and a switch begun with focus
+    /// one handle away — the switcher's own search input, a palette closing,
+    /// the tab strip — finds no leaf and has nothing to write. This is why the
+    /// sample cannot be the only writer, and it is pinned here so that a change
+    /// making `focused_leaf` tolerant would have to argue with a test rather
+    /// than silently make this fix look unnecessary.
+    #[gpui::test]
+    fn a_switch_begun_off_the_panes_samples_nothing(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Blank);
+        let (a, b, elsewhere) = window
+            .update(cx, |_, _, cx| (leaf(cx), leaf(cx), cx.focus_handle()))
+            .unwrap();
+        let tab = two_pane_tab(&a, &b);
+
+        window
+            .update(cx, |_, window, cx| {
+                let on_b = b.read(cx).focus_handle.clone();
+                window.focus(&on_b, cx);
+                assert_eq!(
+                    tab.pane.focused_leaf(window, cx).map(|l| l.entity_id()),
+                    Some(b.entity_id()),
+                    "with focus in the pane the sample would have found it"
+                );
+
+                window.focus(&elsewhere, cx);
+                assert!(
+                    tab.pane.focused_leaf(window, cx).is_none(),
+                    "one handle off the pane and the switch-away sample has \
+                     nothing to write"
+                );
+            })
+            .unwrap();
+    }
+
+    /// So focus-in writes instead, and the tab comes back to the pane focus
+    /// was last in even though it had wandered off the panes before the switch
+    /// ever started.
+    #[gpui::test]
+    fn a_tab_comes_back_to_the_pane_focus_was_last_in(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Blank);
+        let (a, b) = window.update(cx, |_, _, cx| (leaf(cx), leaf(cx))).unwrap();
+        let mut tabs = vec![two_pane_tab(&a, &b)];
+        assert_eq!(
+            tabs[0].focus_target().map(|l| l.entity_id()),
+            Some(a.entity_id()),
+            "a tab nobody has worked in yet still opens on its first leaf"
+        );
+
+        // The reader clicks into the right-hand pane: focus arrives, and that
+        // is the moment the tab is told.
+        remember_leaf_in(&mut tabs, b.entity_id());
+
+        // Focus then leaves the panes — the switcher opens, a palette closes —
+        // and the tab is switched away from. `remember_active_pane` finds no
+        // focused leaf and writes nothing, which is now harmless.
+        assert_eq!(
+            tabs[0].focus_target().map(|l| l.entity_id()),
+            Some(b.entity_id()),
+            "#843: the tab has to come back to the pane the reader was in"
+        );
+    }
+
+    /// A pane dragged into another tab is focused where it lands, so the
+    /// arrival has to change that tab's memory and not the one it left — the
+    /// reason the tab is found by the leaf rather than taken to be the active
+    /// one.
+    #[gpui::test]
+    fn a_moved_pane_is_remembered_by_the_tab_that_holds_it_now(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Blank);
+        let (a, b, c) = window
+            .update(cx, |_, _, cx| (leaf(cx), leaf(cx), leaf(cx)))
+            .unwrap();
+        // Tab 0 is the active one and holds `a`; `b` and `c` live in tab 1.
+        let mut tabs = vec![one_pane_tab(&a), two_pane_tab(&b, &c)];
+
+        remember_leaf_in(&mut tabs, c.entity_id());
+
+        assert_eq!(
+            tabs[1].focus_target().map(|l| l.entity_id()),
+            Some(c.entity_id()),
+            "the tab holding the focused pane is the one that remembers it"
+        );
+        assert_eq!(
+            tabs[0].focus_target().map(|l| l.entity_id()),
+            Some(a.entity_id()),
+            "and no other tab's memory is touched"
+        );
+    }
+
+    /// A pane that arrives after its slot has gone — a spawn landing on a
+    /// closed tab, a leaf killed mid-flight — belongs to no tab, and must not
+    /// leave a memory behind for the first tab that happens to be looked at.
+    #[gpui::test]
+    fn a_leaf_no_tab_holds_is_recorded_nowhere(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Blank);
+        let (a, b, gone) = window
+            .update(cx, |_, _, cx| (leaf(cx), leaf(cx), leaf(cx)))
+            .unwrap();
+        let mut tabs = vec![two_pane_tab(&a, &b)];
+
+        remember_leaf_in(&mut tabs, b.entity_id());
+        remember_leaf_in(&mut tabs, gone.entity_id());
+
+        assert_eq!(
+            tabs[0].focus_target().map(|l| l.entity_id()),
+            Some(b.entity_id()),
+            "a stranger's arrival leaves the tab's own answer alone"
+        );
+    }
+
+    /// A pane focused while it was still coming up is remembered under its
+    /// *pending* slot, and that id dies the moment the pane lands in its
+    /// place. The memory has to come along with the swap, or the landing is
+    /// itself what puts the tab back on its first leaf.
+    ///
+    /// What lands here is another slot rather than a running pane: the swap has
+    /// to move an id from one slot to another, and which kind of slot arrived
+    /// is no part of the question.
+    #[gpui::test]
+    fn a_landing_pane_inherits_what_its_pending_slot_was_told(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| Blank);
+        let (a, connecting, landed, other) = window
+            .update(cx, |_, _, cx| (leaf(cx), leaf(cx), leaf(cx), leaf(cx)))
+            .unwrap();
+        let mut tabs = vec![two_pane_tab(&a, &connecting)];
+
+        // Focus arrives while the pane is still connecting, then the pane it
+        // was waiting for lands in that slot.
+        remember_leaf_in(&mut tabs, connecting.entity_id());
+        replace_leaf_in(
+            &mut tabs,
+            connecting.entity_id(),
+            PaneSlot::Connecting(landed.clone()),
+        );
+
+        assert_eq!(
+            tabs[0].focus_target().map(|l| l.entity_id()),
+            Some(landed.entity_id()),
+            "#843: the memory follows the pane, not the slot it arrived in"
+        );
+
+        // A landing somewhere else in the tab is not an answer to this
+        // question and does not touch it.
+        replace_leaf_in(&mut tabs, a.entity_id(), PaneSlot::Connecting(other));
+        assert_eq!(
+            tabs[0].focus_target().map(|l| l.entity_id()),
+            Some(landed.entity_id()),
+            "another pane landing leaves the tab's answer alone"
+        );
+    }
+
+    /// The wiring, end to end. `watch_pane_focus` is the subscription that
+    /// writes the record, and a real round trip through `activate` has to come
+    /// back to the pane focus last arrived in — with focus off the panes well
+    /// before the switch was made, which is the moment the switch-away sample
+    /// cannot see (#843).
+    #[gpui::test]
+    fn a_tab_switch_returns_to_the_pane_focus_arrived_in(cx: &mut TestAppContext) {
+        use super::{test_window::harness, watch_pane_focus};
+        use crate::terminal::view::quiet_test_pane;
+
+        let (app, mut vcx) = harness(cx);
+        let (left, right, elsewhere, _held) = app.update_in(&mut vcx, |app, window, cx| {
+            let (left, left_stream) = quiet_test_pane(1, window, cx);
+            let (right, right_stream) = quiet_test_pane(2, window, cx);
+            let (only, only_stream) = quiet_test_pane(3, window, cx);
+            app.tabs.push(Tab::new(Pane::split_node(
+                Axis::Horizontal,
+                0.5,
+                Pane::leaf(PaneSlot::Ready(left.clone())),
+                Pane::leaf(PaneSlot::Ready(right.clone())),
+            )));
+            app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(only))));
+            app.active = 0;
+            // The subscription every spawn path registers for the pane it
+            // built.
+            for view in [&left, &right] {
+                let handle = view.read(cx).focus_handle.clone();
+                watch_pane_focus(&handle, view.entity_id(), window, cx);
+            }
+            cx.notify();
+            (
+                left,
+                right,
+                cx.focus_handle(),
+                (left_stream, right_stream, only_stream),
+            )
+        });
+        vcx.background_executor.run_until_parked();
+
+        // The reader clicks into the right-hand pane.
+        app.update_in(&mut vcx, |_, window, cx| {
+            let handle = right.read(cx).focus_handle.clone();
+            handle.focus(window, cx);
+        });
+        vcx.background_executor.run_until_parked();
+
+        // Focus then leaves the panes altogether — a palette closing, the tab
+        // strip, the switcher's own search input — before the tab is left.
+        app.update_in(&mut vcx, |_, window, cx| elsewhere.focus(window, cx));
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| app.activate(1, window, cx));
+        vcx.background_executor.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| app.activate(0, window, cx));
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |_, window, cx| {
+            assert!(
+                right.read(cx).focus_handle.is_focused(window),
+                "#843: the tab has to come back to the pane the reader was in"
+            );
+            assert!(
+                !left.read(cx).focus_handle.is_focused(window),
+                "and not to the first leaf"
+            );
         });
     }
 }

@@ -4,7 +4,7 @@ use tty7_core::core::machine::{Machine, PaneNode, Workspace};
 use tty7_core::core::session::WorkspaceId;
 use tty7_core::core::tab_view::{LABEL_MAX, TabLabel, TabView, strip_host_prefix, tab_views_of};
 use tty7_core::daemon::control::{PaneAgentState, RouteInfo, ServerStatus};
-use tty7_core::daemon::protocol::{PaneInfo, PaneProcs};
+use tty7_core::daemon::protocol::{PaneInfo, PaneProcs, PortProbe};
 
 use crate::resolve;
 
@@ -256,9 +256,34 @@ fn render_node(out: &mut String, node: &PaneNode, machine: &Machine, depth: usiz
     }
 }
 
+/// What the port probe has to say for itself, when it has something to say.
+///
+/// This is the line that makes `tty7 procs` a diagnostic rather than another
+/// place to read an empty PORTS table. An empty table means "nothing is
+/// listening" only when the probe actually ran, and until it said so there was
+/// no way — from a screenshot, from a bug report, from the JSON — to tell that
+/// case from a probe that never got off the ground.
+fn probe_note(probe: &PortProbe) -> Option<String> {
+    match probe {
+        PortProbe::Ok => None,
+        PortProbe::Restricted => Some(
+            "note: some processes here belong to another user; a probe running as you \
+             cannot see their sockets"
+                .to_string(),
+        ),
+        PortProbe::Unavailable(detail) => Some(format!(
+            "note: could not check for listening ports ({detail})"
+        )),
+    }
+}
+
 pub fn procs_tables(procs: &PaneProcs) -> String {
+    let note = probe_note(&procs.probe);
     if procs.procs.is_empty() && procs.ports.is_empty() {
-        return "nothing running in this pane\n".to_string();
+        return match note {
+            Some(note) => format!("nothing running in this pane\n{note}\n"),
+            None => "nothing running in this pane\n".to_string(),
+        };
     }
     let rows: Vec<Vec<String>> = procs
         .procs
@@ -280,6 +305,11 @@ pub fn procs_tables(procs: &PaneProcs) -> String {
             .map(|p| vec![p.port.to_string(), p.pid.to_string(), p.name.clone()])
             .collect();
         out.push_str(&table(&["PORT", "PID", "NAME"], &rows));
+    }
+    if let Some(note) = note {
+        out.push('\n');
+        out.push_str(&note);
+        out.push('\n');
     }
     out
 }
@@ -519,6 +549,9 @@ mod tests {
         );
         // What the pane's own terminal says it is doing beats naming the agent
         // running it — every tab of a workspace would otherwise read alike.
+        // The mark the agent writes in front of that title comes off here too:
+        // `tab_label` reads `TabView::label`, so the table says what the tab
+        // strip says without either being told about the other.
         assert_eq!(
             tab_label(&view(&|v| {
                 v.osc_title = Some("✳ fixing the switcher".into());
@@ -599,6 +632,8 @@ mod tests {
                 addr: "*".into(),
                 name: "node".into(),
             }],
+            probe: PortProbe::Ok,
+            context: None,
         };
         let rendered = procs_tables(&procs);
         assert!(
@@ -610,5 +645,55 @@ mod tests {
             "the foreground process is marked: {rendered}"
         );
         assert!(rendered.contains("3000"), "{rendered}");
+        assert!(
+            !rendered.contains("note:"),
+            "a probe that worked says nothing: {rendered}"
+        );
+    }
+
+    /// #731's diagnostic. Someone whose ports are missing runs `tty7 procs`
+    /// and pastes what it says; an empty PORTS table is only worth pasting if
+    /// it distinguishes a quiet pane from a probe that never ran.
+    #[test]
+    fn a_probe_that_could_not_run_says_so_next_to_the_empty_table() {
+        let mut procs = PaneProcs {
+            procs: vec![ProcEntry {
+                pid: 100,
+                name: "zsh".into(),
+                depth: 0,
+                foreground: true,
+            }],
+            ports: Vec::new(),
+            probe: PortProbe::Unavailable("lsof: program not found".into()),
+            context: None,
+        };
+        let rendered = procs_tables(&procs);
+        assert!(
+            rendered.contains("could not check for listening ports"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("lsof: program not found"),
+            "the reason is the whole point of the line: {rendered}"
+        );
+
+        procs.probe = PortProbe::Restricted;
+        assert!(
+            procs_tables(&procs).contains("another user"),
+            "{}",
+            procs_tables(&procs)
+        );
+
+        // And on a pane with nothing running at all, where the tables are not
+        // drawn, the note still has to come out.
+        let empty = PaneProcs {
+            probe: PortProbe::Unavailable("lsof: program not found".into()),
+            ..Default::default()
+        };
+        assert!(
+            procs_tables(&empty).contains("could not check"),
+            "{}",
+            procs_tables(&empty)
+        );
     }
 }

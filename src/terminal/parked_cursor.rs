@@ -16,13 +16,14 @@
 //! invisible, which is the cell the correcting frame would have moved it back
 //! to anyway.
 //!
-//! Only conhost parks a cursor, so the reader runs this on Windows alone
-//! (`RemoteTerminal::REPAIR_PARKED_CURSOR`). Off it the pty is raw and the
+//! Only conhost parks a cursor, so the reader runs this for panes on a ConPTY
+//! alone — see [`crate::terminal::remote::PtySource`], which answers that per
+//! pane rather than per build. Everywhere else the pty is raw and the
 //! application's cursor is the real one: a TUI is free to end a repaint on the
 //! text it just wrote and then echo the next keystroke straight after it, with
 //! no positioning of its own — vim opens its `:` command line exactly that way,
 //! which a repair on a raw pty turns into `wq!` landing on the row being edited
-//! (#430).
+//! (#430; #774 for the Windows client whose Linux panes were repaired too).
 
 use std::time::{Duration, Instant};
 

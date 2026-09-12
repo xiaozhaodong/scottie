@@ -6,6 +6,7 @@ pub mod agent_prompt;
 pub mod aumid;
 pub mod cli_install;
 pub mod config;
+pub mod default_terminal;
 pub mod explorer_context_menu;
 #[cfg(target_os = "macos")]
 pub mod font_smoothing;

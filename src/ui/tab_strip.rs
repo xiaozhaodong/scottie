@@ -5,7 +5,9 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
+use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex};
 
 use crate::core::actions::{
@@ -14,10 +16,10 @@ use crate::core::actions::{
     SelectWorkspace2, SelectWorkspace3, SelectWorkspace4, SelectWorkspace5, SelectWorkspace6,
     SelectWorkspace7, SelectWorkspace8, SelectWorkspace9, SplitDown, SplitRight, TogglePalette,
 };
-use crate::core::config::RightPanelTab;
+use crate::core::config::{Config, RightPanelTab, SidebarGrouping};
+use crate::core::group_key::GroupKey;
 use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
-use crate::terminal::view::PaneName;
 use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty7App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -25,7 +27,7 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 // switcher, and all of them shorten through these helpers. Kept in
 // `path_display` rather than here so no surface has to reach into the tab
 // strip to name a pane the same way it does.
-use crate::ui::path_display::{abbreviate_home, clusters, join_segments, path_separator};
+use crate::ui::path_display::{clusters, join_segments, path_separator};
 use crate::ui::reorder::{self, Reorder, Surface};
 
 /// One duration and one curve for every transition the app runs, so a fade and
@@ -52,6 +54,202 @@ fn shell_spec(shell: &DetectedShell) -> ShellSpec {
 /// workspaces this process does not own and have to cut the same head off the
 /// same titles.
 pub(crate) use tty7_core::core::tab_view::strip_host_prefix;
+
+/// `home` is the home directory of the machine `path` is on, from
+/// [`Tab::label_view`](crate::ui::app::Tab::label_view) or the workspace's
+/// host; `None` leaves the path spelled out (#580).
+pub(crate) fn abbreviate_home<'a>(
+    path: &'a str,
+    home: Option<&std::path::Path>,
+) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
+    if path.starts_with('~') {
+        return Cow::Borrowed(path);
+    }
+    // The shared comparison: separators normalized, case folded — a Windows
+    // pane whose cwd spells itself `C:/Users/…` shortens under a
+    // `C:\Users\…` home too (#544).
+    crate::ui::path_display::abbreviate_home(path, home)
+}
+
+/// The one place a tab gets its displayed name, whichever surface is asking.
+///
+/// `label()` ranks the evidence — a given name, then an agent's task title or
+/// the agent itself, then the title the pane is showing, then the working
+/// directory, then the process it is running — and this renders whatever came
+/// back. Every caller arrives with a
+/// [`TabView`](crate::ui::machine_mirror::TabView): the switcher reads one out
+/// of the machine tree for a window it does not own, the strip and the
+/// sidebar build one from their own live panes in
+/// [`Tab::label_view`](crate::ui::app::Tab::label_view), and a pane's header
+/// builds one for the pane alone.
+///
+/// They used to rank their own evidence, and disagreed where it mattered most:
+/// a pane with a working directory and no title — every non-PowerShell shell
+/// tty7 ships integration for reports OSC 7 and no OSC 0 — was listed by the
+/// switcher as `~/repo/tty7` and by the strip that owned it as "tty7", the
+/// app's own name (#740).
+///
+/// `None` when nothing names the tab. What to draw then is the caller's: a
+/// tab row counts ("Shell 2"), a pane header spells the app's own name.
+pub(crate) fn rendered_label(
+    view: &crate::ui::machine_mirror::TabView,
+    home: Option<&std::path::Path>,
+    show_activity_prefix: bool,
+) -> Option<String> {
+    use crate::ui::machine_mirror::TabLabel;
+    use crate::ui::path_display::{clamp_text, short_title};
+
+    // A path can shorten away to nothing (a bare "user@host:"), and the process
+    // name the tree carries ("zsh") is still worth more than a number.
+    //
+    // Through `stated_title` because a tab of *this* window has no process name
+    // to offer: `Tab::label_view` fills that slot with the placeholder a pane
+    // answers to before anything has spoken, and printing the app's own name
+    // here is the one thing #740 exists to stop.
+    let shortened = |raw: &str| match short_title(raw, home) {
+        shortened if !shortened.trim().is_empty() => Some(shortened),
+        _ => crate::terminal::view::stated_title(&view.title).map(str::to_string),
+    };
+    match view.label_with_activity(show_activity_prefix) {
+        TabLabel::Named(name) => Some(name.to_string()),
+        // Through `short_title` because a title is so often a path: the shell
+        // integration writes `user@host:~/dir`, and a tab spelling that out in
+        // full where the one beside it says "…/dir" would be the same
+        // disagreement in a new place.
+        TabLabel::Osc(title) => shortened(title),
+        // A task title is prose: the front of it is the part that says
+        // anything, and a `/` in it is punctuation, so it is clamped from the
+        // end rather than cut like a path.
+        TabLabel::Task(title) => Some(clamp_text(
+            title.as_ref(),
+            tty7_core::core::tab_view::LABEL_MAX,
+        )),
+        TabLabel::Agent(agent) => Some(agent.display_name().to_string()),
+        TabLabel::Cwd(cwd) => shortened(cwd),
+        TabLabel::Process(title) => Some(title.to_string()),
+        TabLabel::Unknown => None,
+    }
+}
+
+/// [`rendered_label`] with the tab's number standing in for a tab nothing
+/// names, and the activity glyph left off — what every surface shows unless
+/// the display setting asks for the glyph.
+pub(crate) fn label_of(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+) -> String {
+    label_of_with_activity(view, index, home, false)
+}
+
+/// [`label_of`], with an agent's activity glyph put back in front of its task
+/// title when `show_activity_prefix` is on.
+pub(crate) fn label_of_with_activity(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+    show_activity_prefix: bool,
+) -> String {
+    rendered_label(view, home, show_activity_prefix).unwrap_or_else(|| {
+        t_fmt(
+            L10nKey::TabUnnamedShell,
+            &[("n", &((index + 1).to_string()))],
+        )
+    })
+}
+
+/// The name behind the one [`rendered_label`] cut down, as it arrived: what a
+/// tooltip or a pane header's grip can hand back whole. `None` when nothing
+/// names the tab.
+pub(crate) fn source_of(
+    view: &crate::ui::machine_mirror::TabView,
+    show_activity_prefix: bool,
+) -> Option<String> {
+    use crate::ui::machine_mirror::TabLabel;
+
+    match view.label_with_activity(show_activity_prefix) {
+        TabLabel::Named(name) => Some(name.to_string()),
+        TabLabel::Osc(raw) | TabLabel::Cwd(raw) | TabLabel::Process(raw) => Some(raw.to_string()),
+        TabLabel::Task(title) => Some(title.into_owned()),
+        TabLabel::Agent(agent) => Some(agent.display_name().to_string()),
+        TabLabel::Unknown => None,
+    }
+}
+
+/// Whether a tab's label says anything a line of its path would not.
+///
+/// The switcher and the sidebar draw a row's directory under its label, which
+/// is worth the line right up until the label *is* that directory — then the
+/// row prints the same place twice. Both surfaces have the same trap, because
+/// both rank a terminal's own title above the directory and a shell's title
+/// *is* the directory: `user@host:~/repo` arrives as [`TabLabel::Osc`], is
+/// drawn as `~/repo`, and used to keep a `~/repo` subtitle under it. Excluding
+/// [`TabLabel::Cwd`](crate::ui::machine_mirror::TabLabel::Cwd) alone catches
+/// only the half of that where the title was missing altogether, so the title
+/// is put through the same
+/// [`same_place`](crate::ui::path_display::same_place) comparison against the
+/// same host's home.
+///
+/// The ranks that are never a place — a given name, a task, an agent, a
+/// process name, a bare count — keep their subtitle without asking.
+pub(crate) fn names_more_than_its_place(
+    view: &crate::ui::machine_mirror::TabView,
+    home: Option<&std::path::Path>,
+) -> bool {
+    use crate::ui::machine_mirror::TabLabel;
+
+    let title = match view.label() {
+        TabLabel::Cwd(_) => return false,
+        TabLabel::Osc(title) => title,
+        TabLabel::Named(_)
+        | TabLabel::Task(_)
+        | TabLabel::Agent(_)
+        | TabLabel::Process(_)
+        | TabLabel::Unknown => {
+            return true;
+        }
+    };
+    let Some(cwd) = view.cwd.as_deref() else {
+        return true;
+    };
+    !crate::ui::path_display::same_place(title, cwd, home)
+}
+
+/// What a row can add on hover: the name behind the one [`label_of`] cut down,
+/// or `None` when it cut nothing and the tooltip would only repeat the row.
+///
+/// The comparison has to happen on the *same* spelling, which is the whole
+/// trick here. `label_of` abbreviates a path under the home before it elides
+/// it, and this returns the abbreviated form too, so a raw `/Users/x/repo`
+/// measured against a label of `~/repo` looks like a difference that isn't
+/// one — and every tab named after a directory inside the home would hang a
+/// tooltip saying exactly what it already says. Abbreviate first, compare
+/// after. A task title is prose and already whole: there is no `user@host:`
+/// head on it and no `~` in it to spell back out.
+fn tooltip_of(
+    view: &crate::ui::machine_mirror::TabView,
+    index: usize,
+    home: Option<&std::path::Path>,
+    show_activity_prefix: bool,
+) -> Option<SharedString> {
+    use crate::ui::machine_mirror::TabLabel;
+
+    // The other rungs are never shortened: a given name and a process name are
+    // printed whole, and an agent's is a word.
+    let full = match view.label_with_activity(show_activity_prefix) {
+        TabLabel::Osc(title) => abbreviate_home(title.trim(), home).into_owned(),
+        TabLabel::Cwd(cwd) => abbreviate_home(cwd.trim(), home).into_owned(),
+        TabLabel::Task(title) => title.trim().to_string(),
+        _ => return None,
+    };
+    if full.trim().is_empty()
+        || full == label_of_with_activity(view, index, home, show_activity_prefix)
+    {
+        return None;
+    }
+    Some(SharedString::from(full))
+}
 
 /// Width of `text` shaped in `font` at `size`, in pixels.
 ///
@@ -325,11 +523,25 @@ impl Render for DragTab {
 /// What a chrome tile says on hover: what it does, then the chord that does it.
 /// The tile's own name is no use as a tooltip — the workspace head already
 /// wears it as its label.
-pub(crate) fn chord_hint(what: &str, action: &str, cx: &gpui::App) -> SharedString {
-    match crate::ui::home::key_hint(action, cx) {
-        Some(keys) => SharedString::from(format!("{what}  {keys}")),
-        None => SharedString::from(what.to_string()),
-    }
+///
+/// This used to be `chord_hint`, which pasted the two together into one string
+/// — `"Hide sidebar  \u{2318}B"` — and handed that to `Button::tooltip`. Inside the
+/// card the chord then wore the label's own size and colour, so the tooltip
+/// read as one odd sentence rather than as a name with a shortcut beside it.
+/// `Tooltip` has a `key_binding` slot that already renders a chord the way a
+/// chord should look — set apart on the right, a size down, in
+/// `muted_foreground` — and all that was missing was a way to hand `Button` a
+/// built tooltip instead of a string, which is what `tooltip_element` is for.
+pub(crate) fn chord_tooltip(
+    what: impl Into<SharedString>,
+    action: &str,
+    cx: &gpui::App,
+) -> impl Fn(&mut Window, &mut App) -> gpui::Entity<Tooltip> + 'static {
+    let what: SharedString = what.into();
+    // Resolved now, while there is a `cx`: the builder below runs on hover, and
+    // is handed only the window it is drawing into.
+    let kbd = crate::ui::home::key_stroke(action, cx).map(Kbd::new);
+    move |_window, cx| cx.new(|_| Tooltip::new(what.clone()).key_binding(kbd.clone()))
 }
 
 pub(crate) fn chrome_tile_variant(cx: &gpui::App) -> ButtonCustomVariant {
@@ -387,6 +599,22 @@ fn visible_chips(order: &[usize], active: usize, avail: f32) -> Vec<usize> {
 
 pub(crate) fn chrome_tile(button: Button, selected: bool, cx: &gpui::App) -> Button {
     chrome_tile_sized(button, TILE_SIZE, TILE_GLYPH, selected, cx)
+}
+
+/// A chrome tile whose current state is said with a rule under it rather than
+/// with a fill: the ink still steps up to full strength, the pill never
+/// appears, and the caller draws the bar.
+///
+/// The fill is what an activity bar of three tiles cannot afford. It is the
+/// same grey block the hover state paints, so the lit tab and the tile under
+/// the pointer read as the same thing, and it sits in a title bar where every
+/// other tile is a bare glyph.
+pub(crate) fn chrome_tile_marked(button: Button, current: bool, cx: &gpui::App) -> Button {
+    button
+        .custom(chrome_tile_variant_for(current, cx))
+        .with_size(px(TILE_GLYPH / BUTTON_ICON_SCALE))
+        .w(px(TILE_SIZE))
+        .h(px(TILE_SIZE))
 }
 
 /// How wide the two chrome tiles at the trailing end of the title bar are, with
@@ -788,9 +1016,20 @@ impl Tty7App {
                     .custom(chrome_tile_variant(cx))
                     .child(
                         h_flex()
+                            .id("rail-workspace-head-ink")
                             .w_full()
+                            .h_full()
                             .items_center()
                             .gap(px(6.))
+                            // The tile's own hover is a fill the palette keeps
+                            // a hair off the surface, which on the rail is
+                            // barely a change at all — and the name and the
+                            // chevron pinned their own ink, so the pointer
+                            // landing on the one control at the top of the
+                            // column said nothing. Answer the way a group
+                            // header does: the ink steps up to full strength.
+                            .text_color(cx.theme().muted_foreground)
+                            .hover(|s| s.text_color(cx.theme().foreground))
                             .child(
                                 div()
                                     .flex()
@@ -805,6 +1044,11 @@ impl Tty7App {
                                     .child(monogram),
                             )
                             .child(
+                                // Chrome, not a row: the tile inherits the
+                                // rail's title ink, which now belongs to the
+                                // tabs. The workspace name reads at the group
+                                // headers' weight so the one dark line in
+                                // the column stays the tab in front.
                                 div()
                                     .flex_shrink(1.)
                                     .min_w_0()
@@ -819,15 +1063,14 @@ impl Tty7App {
                                 Icon::empty()
                                     .path("icons/chevrons-up-down.svg")
                                     .size(px(11.))
-                                    .flex_shrink_0()
-                                    .text_color(cx.theme().muted_foreground),
+                                    .flex_shrink_0(),
                             ),
                     )
                     .xsmall()
                     .w_full()
                     .h(px(30.))
                     .rounded_md()
-                    .tooltip(chord_hint(
+                    .tooltip_element(chord_tooltip(
                         t(L10nKey::HomeSwitchWorkspace),
                         "ToggleSwitcher",
                         cx,
@@ -870,13 +1113,18 @@ impl Tty7App {
         )
     }
 
+    /// The trailing chrome tiles. `shown` is the pointer being over the bar
+    /// they sit in: they are laid out either way, and only painted while it
+    /// holds, so revealing them never shifts anything beside them.
     pub(crate) fn window_chrome(
         &self,
+        shown: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let panel_open = self.right_panel_open(cx);
         h_flex()
+            .when(!shown, |row| row.invisible())
             .flex_shrink_0()
             .items_center()
             .gap(px(2.))
@@ -891,7 +1139,7 @@ impl Tty7App {
                         cx,
                     )
                     .rounded_lg()
-                    .tooltip(chord_hint(
+                    .tooltip_element(chord_tooltip(
                         match panel_open {
                             true => t(L10nKey::TabTooltipHideDetailPanel),
                             false => t(L10nKey::TabTooltipShowDetailPanel),
@@ -949,46 +1197,68 @@ impl Tty7App {
         ]
         .into_iter()
         .map(|(tab, icon, label_key)| {
+            let current = active_tab == tab;
+            let tile = chrome_tile_marked(
+                Button::new(("right-panel-tab", tab as usize)).icon(icon),
+                current,
+                cx,
+            )
+            .rounded_lg()
+            .tooltip(match (tab, changed) {
+                (RightPanelTab::Scm, Some(n)) => {
+                    SharedString::from(format!("{} · {n}", t(label_key)))
+                }
+                _ => SharedString::from(t(label_key)),
+            })
+            // A tile for another tab switches to it; the lit one puts
+            // the panel away, the way an activity bar behaves
+            // everywhere else. Pressing it used to do nothing at all
+            // — a dead click on the one control in the row that looks
+            // like it should undo itself. (These tiles only exist
+            // while the panel is open, so `ToggleRightPanel` and the
+            // chrome tile beside them are still what brings it back.)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                match this.right_panel_open(cx) && this.right_panel_tab == tab {
+                    true => {
+                        this.toggle_right_panel(cx);
+                        // These tiles live inside the panel, so
+                        // closing from one destroys the element that
+                        // holds the focus and leaves it nowhere —
+                        // and a keymap whose bindings are scoped to a
+                        // focused thing goes quiet with it, so the
+                        // ⌘J that would undo this did nothing at all.
+                        // Hand the terminal back what it lost.
+                        this.focus_active(window, cx);
+                    }
+                    false => this.set_right_panel_tab(tab, cx),
+                }
+            }));
             div()
-                .occlude()
                 .flex_shrink_0()
-                .child(
-                    chrome_tile(
-                        Button::new(("right-panel-tab", tab as usize)).icon(icon),
-                        active_tab == tab,
-                        cx,
-                    )
-                    .rounded_lg()
-                    .tooltip(match (tab, changed) {
-                        (RightPanelTab::Scm, Some(n)) => {
-                            SharedString::from(format!("{} · {n}", t(label_key)))
-                        }
-                        _ => SharedString::from(t(label_key)),
-                    })
-                    // A tile for another tab switches to it; the lit one puts
-                    // the panel away, the way an activity bar behaves
-                    // everywhere else. Pressing it used to do nothing at all
-                    // — a dead click on the one control in the row that looks
-                    // like it should undo itself. (These tiles only exist
-                    // while the panel is open, so `ToggleRightPanel` and the
-                    // chrome tile beside them are still what brings it back.)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        match this.right_panel_open(cx) && this.right_panel_tab == tab {
-                            true => {
-                                this.toggle_right_panel(cx);
-                                // These tiles live inside the panel, so
-                                // closing from one destroys the element that
-                                // holds the focus and leaves it nowhere —
-                                // and a keymap whose bindings are scoped to a
-                                // focused thing goes quiet with it, so the
-                                // ⌘J that would undo this did nothing at all.
-                                // Hand the terminal back what it lost.
-                                this.focus_active(window, cx);
-                            }
-                            false => this.set_right_panel_tab(tab, cx),
-                        }
-                    })),
-                )
+                // Full height and `relative` so the bar below can be pinned to
+                // the row's own bottom edge, where it lands on the hairline
+                // that closes the row rather than floating under the glyph.
+                // The `occlude` that keeps a press from dragging the window
+                // stays on the tile: grown to the whole row it would take the
+                // few pixels above and below each glyph out of the drag
+                // region and hand them to nothing.
+                .h_full()
+                .relative()
+                .flex()
+                .items_center()
+                .child(div().occlude().flex_shrink_0().child(tile))
+                // Narrower than the tile so it reads as underlining the glyph
+                // rather than as the edge of a box around it.
+                .children(current.then(|| {
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left(px(6.))
+                        .right(px(6.))
+                        .h(px(2.))
+                        .rounded_t(px(1.))
+                        .bg(cx.theme().foreground)
+                }))
                 .into_any_element()
         })
         .collect()
@@ -1065,13 +1335,22 @@ impl Tty7App {
         size: f32,
         cx: &App,
     ) -> gpui::AnyElement {
-        let base = div()
-            .id(id)
-            .flex_shrink_0()
-            .size(px(size))
-            .flex()
-            .items_center()
-            .justify_center();
+        // The wrapper positions; the disc below carries the radius.
+        // `status_dot` hangs itself off the edge with negative offsets — that
+        // overhang is what makes it a badge on the avatar rather than a notch
+        // in it — and as a child of the rounded element the overhang was
+        // clipped along the arc, leaving a crescent.
+        let base = div().id(id).flex_shrink_0().relative().size(px(size));
+        // Fill, hairline and mark all live here, so the radius only ever clips
+        // the disc's own paint.
+        let disc = || {
+            div()
+                .size(px(size))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+        };
         match agent {
             Some(agent) => {
                 let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
@@ -1084,43 +1363,78 @@ impl Tty7App {
                     Some(state) => format!("{} — {state}", agent.display_name()),
                     None => agent.display_name().to_string(),
                 };
-                base.relative()
-                    .rounded_full()
-                    .bg(gpui::rgb(agent.accent_rgb()))
-                    // Codex and Grok are both pure black, which is the window
-                    // fill on a dark theme — the disc dissolves and leaves the
-                    // glyph floating. A hairline keeps it a disc in any theme.
-                    .when(
-                        crate::ui::presets::needs_edge(agent.accent_rgb(), cx.theme().background),
-                        |d| d.border_1().border_color(cx.theme().border),
-                    )
-                    .child(
-                        gpui::svg()
-                            .path(agent.icon_path())
-                            .size(px(size * 0.54))
-                            .text_color(gpui::white()),
-                    )
-                    .when_some(dot, |b, dot| b.child(dot))
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .into_any_element()
+                // The disc is a solid fill of the agent's brand on every
+                // row, lit or not: a tint reads as a disabled tab, and the
+                // colour is how the eye tells one agent from another down a
+                // column of twenty.
+                let accent = agent.accent_rgb();
+                let surface = cx.theme().background;
+                base.child(
+                    disc()
+                        .bg(gpui::rgb(accent))
+                        // Codex and Grok are both pure black, which is the
+                        // window fill on a dark theme — the disc dissolves and
+                        // leaves the glyph floating. A hairline keeps it a disc
+                        // in any theme.
+                        .when(crate::ui::presets::needs_edge(accent, surface), |d| {
+                            d.border_1().border_color(cx.theme().border)
+                        })
+                        .child(
+                            gpui::svg()
+                                .path(agent.icon_path())
+                                .size(px(size * 0.54))
+                                // SVG assets render as a single-colour mask, so
+                                // the mark's colour comes from the agent rather
+                                // than from the file. The tray icon reads the
+                                // same answer.
+                                .text_color(gpui::rgb(agent.icon_rgb())),
+                        ),
+                )
+                .when_some(dot, |b, dot| b.child(dot))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
+                .into_any_element()
             }
             None => base
-                .relative()
-                .rounded_full()
-                .bg(cx.theme().muted)
                 .child(
-                    gpui::svg()
-                        .path("icons/terminal.svg")
-                        .size(px(size * 0.56))
-                        .text_color(cx.theme().foreground.opacity(0.65)),
+                    disc().bg(cx.theme().muted).child(
+                        gpui::svg()
+                            .path("icons/terminal.svg")
+                            .size(px(size * 0.56))
+                            .text_color(cx.theme().foreground.opacity(0.65)),
+                    ),
                 )
                 .when_some(ssh, |b, rgb| {
                     b.child(Self::status_dot(rgb, 0, size, cx.theme().background, false))
                 })
                 .into_any_element(),
         }
+    }
+
+    /// The mark a tab wears while one of its panes is zoomed over the others
+    /// (#752). Without it a zoomed tab is pixel-for-pixel a tab that only ever
+    /// had one pane, and the only way to tell was to toggle the zoom off.
+    ///
+    /// Drawn in the tab entry rather than on the pane so it reads from either
+    /// tab surface, and so it says something about the tabs you are *not*
+    /// looking at — the zoom outlives a switch away from them.
+    pub(crate) fn zoom_mark(&self, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
+        let tip = chord_tooltip(t(L10nKey::TabTooltipZoomed), "ToggleMaximizePane", cx);
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(16.))
+            .text_color(cx.theme().muted_foreground)
+            .child(Icon::new(IconName::Maximize).size(px(11.)))
+            // Not a `Button`, so this one goes through gpui's own `tooltip`
+            // rather than `tooltip_element` — but it is the same builder, and
+            // the chord lands in the same slot the chrome tiles use.
+            .tooltip(move |window, cx| tip(window, cx).into())
+            .into_any_element()
     }
 
     /// The full title behind a shortened one, for the row to name on hover.
@@ -1130,6 +1444,11 @@ impl Tty7App {
     /// read `…/a/b/c` with no way to find out which `a` that was. `None` when
     /// nothing was dropped, so tabs that already show their whole name stay
     /// quiet under the pointer.
+    ///
+    /// It has to unshorten whatever the label was *made of*, which is why it
+    /// reads the same [`TabView`](crate::ui::machine_mirror::TabView) the label
+    /// did: a tab named after its directory wants that directory spelled out,
+    /// not the title it never had. See [`tooltip_of`].
     pub(crate) fn tab_title_tooltip(
         &self,
         tab: &Tab,
@@ -1137,24 +1456,14 @@ impl Tty7App {
         window: Option<&Window>,
         cx: &App,
     ) -> Option<SharedString> {
-        if tab.name.as_ref().is_some_and(|n| !n.trim().is_empty()) {
-            return None;
-        }
-        let (source, home) = tab.leaf_display_name(window, cx);
-        let source = source?;
-        let raw = source.text().trim();
-        if raw.is_empty() || raw == self.tab_label(tab, index, window, cx) {
-            return None;
-        }
-        // A task title is prose and already whole: there is no `user@host:` head
-        // on it and no `~` in it to spell back out.
-        let full = match &source {
-            PaneName::Task(_) => raw.to_string(),
-            _ => abbreviate_home(raw, home.as_deref()).into_owned(),
-        };
-        Some(SharedString::from(full))
+        let (view, home) = tab.label_view(window, cx);
+        let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
+        tooltip_of(&view, index, home.as_deref(), show_activity_prefix)
     }
 
+    /// What this window puts on a tab of its own — the same ladder, through the
+    /// same renderer, as the switcher uses for a tab of somebody else's window.
+    /// See [`label_of`].
     pub(crate) fn tab_label(
         &self,
         tab: &Tab,
@@ -1162,24 +1471,9 @@ impl Tty7App {
         window: Option<&Window>,
         cx: &App,
     ) -> String {
-        if let Some(name) = tab.name.as_ref() {
-            let trimmed = name.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-        let (source, home) = tab.leaf_display_name(window, cx);
-        let label = source
-            .map(|source| source.label(home.as_deref()))
-            .unwrap_or_default();
-        if label.trim().is_empty() {
-            t_fmt(
-                L10nKey::TabUnnamedShell,
-                &[("n", &((index + 1).to_string()))],
-            )
-        } else {
-            label
-        }
+        let (view, home) = tab.label_view(window, cx);
+        let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
+        label_of_with_activity(&view, index, home.as_deref(), show_activity_prefix)
     }
 
     /// The New Tab control: one `+` that drops the list of everything it could
@@ -1208,7 +1502,7 @@ impl Tty7App {
             // come through here were the ones left silent. The chord is worth
             // more here than anywhere else in the row: it is the way back to
             // opening a tab without reading a menu first.
-            .tooltip(chord_hint(t(L10nKey::AppMenuNewTab), "NewTab", cx))
+            .tooltip_element(chord_tooltip(t(L10nKey::AppMenuNewTab), "NewTab", cx))
             // Built when the menu opens, not when the strip draws: this
             // closure runs once per press, and again after each dismissal.
             .dropdown_menu(move |menu, window, cx| {
@@ -1288,6 +1582,61 @@ impl Tty7App {
             );
         }
 
+        // Where this tab sits, and where it could be put instead.
+        //
+        // Laid out flat rather than behind a "Move to Group ▸" submenu: there
+        // are never many custom groups — they are maintained by hand — so a
+        // submenu would cost a second click to show two or three items, and
+        // `PopupMenu::submenu` wants a `&mut Context` this function does not
+        // have. The label above them says what the block is.
+        //
+        // Hidden entirely when grouping is off. The sidebar draws no headers
+        // then, so "move to group" would name something the user cannot see.
+        if cx.global::<Config>().sidebar_grouping != SidebarGrouping::None {
+            let stated = this
+                .tabs
+                .get(index)
+                .and_then(|t| t.sidebar_group.borrow().clone());
+            let here = match &stated {
+                Some(GroupKey::Custom(name)) => Some(name.clone()),
+                _ => None,
+            };
+            menu = menu
+                .separator()
+                .item(PopupMenuItem::label(t(L10nKey::SidebarMoveToGroup)));
+            for name in this.custom_group_names() {
+                menu = menu.item(
+                    PopupMenuItem::new(name.clone())
+                        .checked(here.as_deref() == Some(name.as_str()))
+                        .on_click({
+                            let app = app.clone();
+                            let name = name.clone();
+                            move |_, _window, cx| {
+                                let key = GroupKey::custom(&name);
+                                let _ =
+                                    app.update(cx, |this, cx| this.set_tab_group(index, key, cx));
+                            }
+                        }),
+                );
+            }
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| this.new_tab_group(index, window, cx));
+                }
+            }));
+            // Only worth offering once there is something to undo. A tab that
+            // never left its derived group is already grouped automatically.
+            if here.is_some() {
+                menu = menu.item(PopupMenuItem::new(t(L10nKey::SidebarAutoGroup)).on_click({
+                    let app = app.clone();
+                    move |_, _window, cx| {
+                        let _ = app.update(cx, |this, cx| this.set_tab_group(index, None, cx));
+                    }
+                }));
+            }
+        }
+
         let in_repo = this.tab_is_in_repo(index, window, cx);
         if in_repo {
             menu = menu.separator().item(
@@ -1332,6 +1681,25 @@ impl Tty7App {
                         }
                     }),
             );
+        }
+
+        // The connection this tab is on, editable from the tab itself. A
+        // hostname or password typed wrong used to be fixable only by finding
+        // the same host again in Settings, and right-clicking the connection —
+        // the gesture that asks "change this" — offered nothing (#438). The row
+        // is the switcher machine menu's, word for word: the saved host when
+        // there is one, an offer to keep the address when it was dialled by
+        // hand, and nothing at all for a tab with no host form behind it.
+        if let Some((form, label)) = this.tab_ssh_host_form(index, window, cx) {
+            menu = menu.separator().item(PopupMenuItem::new(label).on_click({
+                let app = app.clone();
+                move |_, window, cx| {
+                    let form = form.clone();
+                    let _ = app.update(cx, |this, cx| {
+                        this.open_tab_ssh_host_form(&form, window, cx)
+                    });
+                }
+            }));
         }
 
         menu = menu
@@ -1522,6 +1890,7 @@ impl Tty7App {
             let agent = tab.agent(cx);
             let agent_status = tab.agent_status(cx);
             let agent_unread = tab.agent_unread_count(cx);
+            let zoomed = self.tab_is_zoomed(i);
 
             let rename_input = self
                 .renaming
@@ -1649,6 +2018,13 @@ impl Tty7App {
                         cx,
                     ))
                 })
+                // Leading, beside the other state marks: the trailing end of a
+                // chip belongs to the badge and to the close button that fades
+                // in over it, and a mark parked there would vanish under the
+                // pointer that came to read it.
+                .when(zoomed, |chip| {
+                    chip.child(self.zoom_mark(("tab-zoom", i), cx))
+                })
                 .child(label_region)
                 .when(show_badges && i < 9, |chip| {
                     chip.child(
@@ -1744,6 +2120,9 @@ impl Tty7App {
             .flex_shrink_0()
             .child(self.new_tab_button("tab-add", cx));
 
+        // Same bargain the sidebar's own tiles keep: present in the layout,
+        // painted only while the pointer is on the bar.
+        let strip_chrome_shown = self.strip_chrome_hover.get();
         let rail_collapsed = !show_chips && !self.left_panel_open(cx);
         let left_group = rail_collapsed.then(|| {
             h_flex()
@@ -1761,34 +2140,50 @@ impl Tty7App {
                             .child(mark),
                     )
                 })
+                // The logo above stays put: it is the window's mark, not a
+                // control, and a window that loses its identity when nobody is
+                // pointing at it reads as a different window.
                 .child(
                     div()
                         .occlude()
                         .flex_shrink_0()
+                        .when(!strip_chrome_shown, |tile| tile.invisible())
                         .child(self.new_tab_button("titlebar-add-collapsed", cx)),
                 )
                 .child(
-                    div().occlude().flex_shrink_0().child(
-                        chrome_tile(
-                            Button::new("titlebar-expand-sidebar")
-                                .icon(Icon::empty().path("icons/panel-left.svg")),
-                            false,
-                            cx,
-                        )
-                        .rounded_lg()
-                        .tooltip(chord_hint(
-                            t(L10nKey::TabTooltipShowSidebar),
-                            "ToggleLeftPanel",
-                            cx,
-                        ))
-                        .on_click(cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx))),
-                    ),
+                    div()
+                        .occlude()
+                        .flex_shrink_0()
+                        .when(!strip_chrome_shown, |tile| tile.invisible())
+                        .child(
+                            chrome_tile(
+                                Button::new("titlebar-expand-sidebar")
+                                    .icon(Icon::empty().path("icons/panel-left.svg")),
+                                false,
+                                cx,
+                            )
+                            .rounded_lg()
+                            .tooltip_element(chord_tooltip(
+                                t(L10nKey::TabTooltipShowSidebar),
+                                "ToggleLeftPanel",
+                                cx,
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, _window, cx| this.toggle_left_panel(cx)),
+                            ),
+                        ),
                 )
         });
 
         let panel_open = self.right_panel_open(cx);
-        let right_chrome =
-            (!panel_open || !cfg!(target_os = "macos")).then(|| self.window_chrome(window, cx));
+        // With the panel open these two tiles stand in the band above it, over
+        // the panel's own header — and that header's tab tiles are painted
+        // whenever the panel is, so a band that grew two buttons on hover read
+        // as a glitch beside them. Same bargain macOS struck when it moved
+        // these tiles into the panel's title bar: once the panel is open they
+        // are part of its chrome, not part of the strip's.
+        let right_chrome = (!panel_open || !cfg!(target_os = "macos"))
+            .then(|| self.window_chrome(strip_chrome_shown || panel_open, window, cx));
         let title_center = div()
             .flex_1()
             .min_w(px(GRAB_HANDLE_W))
@@ -1799,6 +2194,7 @@ impl Tty7App {
 
         h_flex()
             .id("tab-strip")
+            .relative()
             .items_center()
             .gap_1p5()
             .when(show_chips, |this| this.w(strip_w))
@@ -1820,6 +2216,179 @@ impl Tty7App {
                 ),
                 None => this.child(chrome),
             })
+            .child(crate::ui::app::hover_sheet(
+                "strip-chrome-hover",
+                &self.strip_chrome_hover,
+            ))
+    }
+}
+
+/// The tab menu's SSH row, against real tabs in a real window.
+///
+/// `PopupMenu` keeps its items to itself — nothing outside `gpui_component` can
+/// read back what a built menu says — so these drive the predicate the menu
+/// branches on instead, which is where every decision about the row is made.
+///
+/// Ungated: `test_window::harness` and `quiet_test_pane` both run on Windows,
+/// and a `unix` gate here would skip the one platform this was written on.
+#[cfg(test)]
+mod ssh_host_row_tests {
+    use crate::core::config::Config;
+    use crate::core::session::RemoteTarget;
+    use crate::core::ssh_profile::SshProfile;
+    use crate::daemon::protocol::SshProxy;
+    use crate::terminal::view::{
+        quiet_test_pane, quiet_test_ssh_pane, quiet_test_ssh_pane_of, quiet_test_ssh_pane_with,
+    };
+    use crate::ui::app::{Tab, test_window::harness};
+    use crate::ui::i18n::{L10nKey, set_locale, t};
+    use crate::ui::pane::{Pane, PaneSlot};
+    use crate::ui::ssh_connect::TabHostForm;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn only_a_tab_on_an_ssh_host_is_offered_the_host_form(cx: &mut TestAppContext) {
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let saved = uuid::Uuid::new_v4();
+
+        // Held for the life of the test: dropping the daemon end of a pane's
+        // transport tears the pane down under the assertions.
+        let _ends = app.update_in(&mut vcx, |app, window, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            let mut profile = SshProfile::new("build-box");
+            profile.id = saved;
+            profile.user = "me".to_string();
+            profile.host = "build-box".to_string();
+            cfg.ssh_profiles = vec![profile];
+            cx.set_global(cfg);
+
+            let (local, a) = quiet_test_pane(1, window, cx);
+            let (dialled, b) = quiet_test_ssh_pane(2, window, cx);
+            let (from_host, c) = quiet_test_ssh_pane_of(3, Some(saved), window, cx);
+            for view in [local, dialled, from_host] {
+                app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            }
+            app.active = 0;
+            cx.notify();
+            (a, b, c)
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            // A local shell has no connection to edit, so the menu it opens is
+            // the one it always was.
+            assert_eq!(
+                app.tab_ssh_host_form(0, window, cx),
+                None,
+                "a local tab was offered an SSH host form"
+            );
+
+            // An address typed by hand is worth keeping, not editing: there is
+            // no saved host behind it yet, so the live session itself is what
+            // the form opens on.
+            let (form, label) = app
+                .tab_ssh_host_form(1, window, cx)
+                .expect("a tab dialled by hand offers to save the host");
+            let TabHostForm::Unsaved(spec) = form else {
+                panic!("a hand-dialled tab must offer its own session, not a bare address");
+            };
+            assert_eq!(
+                (spec.user.as_str(), spec.host.as_str(), spec.port),
+                ("me", "build-box", 22)
+            );
+            assert_eq!(label, t(L10nKey::SwitcherSaveAsHost));
+
+            // One opened from a saved host edits that host — by its id, so the
+            // form lands on the record the connection actually came from.
+            let (form, label) = app
+                .tab_ssh_host_form(2, window, cx)
+                .expect("a tab on a saved host offers to edit it");
+            assert_eq!(
+                form,
+                TabHostForm::Saved(RemoteTarget::Profile { id: saved })
+            );
+            assert_eq!(label, t(L10nKey::SwitcherEditHost));
+        });
+    }
+
+    #[gpui::test]
+    fn a_host_deleted_under_a_live_tab_is_offered_back_as_a_new_one(cx: &mut TestAppContext) {
+        // The id a pane carries is the one it was spawned with, and a quick
+        // connection is handed a fresh uuid on its way to the daemon. Trusting
+        // the id alone would open the form on a host that is not there.
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let _end = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, end) = quiet_test_ssh_pane_of(1, Some(uuid::Uuid::new_v4()), window, cx);
+            app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = 0;
+            cx.notify();
+            end
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (form, label) = app
+                .tab_ssh_host_form(0, window, cx)
+                .expect("an unresolvable profile id still names a host worth keeping");
+            let TabHostForm::Unsaved(spec) = form else {
+                panic!("a dangling profile id must not open a form on a host that is gone");
+            };
+            assert_eq!(
+                (spec.user.as_str(), spec.host.as_str(), spec.port),
+                ("me", "build-box", 22)
+            );
+            assert_eq!(label, t(L10nKey::SwitcherSaveAsHost));
+        });
+    }
+
+    /// The row says "Save as SSH Host", and a host saved without the proxy it
+    /// was reached through is a host that will not connect. What the session
+    /// was dialled with has to reach the form whole — an address is only the
+    /// part of it that fits in `user@host:port`.
+    #[gpui::test]
+    fn saving_a_hand_dialled_tab_keeps_what_it_was_dialled_with(cx: &mut TestAppContext) {
+        set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        let _end = app.update_in(&mut vcx, |app, window, cx| {
+            let mut spec: crate::daemon::protocol::NativeSshSpec = serde_json::from_str(
+                r#"{"host":"build-box","port":2222,"user":"me","auth_mode":"auto"}"#,
+            )
+            .expect("a minimal NativeSshSpec decodes");
+            spec.proxy = SshProxy::Socks {
+                host: "127.0.0.1".to_string(),
+                port: 1080,
+            };
+            spec.identity_files = vec!["/keys/id_ed25519".to_string()];
+            spec.login_script = vec!["tmux attach".to_string()];
+            let (view, end) = quiet_test_ssh_pane_with(1, spec, window, cx);
+            app.tabs.push(Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = 0;
+            cx.notify();
+            end
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (form, _) = app
+                .tab_ssh_host_form(0, window, cx)
+                .expect("a hand-dialled tab offers to save the host");
+            let TabHostForm::Unsaved(spec) = form else {
+                panic!("nothing here is saved, so nothing here is an edit");
+            };
+            assert_eq!(
+                spec.proxy,
+                SshProxy::Socks {
+                    host: "127.0.0.1".to_string(),
+                    port: 1080,
+                },
+                "the proxy the session was reached through was dropped on the way to the form"
+            );
+            assert_eq!(spec.identity_files, vec!["/keys/id_ed25519".to_string()]);
+            assert_eq!(spec.login_script, vec!["tmux attach".to_string()]);
+            assert_eq!(spec.port, 2222, "a non-default port is part of the address");
+        });
     }
 }
 
@@ -2306,5 +2875,271 @@ mod tests {
         assert_eq!(spec.program, "custom-shell");
         assert_eq!(spec.args, ["--login"]);
         assert!(!spec.args_are_tty7_defaults);
+    }
+
+    /// A tab of this window as the strip reads it: `tab_label` is nothing but
+    /// [`label_of`] over the [`TabView`](crate::ui::machine_mirror::TabView)
+    /// that [`Tab::label_view`](crate::ui::app::Tab::label_view) builds from
+    /// the live leaf, so naming one here climbs the same ladder a real tab
+    /// climbs. `title` is the placeholder `label_view` fills that slot with —
+    /// the machine tree puts a process name there, a live pane has only the
+    /// name it answers to before anything has spoken.
+    fn strip_tab() -> crate::ui::machine_mirror::TabView {
+        crate::ui::machine_mirror::TabView {
+            id: tty7_core::core::machine::TabId::new(),
+            name: None,
+            title: crate::terminal::view::DEFAULT_TITLE.to_string(),
+            osc_title: None,
+            cwd: None,
+            agent: None,
+            session_id: None,
+            last_task_title: None,
+            explicit_task_title: None,
+            status: None,
+            live: true,
+            panes: 1,
+        }
+    }
+
+    /// The home the paths below are measured against — named rather than read
+    /// off this machine, so the assertions do not depend on who is running
+    /// them (#580).
+    fn home() -> &'static Path {
+        Path::new("/Users/x")
+    }
+
+    #[test]
+    fn a_renamed_tab_keeps_its_name_over_every_other_answer() {
+        let mut tab = strip_tab();
+        tab.name = Some("  build  ".into());
+        tab.osc_title = Some("vim — main.rs".into());
+        tab.cwd = Some("/Users/x/repo/tty7".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "build");
+    }
+
+    #[test]
+    fn a_pane_showing_a_title_is_named_by_it_and_not_by_its_directory() {
+        let mut tab = strip_tab();
+        tab.osc_title = Some("vim — main.rs".into());
+        tab.cwd = Some("/Users/x/repo/tty7".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "vim — main.rs");
+
+        // Including the title an SSH pane answers to before the far shell has
+        // said anything (#438): `label_view` hands that up here, so a window
+        // full of them still reads as hosts rather than as directories.
+        tab.osc_title = Some("prod-web".into());
+        assert_eq!(label_of(&tab, 0, Some(home())), "prod-web");
+    }
+
+    /// #740: every shell tty7 ships integration for except PowerShell reports
+    /// its directory over OSC 7 and never sets a title, which left the tab
+    /// reading "tty7" — the app's own name — while the switcher listing the
+    /// very same tab showed the directory.
+    #[test]
+    fn a_pane_that_has_only_said_where_it_is_is_named_after_that() {
+        let mut tab = strip_tab();
+        tab.cwd = Some("/Users/x/repo/tty7".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "~/repo/tty7");
+        // Through the same shortener as a title, so a deep directory is cut
+        // where a deep path in a title would be.
+        tab.cwd = Some("/Users/x/repo/tty7/crates/tty7-core/src".into());
+        assert_eq!(
+            label_of(&tab, 0, Some(home())),
+            crate::ui::path_display::short_title("/Users/x/repo/tty7/crates/tty7-core/src", Some(home())),
+        );
+    }
+
+    /// A tooltip exists to say what the row had to leave out. One that repeats
+    /// the row is worse than none, and the label and the raw string it came
+    /// from are not comparable until both have been abbreviated: `~/repo` and
+    /// `/Users/x/repo` are the same name spelled two ways, and reading them as
+    /// a difference hung a tooltip on every tab named after a directory under
+    /// the home — which, after this change, is most of them.
+    #[test]
+    fn a_tab_named_after_a_directory_says_nothing_more_on_hover_unless_it_was_cut() {
+        let mut tab = strip_tab();
+        tab.cwd = Some("/Users/x/repo".into());
+
+        assert_eq!(label_of(&tab, 0, Some(home())), "~/repo");
+        assert_eq!(
+            tooltip_of(&tab, 0, Some(home())),
+            None,
+            "the row is already showing the whole directory"
+        );
+
+        // Cut down to its last three segments, so the head is worth having.
+        tab.cwd = Some("/Users/x/repo/crates/tty7-core/src".into());
+        assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty7-core/src");
+        assert_eq!(
+            tooltip_of(&tab, 0, Some(home())).as_deref(),
+            Some("~/repo/crates/tty7-core/src")
+        );
+
+        // The same holds for a title that happens to be a path — the rung this
+        // guard was already getting wrong before a directory could reach it.
+        let mut titled = strip_tab();
+        titled.osc_title = Some("/Users/x/repo".into());
+        assert_eq!(tooltip_of(&titled, 0, Some(home())), None);
+
+        // A shell integration's `user@host:` head is not in the label, so it
+        // is still worth spelling out.
+        titled.osc_title = Some("me@box:/Users/x/repo".into());
+        assert_eq!(
+            tooltip_of(&titled, 0, Some(home())).as_deref(),
+            Some("me@box:/Users/x/repo")
+        );
+    }
+
+    /// The one test that fails if any of the wiring is put back: a real tab,
+    /// built the way the window builds one, named through `tab_label` — and
+    /// checked against what the switcher renders from the machine tree's view
+    /// of that very same pane. Before this change the strip said "tty7" and
+    /// the switcher said the directory (#740).
+    #[gpui::test]
+    fn the_strip_names_a_titleless_pane_exactly_as_the_switcher_does(cx: &mut TestAppContext) {
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let _stream = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = crate::terminal::view::quiet_test_pane(1, window, cx);
+            // A pane that has reported where it is over OSC 7 and has never
+            // titled itself — every shell tty7 ships integration for except
+            // PowerShell.
+            view.read(cx)
+                .terminal
+                .seed_cwd(Some(std::path::PathBuf::from("/work/repo")));
+            app.tabs
+                .push(crate::ui::app::Tab::new(Pane::leaf(PaneSlot::Ready(view))));
+            app.active = app.tabs.len() - 1;
+            stream
+        });
+        vcx.background_executor.run_until_parked();
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let index = app.active;
+            let tab = &app.tabs[index];
+            let (view, home) = tab.label_view(Some(window), cx);
+            assert_eq!(view.osc_title, None, "the pane never titled itself");
+            assert_eq!(view.cwd.as_deref(), Some("/work/repo"));
+
+            let strip = app.tab_label(tab, index, Some(window), cx);
+            assert_eq!(strip, "/work/repo");
+            assert_ne!(
+                strip,
+                crate::terminal::view::DEFAULT_TITLE,
+                "and is not named after the app any more"
+            );
+
+            // The machine tree's reading of the same pane, which is all the
+            // switcher ever has: no title was seen, the cwd is the one above,
+            // and `title` is the foreground process name.
+            let from_tree = crate::ui::machine_mirror::TabView {
+                id: tab.tree_id.get(),
+                name: None,
+                title: "zsh".into(),
+                osc_title: None,
+                cwd: Some("/work/repo".into()),
+                agent: None,
+                session_id: None,
+                last_task_title: None,
+                explicit_task_title: None,
+                status: None,
+                live: true,
+                panes: 1,
+            };
+            assert_eq!(
+                strip,
+                label_of(&from_tree, index, home.as_deref()),
+                "the two columns name the same tab the same way"
+            );
+
+            assert_eq!(
+                app.tab_title_tooltip(tab, index, Some(window), cx),
+                None,
+                "and the row is showing the whole path, so it stays quiet"
+            );
+        });
+    }
+
+    #[test]
+    fn a_pane_with_nothing_to_say_falls_back_the_way_it_always_did() {
+        // No title and no directory: the placeholder, exactly as before.
+        let tab = strip_tab();
+        assert_eq!(label_of(&tab, 0, Some(home())), "tty7");
+
+        // And a tab holding no live pane at all is still numbered.
+        let mut empty = strip_tab();
+        empty.title = String::new();
+        assert!(label_of(&empty, 2, Some(home())).contains('3'));
+    }
+
+    /// The rung under the shortener, which the two surfaces reach holding
+    /// different things. A shell that has said who and where it is but not
+    /// *where* — `user@host:` with nothing after the colon — leaves nothing to
+    /// show, and whatever stands in has to be something the tab does not
+    /// already say: the switcher has the foreground process name, and a tab of
+    /// this window has only the placeholder, which is the answer #740 removed.
+    #[test]
+    fn a_title_that_shortens_away_never_puts_the_app_name_back_on_the_tab() {
+        let mut strip = strip_tab();
+        strip.osc_title = Some("user@host:".into());
+        assert_ne!(
+            label_of(&strip, 0, Some(home())),
+            crate::terminal::view::DEFAULT_TITLE
+        );
+        assert!(
+            label_of(&strip, 0, Some(home())).contains('1'),
+            "the numbered placeholder, which is what the strip showed here \
+             before it shared this renderer"
+        );
+
+        // The switcher arrives with a real process name in that slot, and it
+        // is still worth more than a number.
+        let from_tree = crate::ui::machine_mirror::TabView {
+            title: "zsh".into(),
+            osc_title: Some("user@host:".into()),
+            ..strip_tab()
+        };
+        assert_eq!(label_of(&from_tree, 0, Some(home())), "zsh");
+    }
+
+    /// A path is spelled the way the machine it is on spells it, and which
+    /// machine that is has nothing to do with which one tty7 is running on: a
+    /// remote pane reports POSIX to a Windows client, and a Windows pane
+    /// reports backslashes to a client that has never seen one (#580).
+    #[test]
+    fn a_cwd_is_cut_in_its_own_spelling_whichever_client_is_reading_it() {
+        let windows_home = Path::new(r"C:\Users\x");
+
+        // A Windows pane: shortened under its own home, and a path too deep to
+        // fit is rejoined with its own separator rather than with `/`.
+        let mut win = strip_tab();
+        win.cwd = Some(r"C:\Users\x\repo".into());
+        assert_eq!(label_of(&win, 0, Some(windows_home)), "~/repo");
+        win.cwd = Some(r"D:\work\a\b\proj".into());
+        assert_eq!(label_of(&win, 0, Some(windows_home)), r"…\a\b\proj");
+
+        // A remote pane's cwd is POSIX even when the client reading it is the
+        // Windows one: no drive to hang it off, no `~` borrowed from this
+        // machine's home, and no backslash anywhere in the answer.
+        let mut remote = strip_tab();
+        remote.cwd = Some("/srv/app".into());
+        assert_eq!(label_of(&remote, 0, Some(windows_home)), "/srv/app");
+        remote.cwd = Some("/home/deploy/app".into());
+        assert_eq!(
+            label_of(&remote, 0, Some(Path::new("/home/deploy"))),
+            "~/app",
+            "measured against the home of the host it is on, not of this one"
+        );
+
+        // The root of a filesystem is a directory like any other: a tab
+        // sitting in it says so, and says nothing more on hover.
+        let mut root = strip_tab();
+        root.cwd = Some("/".into());
+        assert_eq!(label_of(&root, 0, Some(home())), "/");
+        assert_eq!(tooltip_of(&root, 0, Some(home())), None);
     }
 }

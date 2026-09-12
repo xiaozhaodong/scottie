@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, Weak};
 use russh::client::Msg;
 use russh::{Channel, ChannelMsg};
 
+use crate::daemon::install::ProvedServer;
 use crate::daemon::protocol::WinSize;
 use crate::daemon::remote_link::RemoteEntry;
 
@@ -230,6 +231,9 @@ pub struct SshConnection {
     remote_forwards: RemoteForwardTable,
     alive: AtomicBool,
     remote_entry: tokio::sync::Mutex<Option<RemoteEntry>>,
+    /// What this connection's server probe proved, once it has. See
+    /// [`SshConnection::proved_server`].
+    proved_server: Mutex<Option<ProvedServer>>,
 }
 
 impl SshConnection {
@@ -244,6 +248,7 @@ impl SshConnection {
             remote_forwards,
             alive: AtomicBool::new(true),
             remote_entry: tokio::sync::Mutex::new(None),
+            proved_server: Mutex::new(None),
         })
     }
 
@@ -332,6 +337,38 @@ impl SshConnection {
 
     pub async fn set_remote_entry(&self, entry: RemoteEntry) {
         *self.remote_entry.lock().await = Some(entry);
+    }
+
+    /// Where this connection's server was proved to be, and the lock that
+    /// makes the second pane wait for the first rather than prove it again.
+    ///
+    /// The memo lives on the connection rather than beside its key, and that
+    /// is the whole of the invalidation story for a reconnect: a dropped or
+    /// evicted link is a dropped `SshConnection`, and the one dialled in its
+    /// place starts with an empty slot. Nothing has to remember to forget.
+    /// What does have to remember is anything that changes the server *over
+    /// there* while the link stays up — see
+    /// [`crate::daemon::install::forget_remote_server`].
+    ///
+    /// A blocking `Mutex` on purpose: the probe behind it is a chain of
+    /// blocking SSH round trips run on a blocking thread, and a pane that
+    /// arrives mid-install wants to wait for that install rather than start a
+    /// second one.
+    pub(crate) fn proved_server(&self) -> std::sync::MutexGuard<'_, Option<ProvedServer>> {
+        self.proved_server
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Where this connection's server was last proved to be, or `None` if the
+    /// next pane would have to go and ask — including while it is being asked,
+    /// since this never waits. A hint for callers deciding whether a failure is
+    /// worth re-proving; the answer itself comes from `ensure_remote_server`.
+    pub fn remembered_server(&self) -> Option<String> {
+        self.proved_server
+            .try_lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|proved| proved.binary.clone()))
     }
 
     pub async fn add_remote_forward(

@@ -55,7 +55,7 @@ Scottie 与上游 tty7 构建共享内部 daemon 和配置路径，请不要同�
 
 | | |
 |---|---|
-| **Agent 感知** | 逐 pane 识别 19 个 CLI agent · 状态点 · 通知 · 分支 + diff · 需要输入时托盘图标提醒 · 重启后续上会话 · 侧边栏按仓库分组 |
+| **Agent 感知** | 逐 pane 识别 20 个 CLI agent · 状态点 · 通知 · 分支 + diff · 需要输入时托盘图标提醒 · 重启后续上会话 · 侧边栏按仓库分组 |
 | **CLI + Skills** | 安装包自带 `tty7` CLI · [agent skill](skills/tty7/SKILL.md) · `run` 转发命令输出并原样返回退出码 · `split` · `send` · `wait --until free` · `capture` |
 | **编辑器级输入** | 从历史推出影子建议 · Tab 补全附带说明 · 语法高亮 · 多行编辑 · 点击定位光标 · <kbd>⌃ R</kbd> 模糊搜索历史 |
 | **窗口** | 标签页与分屏 · <kbd>⌘ P</kbd> 命令面板 · <kbd>⌘ F</kbd> 回滚搜索 · <kbd>⌘ J</kbd> 侧栏列出进程树和监听端口 · 15 套主题，也能写自己的 YAML 或导入 iTerm2 配色 · 输入法 |
@@ -71,12 +71,13 @@ Scottie 与上游 tty7 构建共享内部 daemon 和配置路径，请不要同�
 **Fork** 两个条件都要：agent 自己提供 fork 命令，且 hook 已装——Scottie 得知道 fork 的是哪个会话。
 
 <details>
-<summary>19 个 agent 的完整支持矩阵</summary>
+<summary>20 个 agent 的完整支持矩阵</summary>
 
 | Agent | 识别 | 状态 · 重启恢复 | Fork |
 |---|:-:|:-:|:-:|
 | **Claude Code** | ✓ | ✓ | ✓ |
 | **Codex** | ✓ | ✓ | ✓ |
+| **TraeCode** | ✓ | ✓ | ✓ |
 | **Grok** | ✓ | ✓ | ✓ |
 | **OpenCode** | ✓ | ✓ | ✓ |
 | **Oh My Pi** | ✓ | ✓ | ✓ |

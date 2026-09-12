@@ -85,8 +85,79 @@ shell:
 - **Settings → Input → Prompt → History search**
 
 If they do nothing at all in a particular pane, the shell there probably has no
-[shell integration](/reference/shell-integration) — nushell, elvish, xonsh and
-friends run fine but do not get the prompt layer.
+[shell integration](/reference/shell-integration) — elvish, xonsh and friends
+run fine but do not get the prompt layer.
+
+## The directory stopped following my shell
+
+The Files panel, new splits, and the sidebar's repo grouping all follow the
+directory the pane's shell reports (`OSC 7`). If the pane is frozen on one
+directory while you `cd` around, something in the pane is not reporting it.
+
+The usual cause is a shell you started by hand. tty7 injects its
+[shell integration](/reference/shell-integration) into the shell it launches
+for the pane, and nothing else: run `zsh` at a bash prompt and that nested
+shell has none. Locally you rarely notice, because oh-my-zsh reports the
+directory itself — but the cwd reporter sits at the end of its
+`lib/termsupport.zsh`, behind
+
+```zsh
+if [[ -n "$INSIDE_EMACS" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
+  return
+fi
+```
+
+so over SSH, where sshd sets those, sourcing stops there and the reporter is
+never defined — only the title hooks above that line still run. A nested zsh
+on a remote host therefore reports nothing, from either side, and the pane
+keeps showing wherever the outer shell was.
+
+**Make it the shell tty7 starts.** On the remote host:
+
+```sh
+chsh -s /bin/zsh      # then reconnect
+```
+
+tty7 asks the host for `$SHELL` at connect time and bootstraps *that* shell,
+so this is what moves the integration into your zsh — oh-my-zsh keeps working
+beside it. Starting `zsh` from a login script, or `exec zsh` from your
+`.bashrc`, does not help: both run after (or instead of) the shell tty7 set
+up.
+
+**Or report the directory yourself.** If you cannot change the login shell,
+add this to the remote `~/.zshrc` — it restores directory tracking only, not
+prompt marks or command status:
+
+```zsh
+# Report the working directory to tty7 (OSC 7).
+autoload -Uz add-zsh-hook
+__tty7_cwd() { printf '\e]7;file://%s%s\a' "${HOST:-localhost}" "${PWD//\%/%25}" }
+add-zsh-hook precmd __tty7_cwd
+```
+
+It is safe to leave in place afterwards: when tty7 *is* integrating that
+shell, the two hooks simply report the same directory twice. The bash
+equivalent is `PROMPT_COMMAND`:
+
+```bash
+__tty7_cwd() { printf '\e]7;file://%s%s\a' "${HOSTNAME:-localhost}" "${PWD//%/%25}"; }
+PROMPT_COMMAND="__tty7_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+```
+
+Two other reasons a pane never reports its directory:
+
+- **The shell is not one tty7 integrates.** It injects into zsh, bash, fish,
+  PowerShell and nushell locally, and into zsh, bash and fish over SSH — a
+  remote host whose `$SHELL` is anything else gets no bootstrap, silently.
+- **You gave the shell your own arguments** in `shell` or a `custom_shells`
+  entry, which turns the injection off by design.
+
+Where tty7 can see the pane's processes it falls back to reading the
+foreground process's working directory, which is why an unintegrated shell in
+a **remote workspace** mostly keeps up — that fallback is a poll, though,
+sampled while the pane produces output, so it can lag a `cd` until the pane
+writes again. There is no such fallback for an **SSH pane** (the processes are
+on the far end) or for a local pane on **Windows**.
 
 ## <kbd>⌥ B</kbd> types `∫` instead of moving a word
 

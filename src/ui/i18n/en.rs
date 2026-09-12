@@ -446,7 +446,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsMouseZoomOff => "Off",
         L10nKey::SettingsReportMouseToApps => "Report mouse to apps",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local."
+            "Let full-screen apps (vim, tmux) handle clicks and scrolling; hold Shift to keep a gesture local. \
+             Off keeps clicks from reaching them and turns the wheel into arrow keys."
         }
         L10nKey::SettingsBell => "Bell",
         L10nKey::SettingsTerminalBell => "Terminal bell",
@@ -458,9 +459,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsDetectUrlsDesc => {
             "Underline links on hover and open them on {modifier}-click."
         }
-        L10nKey::ForwardSshLoopbackLinks => "Forward SSH loopback links",
+        L10nKey::ForwardSshLoopbackLinks => "Forward remote ports",
         L10nKey::SettingsForwardSshLoopbackLinksDesc => {
-            "When a pane is in SSH, open localhost links through a temporary port forward."
+            "Over SSH, forward the ports a pane starts serving and open its localhost links here."
         }
         L10nKey::SettingsOpenFilesInternal => "Built-in editor",
         L10nKey::SettingsOpenFilesSystem => "Default app",
@@ -643,6 +644,17 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAboutDesc1 => {
             "A terminal workbench: persistent sessions, remote work, agents."
         }
+        L10nKey::SettingsDefaultTerminal => "Default terminal",
+        L10nKey::SettingsDefaultTerminalDesc => {
+            "Make Scottie the macOS default terminal for Unix executables, SSH links, and man-page links. Scottie can also open folders and scripts, but does not replace Finder's folder handler. Apps that choose their own terminal may ignore this setting."
+        }
+        L10nKey::SettingsDefaultTerminalSet => "Set as Default Terminal",
+        L10nKey::SettingsDefaultTerminalSetSuccess => {
+            "Scottie is now the default handler for supported terminal files and links."
+        }
+        L10nKey::SettingsDefaultTerminalSetFailed => {
+            "Could not set Scottie as the default terminal: {error}"
+        }
         L10nKey::SettingsVersion => "Version",
         L10nKey::SettingsUpdates => "Updates",
         L10nKey::SettingsUpdateAndRelaunch => "Update and relaunch",
@@ -746,6 +758,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
+        L10nKey::SettingsAgentTraeCode => "TraeCode",
         L10nKey::SettingsAgentCopilotCli => "Copilot CLI",
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
@@ -756,6 +769,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentQwenCode => "Qwen Code",
         L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
+        L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -776,6 +790,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "agent integration hooks install uninstall status rich session working waiting tab bar sidebar badge claude"
         }
         L10nKey::SettingsSearchCodexKeywords => "agent integration hooks install openai codex",
+        L10nKey::SettingsSearchTraeCodeKeywords => {
+            "agent integration hooks install trae code traecli traex"
+        }
         L10nKey::SettingsSearchCommandLineToolKeywords => {
             "command line tool cli tty7 scottie path shell command install symlink terminal iterm agent script"
         }
@@ -806,7 +823,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchFontLigaturesKeywords => "typography glyph fira",
         L10nKey::SettingsSearchFontSizeKeywords => "typography text bigger smaller zoom",
         L10nKey::SettingsSearchForwardSshLoopbackLinksKeywords => {
-            "ssh remote port tunnel localhost forward links"
+            "ssh remote port tunnel localhost forward links ports autoforward detect"
         }
         L10nKey::SettingsSearchGrokBuildKeywords => {
             "agent integration hooks install xai grok build"
@@ -854,6 +871,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchKimiCodeKeywords => {
             "agent integration hooks install kimi code kimi-code moonshot"
         }
+        L10nKey::SettingsSearchQoderCLIKeywords => "agent integration hooks install qoder qodercli",
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
             "ssh tunnel local remote dynamic socks forward rule"
@@ -964,7 +982,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Could not upload the pasted image to {host}: {error}"
         }
         L10nKey::LinkFileOpenFailed => "Could not open {path}: {error}",
-        L10nKey::ForwardPanelTitle => "Forwards",
         L10nKey::ForwardDisconnected => "Disconnected",
         L10nKey::ForwardDisconnectedFrom => "Disconnected from {host}",
         L10nKey::SshEditProfile => "Edit connection…",
@@ -977,6 +994,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ForwardToLabel => "to",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "Add",
+        L10nKey::ForwardPortLabel => "Remote port",
+        L10nKey::ForwardPortHere => "opens at localhost:{port}",
+        L10nKey::ForwardNeedsPort => "A port is a number from 1 to 65535.",
+        L10nKey::ForwardAdvancedToggle => "Advanced",
+        L10nKey::ForwardSimpleToggle => "Simple",
         L10nKey::ForwardRequestFailed => "Could not reach the session — nothing changed.",
         L10nKey::FileTreePlaceholderFileName => "file name",
         L10nKey::FileTreePlaceholderFolderName => "folder name",
@@ -1067,6 +1089,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::PanelProcessesSubtitle => "Processes",
         L10nKey::PanelPortsSubtitle => "Ports",
+        L10nKey::PanelPortsUnsupported => "That machine's tty7-server is too old to list ports.",
+        L10nKey::PanelPortsProbeFailed => "Couldn't check what this pane is listening on.",
+        L10nKey::PanelPortsRestricted => {
+            "Something here runs as another user, whose ports aren't visible."
+        }
+        L10nKey::PanelLatency => "latency",
+        L10nKey::PortAutoForwarded => "Remote :{port} is now http://localhost:{local}",
         L10nKey::PanelCwd => "cwd",
         L10nKey::PanelShell => "shell",
         L10nKey::PanelSsh => "ssh",
@@ -1219,6 +1248,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffUntrackedSummary => "{count} untracked",
         L10nKey::DiffViewSplit => "Side by Side",
         L10nKey::DiffViewUnified => "Unified",
+        L10nKey::DiffCopySelection => "Copy Selected Lines",
         L10nKey::PendingConnecting => "Connecting to {machine}…",
         L10nKey::PendingUnreachable => "Could not reach {machine}",
         L10nKey::WorktreePromptNeedsName => "The worktree needs a name",
@@ -1350,7 +1380,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No running coding agent found — start one (claude, codex, …) in a pane first."
         }
         L10nKey::SwitcherThisComputer => "This Computer",
-        L10nKey::SwitcherRestartingServer => "Restarting Scottie's server…",
+        L10nKey::SwitcherStartingServer => "Starting Scottie's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading Scottie's server… {done} / {total}"
         }
@@ -1418,6 +1448,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdGroupAgents => "Agents",
         L10nKey::CmdGroupApplication => "Application",
         L10nKey::CmdNewTab => "New Tab",
+        L10nKey::CmdNewWindow => "New Window",
         L10nKey::CmdNewWorktreeTab => "New Worktree Tab…",
         L10nKey::CmdNewWorktreeTabSubtitle => "isolated checkout on a fresh branch",
         L10nKey::CmdRenameTab => "Rename Tab…",
@@ -1445,6 +1476,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdForkSessionSubtitle => "branch this agent session into a new tab",
         L10nKey::CmdMarkTabAsUnread => "Mark Tab as Unread",
         L10nKey::CmdClosePaneTab => "Close Pane / Tab",
+        L10nKey::CmdCloseWindow => "Close Window",
+        L10nKey::CmdCloseWindowSubtitle => "shells keep running",
         L10nKey::CmdCloseOtherTabs => "Close Other Tabs",
         L10nKey::CmdCloseTabsToTheRight => "Close Tabs to the Right",
         L10nKey::CmdReopenClosedTab => "Reopen Closed Tab",
@@ -1521,7 +1554,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdRestartServer => "Restart Server…",
         L10nKey::CmdRestartServerSubtitle => "ends every running shell; layout is kept",
         L10nKey::CmdQuitTty7 => "Quit Scottie",
-        L10nKey::CmdQuitTty7Subtitle => "shells keep running",
+        L10nKey::CmdQuitTty7Subtitle => "stops the server; every running shell ends",
         L10nKey::CmdQuickConnect => "Connect to \"{target}\"",
         L10nKey::CmdQuickConnectSaveProfile => "Save \"{target}\" as profile…",
         L10nKey::CmdRecent => "Recent",
@@ -1765,6 +1798,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppMenuFocusPreviousPane => "Focus Previous Pane",
         L10nKey::AppMenuZoomPane => "Zoom Pane",
         L10nKey::AppMenuClearScrollback => "Clear Scrollback",
+        L10nKey::AppMenuOpenLink => "Open",
+        L10nKey::AppMenuRevealInFinder => "Show in Finder",
+        L10nKey::AppMenuRevealInFolder => "Show Containing Folder",
+        L10nKey::AppMenuCopyLinkPath => "Copy Path",
         L10nKey::AppMenuDocumentation => "Scottie Documentation",
         L10nKey::AppMenuKeyboardShortcuts => "Keyboard Shortcuts",
         L10nKey::AppMenuJoinDiscord => "Join the Discord",
@@ -1787,6 +1824,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabTooltipHideSidebar => "Hide Sidebar",
         L10nKey::TabTooltipHideDetailPanel => "Hide Detail Panel",
         L10nKey::TabTooltipShowDetailPanel => "Show Detail Panel",
+        L10nKey::TabTooltipZoomed => "Pane zoomed — other panes hidden",
         L10nKey::TabMenuLocalShells => "Local",
         L10nKey::TabMenuAddHost => "Add SSH Host…",
         L10nKey::TabMenuAllHosts => "All SSH Hosts…",
@@ -1794,6 +1832,11 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TabUnnamedShell => "Shell {n}",
         L10nKey::ShellDefault => "default",
         L10nKey::SidebarScratchGroup => "Scratch",
+        L10nKey::SidebarMoveToGroup => "Move to Group",
+        L10nKey::SidebarNewGroup => "New Group…",
+        L10nKey::SidebarAutoGroup => "Group Automatically",
+        L10nKey::SidebarNewGroupName => "New Group",
+        L10nKey::SidebarRenameGroup => "Rename Group",
         L10nKey::TabContextCloseTab => "Close Tab",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",

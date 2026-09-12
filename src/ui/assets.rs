@@ -49,6 +49,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/refresh.svg" => include_bytes!("../../assets/icons/refresh.svg"),
         "icons/agents/claude.svg" => include_bytes!("../../assets/icons/agents/claude.svg"),
         "icons/agents/codex.svg" => include_bytes!("../../assets/icons/agents/codex.svg"),
+        "icons/agents/traecli.svg" => include_bytes!("../../assets/icons/agents/traecli.svg"),
         "icons/agents/gemini.svg" => include_bytes!("../../assets/icons/agents/gemini.svg"),
         "icons/agents/amp.svg" => include_bytes!("../../assets/icons/agents/amp.svg"),
         "icons/agents/opencode.svg" => include_bytes!("../../assets/icons/agents/opencode.svg"),
@@ -61,6 +62,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/agents/omp.svg" => include_bytes!("../../assets/icons/agents/omp.svg"),
         "icons/agents/qwen.svg" => include_bytes!("../../assets/icons/agents/qwen.svg"),
         "icons/agents/kimi.svg" => include_bytes!("../../assets/icons/agents/kimi.svg"),
+        "icons/agents/qodercli.svg" => include_bytes!("../../assets/icons/agents/qodercli.svg"),
         _ => return None,
     };
     Some(bytes)

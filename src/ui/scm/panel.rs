@@ -1255,12 +1255,18 @@ impl Tty7App {
             },
             move |this, out, cx| {
                 this.scm.root_lookups.remove(&key);
+                // In the spelling everything else keys by: Git for Windows
+                // answers `C:/Users/…` and this root is what the panel, the
+                // commit detail and `ScmData` all compare against a path the
+                // OS spelled. Only for a repository on this machine — a remote
+                // root is native over there and every write below runs `git`
+                // from it on that box. See `tty7_core::core::path_spelling`.
                 let root = out
                     .as_deref()
                     .and_then(|s| s.lines().next())
                     .map(str::trim)
                     .filter(|l| !l.is_empty())
-                    .map(PathBuf::from);
+                    .map(|l| tty7_core::core::path_spelling::spelling_on_buf(id, l));
                 this.scm.roots.insert(key, (Instant::now(), root));
                 cx.notify();
             },
@@ -2888,7 +2894,7 @@ mod tests {
 /// `default_global`, which fires the global observers whether or not anything
 /// changed, and it is called every frame. A watcher that notified on every one
 /// of those would request a frame from inside a frame and never stop.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod render_idle_gpui_tests {
     use super::*;
     use crate::daemon::protocol::DaemonMsg;
@@ -2927,7 +2933,7 @@ mod render_idle_gpui_tests {
     ) -> (
         Entity<Tty7App>,
         VisualTestContext,
-        std::os::unix::net::UnixStream,
+        crate::daemon::transport::Stream,
     ) {
         let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
         DaemonMsg::Cwd(root.to_path_buf())
@@ -2974,6 +2980,17 @@ mod render_idle_gpui_tests {
         render_probe::draws()
     }
 
+    /// The only test in this module that waits on `repo.root`, and so the only
+    /// one Windows cannot run: since #796 that root is keyed by one spelling
+    /// and carries a `Disk` prefix, while the pane's cwd came out of `scratch`
+    /// above — `std::fs::canonicalize`, so `\\?\C:\Users\—` and a
+    /// `VerbatimDisk` prefix — and the equality below never holds between the
+    /// two. The slashes are the red herring; `Path` compares by component, so
+    /// `C:/x` and `C:\x` are equal. Spelling `scratch`'s answer the way
+    /// `tty7_core::core::path_spelling` does should lift this, in a change
+    /// that can show it green. Its sibling keys off the pane's cwd instead,
+    /// and runs everywhere.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_settled_source_control_panel_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();

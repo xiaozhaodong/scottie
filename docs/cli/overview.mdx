@@ -93,6 +93,16 @@ stripping escapes yourself:
 
 Use `--plain` whenever a human would want to read the output.
 
+When all you want is how the last command ended, ask for that much:
+
+```bash
+tty7 capture %83 --plain --tail 5
+```
+
+`--tail N` keeps the last N lines of the answer, counted after `--plain` has
+resolved the wraps — so no pipe through `tail(1)`, which is one less thing to
+have on PATH.
+
 <Warning>
   A screen is a rectangle. Whatever scrolled off the top is gone, and an exit
   code was never on it. When you want the *answer* rather than the *view*, have

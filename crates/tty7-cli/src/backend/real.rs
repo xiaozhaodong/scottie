@@ -184,11 +184,7 @@ impl Backend for RealBackend {
             }
         }
         let _ = session.detach();
-        if !scrollback {
-            // Only the newest segment, which is the one holding the screen.
-            segments.drain(..segments.len().saturating_sub(1));
-        }
-        Ok(segments)
+        Ok(what_was_asked_for(segments, scrollback))
     }
 
     fn procs(&mut self, pane: u64) -> Result<PaneProcs> {
@@ -286,6 +282,47 @@ impl Backend for RealBackend {
         }
         Ok(())
     }
+}
+
+/// What the caller asked for, out of everything the replay carried.
+///
+/// A segment with no bytes is not a screen — it is the placeholder the daemon's
+/// ring leaves behind on a resize. `ReplayRing::resize` seals the segment that
+/// holds the output and pushes an empty one at the new geometry, and the replay
+/// sends every segment it has, so the newest segment of a pane that has been
+/// resized since it last printed anything is that empty placeholder. Keeping
+/// "the last one" then answered a live pane with zero bytes and exit 0 —
+/// byte-identical to a pane that had genuinely never printed (#841). A pane
+/// restored from disk lands in the same state: seeding the ring ends in a
+/// resize too.
+///
+/// An empty segment carries nothing in either form, so they are dropped on both
+/// paths rather than only on the newest-segment one: it costs no output and
+/// keeps `--scrollback` and the default describing the same bytes. The daemon
+/// keeps sending them — its trailing `Size` is how an attaching client learns
+/// the pane's current geometry, which is not ours to take away from here.
+///
+/// This makes the zero-byte answer impossible; it does not make the default
+/// form robust to a resize, and it cannot. On Unix a resize raises SIGWINCH and
+/// the shell repaints its prompt into the new segment, so the newest segment is
+/// no longer empty — it holds the repaint, and the output is still stranded in
+/// the segment sealed behind it. Nothing in the byte stream distinguishes a
+/// prompt repaint from output the pane meant, so no rule here can tell which
+/// side of the boundary the answer is on. The boundary itself is the flaw: the
+/// default form's unit is the last resize, an event in the window rather than
+/// in the pane. Moving it means redefining what the default returns — the last
+/// screenful of the whole ring, say — which would shrink what every caller with
+/// a never-resized pane gets today, so it is left alone and documented instead.
+fn what_was_asked_for(segments: Vec<CaptureSegment>, scrollback: bool) -> Vec<CaptureSegment> {
+    let mut segments: Vec<CaptureSegment> = segments
+        .into_iter()
+        .filter(|segment| !segment.bytes.is_empty())
+        .collect();
+    if !scrollback {
+        // Only the newest segment, which is the one holding the screen.
+        segments.drain(..segments.len().saturating_sub(1));
+    }
+    segments
 }
 
 fn timed_out(e: &std::io::Error) -> bool {
@@ -388,6 +425,56 @@ mod tests {
             kind: kind.into(),
             connected,
         }
+    }
+
+    fn seg(cols: u16, bytes: &[u8]) -> CaptureSegment {
+        CaptureSegment {
+            size: WinSize {
+                cols,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn the_empty_segment_a_resize_leaves_is_not_the_newest_screen() {
+        // What a resized pane replays: everything it printed, sealed at the old
+        // width, then the empty segment the ring opened at the new one. Keeping
+        // the last segment verbatim returned that empty one, which is how
+        // `capture` answered a live pane with nothing at all (#841).
+        let replay = vec![seg(100, b"$ make\r\nok\r\n"), seg(80, b"")];
+        assert_eq!(
+            what_was_asked_for(replay.clone(), false),
+            vec![seg(100, b"$ make\r\nok\r\n")]
+        );
+        assert_eq!(
+            what_was_asked_for(replay, true),
+            vec![seg(100, b"$ make\r\nok\r\n")],
+            "an empty segment is nothing in either form, so --scrollback drops it too"
+        );
+    }
+
+    #[test]
+    fn output_after_the_resize_is_still_what_the_newest_screen_means() {
+        let replay = vec![seg(100, b"before\r\n"), seg(80, b"after\r\n")];
+        assert_eq!(
+            what_was_asked_for(replay.clone(), false),
+            vec![seg(80, b"after\r\n")],
+            "the fix must not reach past a segment that does hold the screen"
+        );
+        assert_eq!(what_was_asked_for(replay.clone(), true), replay);
+    }
+
+    #[test]
+    fn a_pane_that_never_printed_still_replays_as_nothing() {
+        // The other half of the contract: a genuinely blank pane must keep
+        // answering with nothing, or the new signal would say "bytes were
+        // dropped" for every freshly spawned pane.
+        assert!(what_was_asked_for(vec![seg(80, b"")], false).is_empty());
+        assert!(what_was_asked_for(Vec::new(), true).is_empty());
     }
 
     #[test]

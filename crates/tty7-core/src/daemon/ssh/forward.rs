@@ -237,6 +237,17 @@ fn loop_exit_status(exit: LoopExit) -> ForwardStatus {
     )
 }
 
+/// The reason a just-started forward is not listening, if it is not.
+///
+/// Only ever a bind failure at this point: everything else that can stop a
+/// forward happens later, in the accept loop.
+fn bind_error(status: &SharedStatus) -> Option<String> {
+    match &*status.lock().unwrap() {
+        ForwardStatus::Error(e) => Some(e.clone()),
+        ForwardStatus::Listening => None,
+    }
+}
+
 /// A forward that never got as far as a listening socket. It has no task, so
 /// nothing will ever move it off this status.
 fn bind_failed(rule: &SshForwardRule, e: io::Error) -> SharedStatus {
@@ -611,18 +622,36 @@ impl SshForwardRegistry {
         if let Some(local_port) = self.find_auto_local(owner, remote_host, remote_port) {
             return Ok(LoopbackForward { local_port });
         }
-        let rule = SshForwardRule {
+        let mut rule = SshForwardRule {
             kind: SshForwardKind::Local,
             bind_host: "127.0.0.1".to_string(),
-            bind_port: 0,
+            // The far side's own number first. An automatic forward used to
+            // always bind 0, so the remote's :3000 came out on a different
+            // five-digit port every session — an address nobody could predict,
+            // guess or bookmark. When the number is free here, keeping it makes
+            // localhost:3000 mean what it says.
+            bind_port: remote_port,
             target_host: remote_host.to_string(),
             target_port: remote_port,
             description: Some(format!("localhost link → :{remote_port}")),
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (bind_port, status, cancel) = self.start_local(&conn, &rule).await;
-        if let ForwardStatus::Error(e) = &*status.lock().unwrap() {
-            return Err(io::Error::other(e.clone()));
+        let (mut bind_port, mut status, mut cancel) = self.start_local(&conn, &rule).await;
+        // Taken here, or a privileged port this process may not bind. Neither
+        // is a reason to fail: 0 asks the OS for one that works, which is what
+        // this did before it tried for the matching number.
+        if let Some(e) = bind_error(&status) {
+            if rule.bind_port == 0 {
+                return Err(io::Error::other(e));
+            }
+            log::debug!(
+                "loopback forward could not keep :{remote_port} locally ({e}); asking the OS for a port"
+            );
+            rule.bind_port = 0;
+            (bind_port, status, cancel) = self.start_local(&conn, &rule).await;
+            if let Some(e) = bind_error(&status) {
+                return Err(io::Error::other(e));
+            }
         }
         let entry = ForwardEntry {
             id,

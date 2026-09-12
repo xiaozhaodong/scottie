@@ -45,12 +45,24 @@ struct FakeRemote {
     daemon_running: Mutex<bool>,
     running_exe: Mutex<Option<String>>,
     launch_works: bool,
+    /// What a launch leaves behind on the far end: whatever the daemon printed
+    /// on its way up, and — once the wrapper has watched it exit — the status
+    /// it ended on. A daemon still running has written no status yet.
+    startup_log: Mutex<String>,
+    startup_exit: Mutex<Option<String>>,
+    /// The nonce the launch in flight stamped its status with.
+    startup_nonce: Mutex<String>,
+    dies_with: Option<(String, String)>,
     speaks: Mutex<HashMap<String, RemoteProtocol>>,
     installed_speaks: Option<RemoteProtocol>,
     /// The stop command comes back as a failure and the daemon keeps serving —
     /// a login shell that could not read the script, which is the shape the
     /// no-`/proc` bug took on every Mac.
     stop_fails: bool,
+    /// SFTP metadata reads — the realpath behind `home_dir` and every `stat`.
+    /// The journal carries commands and writes; these are the other half of
+    /// what a probe spends on the wire, and #695 is a count of both.
+    sftp_reads: Mutex<usize>,
 }
 
 impl FakeRemote {
@@ -72,14 +84,43 @@ impl FakeRemote {
             daemon_running: Mutex::new(false),
             running_exe: Mutex::new(None),
             launch_works: true,
+            startup_log: Mutex::new(String::new()),
+            startup_exit: Mutex::new(None),
+            startup_nonce: Mutex::new(String::new()),
+            dies_with: None,
             speaks: Mutex::new(HashMap::new()),
             installed_speaks: Some(ours()),
             stop_fails: false,
+            sftp_reads: Mutex::new(0),
         }
     }
 
     fn refusing_to_stop(mut self) -> Self {
         self.stop_fails = true;
+        self
+    }
+
+    /// A daemon that starts, complains, and exits — the shape a machine whose
+    /// control socket cannot be bound actually takes.
+    fn dying_at_startup(mut self, status: &str, said: &str) -> Self {
+        self.launch_works = false;
+        self.dies_with = Some((status.to_string(), said.to_string()));
+        self
+    }
+
+    /// A daemon that finds another server already holding the lock and exits
+    /// cleanly. Nobody failed; this one simply is not the server.
+    fn standing_down(mut self, said: &str) -> Self {
+        self.launch_works = false;
+        self.dies_with = Some(("0".to_string(), said.to_string()));
+        self
+    }
+
+    /// A daemon that stays up and never answers. Nothing writes an exit
+    /// status, so the wait can only end at its deadline.
+    fn hanging_at_startup(mut self, said: &str) -> Self {
+        self.launch_works = false;
+        *self.startup_log.lock().unwrap() = said.to_string();
         self
     }
 
@@ -147,10 +188,28 @@ impl FakeRemote {
             .filter(|j| !matches!(j, Journal::Exec(_)))
             .collect()
     }
+
+    /// The commands this remote was asked to run, in order.
+    fn execs(&self) -> Vec<String> {
+        self.journal()
+            .into_iter()
+            .filter_map(|j| match j {
+                Journal::Exec(cmd) => Some(cmd),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Everything that would have crossed the wire: commands, SFTP metadata
+    /// reads, and the writes an install makes.
+    fn round_trips(&self) -> usize {
+        self.journal().len() + *self.sftp_reads.lock().unwrap()
+    }
 }
 
 impl RemoteOps for FakeRemote {
     fn home_dir(&self) -> Result<String, String> {
+        *self.sftp_reads.lock().unwrap() += 1;
         Ok(HOME.to_string())
     }
 
@@ -193,6 +252,21 @@ impl RemoteOps for FakeRemote {
             *self.running_exe.lock().unwrap() = None;
             return ok("");
         }
+        if let Some(path) = cmd
+            .strip_prefix("cat ")
+            .and_then(|rest| rest.strip_suffix(" 2>/dev/null"))
+            && path.trim_matches('\'').ends_with(".startup.exit")
+        {
+            return ok(&self
+                .startup_exit
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_default());
+        }
+        if cmd.starts_with("tail -c") && cmd.contains(".startup.log") {
+            return ok(&self.startup_log.lock().unwrap());
+        }
         if cmd.contains("--stdio --bridge") {
             let running = *self.daemon_running.lock().unwrap();
             return Ok(ExecOutput {
@@ -207,12 +281,27 @@ impl RemoteOps for FakeRemote {
         }
         if cmd.contains("--daemon") {
             self.journal.lock().unwrap().push(Journal::Launch);
+            // The wrapper truncates the status file before starting and stamps
+            // what it writes with this launch's nonce, so a launch in flight is
+            // always distinguishable from one that ended — and from the launch
+            // before it.
+            let nonce = cmd
+                .split_whitespace()
+                .find(|word| word.len() == 32 && word.chars().all(|c| c.is_ascii_hexdigit()))
+                .unwrap_or_default()
+                .to_string();
+            *self.startup_nonce.lock().unwrap() = nonce;
+            *self.startup_exit.lock().unwrap() = None;
             if self.launch_works {
                 *self.daemon_running.lock().unwrap() = true;
                 let mut exe = self.running_exe.lock().unwrap();
                 if exe.is_none() {
                     *exe = Some(BINARY.to_string());
                 }
+            } else if let Some((status, said)) = &self.dies_with {
+                let nonce = self.startup_nonce.lock().unwrap().clone();
+                *self.startup_log.lock().unwrap() = said.clone();
+                *self.startup_exit.lock().unwrap() = Some(format!("{nonce} {status}"));
             }
             return ok("");
         }
@@ -224,6 +313,7 @@ impl RemoteOps for FakeRemote {
     }
 
     fn stat(&self, path: &str) -> Result<Option<RemoteStat>, String> {
+        *self.sftp_reads.lock().unwrap() += 1;
         Ok(self.file(path).map(|f| RemoteStat {
             size: f.bytes.len() as u64,
             mode: f.mode,
@@ -844,6 +934,133 @@ fn a_daemon_that_never_answers_is_an_error() {
     }
 }
 
+/// A daemon that exited will not start answering, so there is nothing to wait
+/// for. The old loop polled the full timeout anyway, and then reported the
+/// timeout — which reads as "the far end is slow" when the truth was that the
+/// server had already given up, with a reason, in the first fraction of a
+/// second.
+#[test]
+fn a_daemon_that_died_at_startup_fails_at_once_and_in_its_own_words() {
+    let remote = FakeRemote::new().dying_at_startup(
+        "1",
+        "tty7-server: control listener unavailable: Permission denied (os error 13)\n",
+    );
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@broken-box:22")
+        .run()
+        .unwrap_err();
+
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        reason.contains("exited with status 1"),
+        "the status the daemon ended on: {reason}"
+    );
+    assert!(
+        reason.contains("control listener unavailable"),
+        "and what it said before it did: {reason}"
+    );
+    assert!(
+        reason.contains(&format!("{BINARY}.startup.log")),
+        "and where the rest of it is: {reason}"
+    );
+
+    let probes = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge")))
+        .count();
+    assert!(
+        probes <= 2,
+        "one probe before the launch and one after it is the whole wait: {probes}"
+    );
+}
+
+/// A restart tells the old daemon to stop and the new one to start, and the old
+/// one's wrapper records its status only once it is fully gone — which is after
+/// its socket stopped answering, so it can land after the new launch truncated
+/// the file. Reading someone else's `143` as this launch's answer would fail a
+/// restart that is going perfectly well.
+#[test]
+fn a_status_from_the_launch_before_is_not_this_launch_s_answer() {
+    let remote = FakeRemote::new();
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    // The corpse of a previous launch, stamped with a nonce nobody asked for.
+    *remote.startup_exit.lock().unwrap() = Some("0123456789abcdef0123456789abcdef 143".into());
+
+    installer(&remote, &release, &user, "me@box:22")
+        .run()
+        .expect("the daemon this launch started came up, whatever the old one did");
+}
+
+/// `run_daemon` returns success when another server already holds the
+/// single-server lock, so a recorded status of 0 means "someone else is the
+/// server here" — good news arriving early, not a failure. Treating any status
+/// as terminal turned a transient probe miss into a hard error the old loop
+/// would have recovered from inside its fifteen seconds.
+#[test]
+fn a_daemon_that_stood_down_cleanly_is_not_a_failed_start() {
+    let remote = FakeRemote::new()
+        .standing_down("tty7-server: another server already serves this config dir; exiting\n");
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@box:22")
+        .run()
+        .unwrap_err();
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        reason.contains("still not answering"),
+        "it waited for the server that was supposed to be there, and said so \
+         when nothing turned up: {reason}"
+    );
+
+    let probes = remote
+        .journal()
+        .into_iter()
+        .filter(|j| matches!(j, Journal::Exec(c) if c.contains("--stdio --bridge")))
+        .count();
+    assert!(
+        probes > 3,
+        "and it kept probing rather than failing on the exit status: {probes}"
+    );
+}
+
+/// The other half: a daemon that is up and simply never binds the socket. It
+/// leaves no exit status, so this one does wait out the deadline — but it still
+/// has to say what the probe was told and where to read the rest.
+#[test]
+fn a_daemon_that_never_answers_names_the_probe_and_the_log() {
+    let remote = FakeRemote::new().hanging_at_startup("tty7-server: still opening the tree\n");
+    remote.preinstall(BINARY, 0o755);
+    let release = FakeRelease::new();
+    let user = FakeUser::declining();
+
+    let err = installer(&remote, &release, &user, "me@slow-box:22")
+        .run()
+        .unwrap_err();
+
+    let InstallError::Launch { reason } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(reason.contains("still not answering"), "{reason}");
+    assert!(
+        reason.contains("no control server"),
+        "the probe's own stderr, which used to be dropped for its exit code: {reason}"
+    );
+    assert!(reason.contains("still opening the tree"), "{reason}");
+}
+
 #[test]
 fn an_older_running_daemon_is_kept_and_reported() {
     let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
@@ -984,7 +1201,8 @@ fn replacing_installs_the_matching_server_and_then_restarts_into_it() {
 
 #[test]
 fn the_launch_command_detaches_and_closes_every_stream() {
-    let cmd = launch_command("/home/me/.local/share/tty7/bin/tty7-server-26.7.5");
+    let binary = "/home/me/.local/share/tty7/bin/tty7-server-26.7.5";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
     assert!(cmd.contains("setsid"), "{cmd}");
     assert!(
         cmd.contains("nohup"),
@@ -992,19 +1210,61 @@ fn the_launch_command_detaches_and_closes_every_stream() {
     );
     assert!(cmd.contains("--daemon"), "{cmd}");
     assert!(cmd.contains("< /dev/null"), "{cmd}");
-    assert!(cmd.contains("> /dev/null 2>&1"), "{cmd}");
     assert!(
         cmd.trim_end().ends_with("fi"),
         "both branches background it: {cmd}"
     );
 }
 
+fn scoped_umask(binary: &str) -> String {
+    format!(
+        "(umask 077; rm -f '{binary}.startup.log' '{binary}.startup.exit'; \
+         : > '{binary}.startup.log'; : > '{binary}.startup.exit')"
+    )
+}
+
+/// The daemon's stdout and stderr used to go to `/dev/null`, and everything it
+/// says on the way up is a `startup_note!` on stderr. Discarding them is what
+/// left "nothing was answering after 15s" as the only thing a failed remote
+/// start could ever report.
+#[test]
+fn the_launch_command_keeps_what_the_daemon_says_and_how_it_ends() {
+    let binary = "/home/me/.local/share/tty7/bin/tty7-server-26.7.5";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
+    assert!(
+        !cmd.contains("> /dev/null 2>&1"),
+        "stderr is the diagnosis, not noise: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("{binary}.startup.log")),
+        "output lands in a file this client can read back: {cmd}"
+    );
+    assert!(
+        cmd.contains(&format!("{binary}.startup.exit")),
+        "and so does the exit status: {cmd}"
+    );
+    assert!(
+        cmd.contains(&scoped_umask(binary)),
+        "both are created private, and the umask is scoped to that — bare, it \
+         would reach the daemon and every pane shell it forks: {cmd}"
+    );
+    assert!(
+        cmd.contains("|| out=/dev/null"),
+        "a home that cannot hold the files still gets its daemon started: {cmd}"
+    );
+}
+
 #[test]
 fn a_launch_settle_follows_the_launch_and_never_replaces_it() {
-    let plain = launch_script(BINARY, None);
-    assert_eq!(plain, launch_command(BINARY), "no settle, no wrapping");
+    let log = StartupLog::for_binary(BINARY);
+    let plain = launch_script(BINARY, &log, None);
+    assert_eq!(
+        plain,
+        launch_command(BINARY, &log),
+        "no settle, no wrapping"
+    );
 
-    let settled = launch_script(BINARY, Some("sleep 1\n".to_string()));
+    let settled = launch_script(BINARY, &log, Some("sleep 1\n".to_string()));
     assert!(
         settled.starts_with(&plain),
         "the launch survives: {settled}"
@@ -1037,8 +1297,13 @@ fn remote_paths_are_shell_quoted() {
 
 #[test]
 fn the_launch_command_quotes_its_binary() {
-    let cmd = launch_command("/home/me/a b/tty7-server-1.0.0");
+    let binary = "/home/me/a b/tty7-server-1.0.0";
+    let cmd = launch_command(binary, &StartupLog::for_binary(binary));
     assert!(cmd.contains("'/home/me/a b/tty7-server-1.0.0'"), "{cmd}");
+    assert!(
+        cmd.contains("'/home/me/a b/tty7-server-1.0.0.startup.log'"),
+        "and so are the paths derived from it: {cmd}"
+    );
 }
 
 #[test]
@@ -1531,6 +1796,36 @@ fn a_present_binary_reports_no_progress() {
     );
 }
 
+/// The upload's caption used to be the last thing an install said, so the
+/// strip sat on "copying… 100%" through the whole startup wait — and when the
+/// wait failed, that stale caption is what the user was left looking at. The
+/// last word has to be the phase actually in progress.
+#[test]
+fn the_caption_moves_on_once_the_bytes_are_across() {
+    let remote = FakeRemote::new();
+    let release = FakeRelease::new();
+    let user = FakeUser::approving();
+    let reports = Arc::new(Reports::default());
+
+    with_install_progress(reports.clone(), || {
+        installer(&remote, &release, &user, "me@build-box:22").run()
+    })
+    .expect("install");
+
+    let phases = reports.phases();
+    assert!(
+        phases
+            .iter()
+            .any(|p| matches!(p, InstallPhase::Uploading { .. })),
+        "the copy is still reported: {phases:?}"
+    );
+    assert_eq!(
+        phases.last(),
+        Some(&InstallPhase::Restarting),
+        "and the wait for the far end is what the caption ends on: {phases:?}"
+    );
+}
+
 #[test]
 fn a_scoped_progress_sink_outranks_the_global_one() {
     let scoped = Arc::new(Reports::default());
@@ -1986,4 +2281,246 @@ fn replacing_overwrites_a_published_binary_that_does_not_serve_us() {
         remote.writes()
     );
     assert!(!release.fetched().is_empty(), "which means downloading it");
+}
+
+/// The probe every pane used to pay for, and the note that spares the second
+/// one — issue #695. See [`ProvedServer`].
+mod proving_the_server_once_per_connection {
+    use super::*;
+
+    /// A warm machine: this build's server is installed and already serving.
+    /// Every pane after the first on a connection to it finds exactly this.
+    fn warm() -> FakeRemote {
+        FakeRemote::new().with_previous_install().serving(BINARY)
+    }
+
+    fn prove(remote: &FakeRemote, user: &FakeUser, host: &str) -> io::Result<ProvedServer> {
+        let release = FakeRelease::new();
+        Ok(ProvedServer::from_report(
+            installer(remote, &release, user, host).run()?,
+        ))
+    }
+
+    /// The measurement the issue asks for, from the fake's own books: what the
+    /// first pane on a connection spends, and what the second one spends after
+    /// it. The chain is asserted by name rather than by count so that a probe
+    /// growing a step is a failure here and not a slow tab somewhere.
+    #[test]
+    fn the_second_pane_on_a_connection_spends_nothing() {
+        let remote = warm();
+        let user = FakeUser::approving();
+        let mut slot = None;
+
+        let first = proved_or_prove(&mut slot, || prove(&remote, &user, "me@warm-box:22"))
+            .expect("the server is there and serving");
+        assert_eq!(first, BINARY);
+        assert_eq!(
+            remote.execs(),
+            vec![
+                "uname -sm".to_string(),
+                format!("{} --stdio --bridge < /dev/null", shell_quote(BINARY)),
+                RUNNING_EXE_COMMAND.to_string(),
+            ],
+            "the probe: what to install, is a daemon answering, and what build is serving"
+        );
+        assert_eq!(
+            remote.round_trips(),
+            5,
+            "three commands and two SFTP reads — the realpath for $HOME and the stat"
+        );
+
+        let paid = remote.round_trips();
+        let second = proved_or_prove(&mut slot, || {
+            panic!("the second pane must not probe again");
+        })
+        .expect("the note answers");
+        assert_eq!(second, BINARY);
+        assert_eq!(
+            remote.round_trips(),
+            paid,
+            "the second pane pays nothing for what the first one proved"
+        );
+    }
+
+    /// A transient failure must not pin every later pane on the connection into
+    /// the same failure. Nothing is written to the note unless the probe got
+    /// all the way through, so the next pane goes and asks again.
+    #[test]
+    fn a_probe_that_failed_is_not_remembered() {
+        let remote = FakeRemote::new();
+        let user = FakeUser::declining();
+        let mut slot = None;
+
+        let refused = proved_or_prove(&mut slot, || prove(&remote, &user, "me@shy-box:22"))
+            .expect_err("the user said no");
+        assert!(
+            format!("{refused}").contains("was not confirmed"),
+            "the refusal is the install prompt's, not something else: {refused}"
+        );
+        assert_eq!(slot, None, "a failure leaves the slot exactly as it was");
+        assert_eq!(user.asked().len(), 1);
+
+        let _ = proved_or_prove(&mut slot, || prove(&remote, &user, "me@shy-box:22"));
+        assert_eq!(
+            user.asked().len(),
+            2,
+            "the pane after a refusal asks again rather than inheriting the refusal"
+        );
+    }
+
+    /// The one thing memoizing could quietly cancel: the version check. The
+    /// probe is what notices that a different build is serving the machine, and
+    /// the note has to keep filing that warning for the panes that never run
+    /// the probe — each route drains its own sink, so a warning filed only once
+    /// would reach only the first pane's client.
+    #[test]
+    fn a_remembered_mismatch_is_filed_again_for_every_pane() {
+        let (remote, legacy) = FakeRemote::new().with_legacy_install("26.7.4");
+        let remote = remote.serving(&legacy).speaking(
+            &legacy,
+            RemoteProtocol {
+                control: CONTROL - 1,
+                protocol: PROTOCOL,
+                build: "26.7.4".to_string(),
+            },
+        );
+        let user = FakeUser::approving();
+        let mut slot = None;
+
+        let first_route: Arc<Mutex<Vec<MismatchedRemoteDaemon>>> = Arc::new(Mutex::new(Vec::new()));
+        with_mismatch_sink(first_route.clone(), || {
+            proved_or_prove(&mut slot, || prove(&remote, &user, "me@old-box:22"))
+                .expect("an old daemon is kept, not a failure")
+        });
+        assert_eq!(
+            first_route.lock().unwrap().len(),
+            1,
+            "the probe found the mismatch"
+        );
+
+        let spent = remote.round_trips();
+        let second_route: Arc<Mutex<Vec<MismatchedRemoteDaemon>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        with_mismatch_sink(second_route.clone(), || {
+            proved_or_prove(&mut slot, || panic!("the note answers this one")).expect("remembered")
+        });
+
+        let filed = second_route.lock().unwrap().clone();
+        assert_eq!(filed.len(), 1, "the second pane's client hears it too");
+        assert_eq!(filed[0].running_version.as_deref(), Some("26.7.4"));
+        assert_eq!(filed[0].wanted_version, VERSION);
+        assert_eq!(
+            remote.round_trips(),
+            spent,
+            "and hears it without a round trip"
+        );
+    }
+
+    /// The wiring, over a real SSH connection: `ensure_remote_server` reads the
+    /// note off the connection it was handed, and `forget_remote_server` takes
+    /// it away again. The fake sshd counts session channels, so "no round trip"
+    /// is measured here rather than argued.
+    #[tokio::test]
+    async fn a_proved_connection_answers_the_next_pane_off_the_wire() {
+        use crate::daemon::ssh::test_support::{Exec, FakeSshd};
+
+        let sshd = FakeSshd::connect(Exec::Exits, None).await;
+        assert_eq!(
+            sshd.conn.remembered_server(),
+            None,
+            "a new link knows nothing"
+        );
+
+        *sshd.conn.proved_server() = Some(ProvedServer {
+            binary: BINARY.to_string(),
+            mismatch: None,
+        });
+        assert_eq!(
+            ensure_remote_server(&sshd.conn).expect("the note answers"),
+            BINARY
+        );
+        assert_eq!(
+            sshd.opened(),
+            0,
+            "a proved connection opens no channel for the next pane"
+        );
+        assert_eq!(sshd.conn.remembered_server().as_deref(), Some(BINARY));
+
+        // What `replace_remote_server`, `restart_remote_daemon` and a routed
+        // link that closed without answering all do before they act.
+        forget_remote_server(&sshd.conn);
+        assert_eq!(
+            sshd.conn.remembered_server(),
+            None,
+            "the next pane proves it again the long way"
+        );
+    }
+
+    /// What `restart_remote_daemon` and `replace_remote_server` do to the note:
+    /// drop it before they start, so that one which fails halfway leaves the
+    /// next pane looking instead of trusting a note written before the upheaval.
+    #[tokio::test]
+    async fn a_change_that_failed_halfway_leaves_no_note() {
+        use crate::daemon::ssh::test_support::{Exec, FakeSshd};
+
+        let sshd = FakeSshd::connect(Exec::Exits, None).await;
+        *sshd.conn.proved_server() = Some(ProvedServer {
+            binary: BINARY.to_string(),
+            mismatch: None,
+        });
+
+        let failed = while_changing_the_server(&sshd.conn, || {
+            Err(io::Error::other("the daemon would not stop"))
+        })
+        .expect_err("the change failed");
+        assert!(format!("{failed}").contains("would not stop"));
+        assert_eq!(
+            sshd.conn.remembered_server(),
+            None,
+            "the note went first, so the next pane proves it again"
+        );
+    }
+
+    /// And they hold the lock while they run: a pane that arrives in the middle
+    /// of a replace waits for it rather than proving a binary the replace is in
+    /// the middle of moving — and then keeping that answer for the life of the
+    /// connection.
+    #[tokio::test]
+    async fn a_pane_arriving_mid_change_waits_for_it() {
+        use crate::daemon::ssh::test_support::{Exec, FakeSshd};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let sshd = FakeSshd::connect(Exec::Exits, None).await;
+        let proved = Arc::new(AtomicBool::new(false));
+        let mut pane = None;
+
+        while_changing_the_server(&sshd.conn, || {
+            let conn = sshd.conn.clone();
+            let raced = proved.clone();
+            pane = Some(std::thread::spawn(move || {
+                *conn.proved_server() = Some(ProvedServer {
+                    binary: "/home/me/.tty7/bin/proved-mid-change".to_string(),
+                    mismatch: None,
+                });
+                raced.store(true, Ordering::SeqCst);
+            }));
+            // Long enough for the other thread to reach the lock. It cannot
+            // pass it, so this can only fail if the lock is not being held.
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                !proved.load(Ordering::SeqCst),
+                "a pane must not write a note while the server is being changed"
+            );
+            Ok(())
+        })
+        .expect("the change itself succeeded");
+
+        pane.expect("the pane raced")
+            .join()
+            .expect("it got through");
+        assert!(
+            proved.load(Ordering::SeqCst),
+            "and it goes through as soon as the change is done"
+        );
+    }
 }

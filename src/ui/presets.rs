@@ -51,6 +51,7 @@ pub struct Neutrals {
     pub background: u32,
     pub foreground: u32,
     pub border: u32,
+    pub divider: u32,
     pub secondary: u32,
     pub muted: u32,
     pub muted_foreground: u32,
@@ -85,6 +86,16 @@ pub mod state {
     pub const CURSOR: f32 = 1.70;
     pub const TEXT_RESTING: f32 = 4.6;
     pub const TEXT_STEP: f32 = 1.4;
+
+    /// The sidebar's selection ladder sits one rung above the window's. The
+    /// window paints a selected row inside a list the user is already looking
+    /// at; the sidebar paints the one tab out of twenty that owns the pane
+    /// area, and at 1.30:1 that tint measured as the faintest mark in the
+    /// column — fainter than a group header's count. `PRESSED` and `CURSOR`
+    /// climb with it so the ladder keeps its spacing.
+    pub const SIDEBAR_SELECTED: f32 = 1.50;
+    pub const SIDEBAR_PRESSED: f32 = 1.75;
+    pub const SIDEBAR_CURSOR: f32 = 1.92;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -153,18 +164,35 @@ impl Theme {
         let fg = legible_foreground(bg, self.foreground);
         let sidebar = mix(bg, fg, 0.03);
         let popover = mix(bg, fg, 0.05);
-        // One hairline value divides all three neutral fills — it is handed to
-        // `sidebar_border` too, and popover chrome draws with it. Floor it on
-        // each of them, not only on the window.
-        let border = [bg, sidebar, popover]
-            .into_iter()
-            .fold(mix(bg, fg, 0.16), |hairline, surface| {
-                at_least(hairline, fg, surface, BORDER_FLOOR)
-            });
+        // Two weights, one derivation. Which one a line gets is decided by
+        // whether it is the *only* thing separating what it sits between:
+        //
+        // - `border` closes an outline around a surface that floats on top of
+        //   other content (menu, tooltip, dialog, card) and rules a header off
+        //   from the rows under it. Nothing else says where the edge is, so it
+        //   has to be visible.
+        // - `divider` runs between two panes that already carry their own
+        //   fills — the sidebar against the terminal, the right panel against
+        //   the workspace. There the line is the second signal, not the first,
+        //   and painting it at full weight is what makes a workspace read as
+        //   boxes bolted together rather than one surface.
+        //
+        // Both are floored on all three neutral fills, not only on the window:
+        // the same value has to be worth something wherever it is painted.
+        let hairline = |seed: f32, floor: f32| {
+            [bg, sidebar, popover]
+                .into_iter()
+                .fold(mix(bg, fg, seed), |ink, surface| {
+                    at_least(ink, fg, surface, floor)
+                })
+        };
+        let border = hairline(0.16, BORDER_FLOOR);
+        let divider = hairline(0.16, DIVIDER_FLOOR);
         Neutrals {
             background: bg,
             foreground: fg,
             border,
+            divider,
             secondary: mix(bg, fg, 0.09),
             muted: mix(bg, fg, 0.06),
             muted_foreground: dim(fg, bg, state::TEXT_RESTING),
@@ -174,9 +202,26 @@ impl Theme {
             sidebar,
             // Blended, not bisected, so a palette's own softness carries into
             // the sidebar — but floored on the fill it is actually painted on
-            // (`sidebar`, not `background`), because four of the builtins
-            // land this under 4.5:1 and it is the tab title, not a caption.
-            sidebar_fg: at_least(mix(fg, bg, 0.28), fg, sidebar, TEXT_FLOOR),
+            // (`sidebar`, not `background`). This is the tab title, the top
+            // rung of a three-rung column (title / branch / group header), and
+            // it is floored at `TITLE_FLOOR` rather than `TEXT_FLOOR` because
+            // the rung under it, `muted_foreground`, already sits at
+            // `TEXT_RESTING`: a title at 4.5:1 next to a caption at 4.6:1 is
+            // the same grey twice, and the column reads as one flat wash with
+            // nothing to look at first.
+            sidebar_fg: {
+                let title = at_least(mix(fg, bg, 0.10), fg, sidebar, TITLE_FLOOR);
+                // …and capped so the selected label keeps its `TEXT_STEP`
+                // above it: on a white-on-black palette a 10% blend lands so
+                // close to `fg` that there is nothing brighter left to step
+                // to. The floor wins over the cap on a soft palette, where
+                // the step is taken past `fg` instead (see `stepped_ink`).
+                let headroom = (contrast(fg, sidebar) / state::TEXT_STEP).max(TITLE_FLOOR);
+                match headroom > TITLE_FLOOR && contrast(title, sidebar) > headroom {
+                    true => dim(title, sidebar, headroom),
+                    false => title,
+                }
+            },
             accent: legible_accent(bg, self.accent),
         }
     }
@@ -280,14 +325,14 @@ impl Theme {
 
     pub fn surfaces(&self) -> Surfaces {
         let m = self.neutrals();
+        let fg = legible_foreground(self.background_color(), self.foreground);
         let mut sidebar = self.surface(m.sidebar);
+        sidebar.selected = raise(sidebar.base, fg, state::SIDEBAR_SELECTED);
+        sidebar.pressed = raise(sidebar.base, fg, state::SIDEBAR_PRESSED);
+        sidebar.cursor = raise(sidebar.base, fg, state::SIDEBAR_CURSOR);
         sidebar.text_resting = m.sidebar_fg;
-        sidebar.text_selected = stepped_ink(
-            sidebar.selected,
-            sidebar.base,
-            legible_foreground(self.background_color(), self.foreground),
-            sidebar.text_resting,
-        );
+        sidebar.text_selected =
+            stepped_ink(sidebar.selected, sidebar.base, fg, sidebar.text_resting);
         Surfaces {
             window: self.surface(m.background),
             sidebar,
@@ -555,12 +600,46 @@ pub(crate) fn wash(surface: u32, tint: u32, target: f32) -> u32 {
 
 const TEXT_FLOOR: f32 = 4.5;
 
+/// The floor for the top rung of a text column whose second rung rests at
+/// `TEXT_RESTING`. WCAG AAA's 7:1, which also happens to be the smallest
+/// ratio that clears `TEXT_STEP` over a 4.6:1 caption with room to spare on
+/// the fills a sidebar is actually painted on.
+const TITLE_FLOOR: f32 = 7.0;
+
+/// A semantic ink stepped down to sit beside body text instead of over it.
+///
+/// `success` and `danger` are cleared to `TEXT_FLOOR` at full chroma, which is
+/// right for the one line that says a push failed and wrong for a `+94 −26`
+/// repeated on every row of a list: twelve saturated numerals become the
+/// loudest thing in the column while carrying the least. Blending toward the
+/// caption ink they sit next to keeps the hue (green still means added) and
+/// takes the shout out, then the blend is walked back toward the full ink
+/// only when the surface it lands on cannot carry it at `TEXT_FLOOR`.
+pub(crate) fn resting_ink(ink: Hsla, beside: Hsla, surface: Hsla) -> Hsla {
+    let (ink, beside, surface) = (pack(ink), pack(beside), pack(surface));
+    let blend = mix(ink, beside, 0.45);
+    gpui::rgb(at_least(blend, ink, surface, TEXT_FLOOR)).into()
+}
+
+fn pack(c: Hsla) -> u32 {
+    let rgb = crate::terminal::palette::hsla_to_rgb(c);
+    (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
+}
+
 /// Hairlines are separators, not control outlines — the surfaces they divide
 /// carry their own fills, so WCAG 1.4.11's 3:1 does not apply and painting them
 /// that hard would read as a wireframe. This floor only rescues the palettes
 /// where the flat blend disappears entirely, so a divider is worth the same
 /// amount in every theme.
 const BORDER_FLOOR: f32 = 1.5;
+
+/// The same idea one step down, for a line that is not carrying the separation
+/// on its own.
+///
+/// Worth stating because the seed blend cannot say it: `mix(bg, fg, 0.16)`
+/// clears neither floor in any builtin theme, so both values are decided
+/// entirely here. Lowering the seed changes nothing; this constant is the knob.
+const DIVIDER_FLOOR: f32 = 1.2;
 
 /// Keep an authored blend when it already clears `target` on the surface it is
 /// painted on, and walk it back toward `toward` only when it does not.
@@ -1681,10 +1760,17 @@ mod tests {
         let dracula = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
         let bg = dracula.background_color();
         let s = dracula.surfaces();
+        // The resting rung is checked as `state::SELECTED` on the sidebar
+        // fill — the surface it was signed off on — rather than as the rail's
+        // own fill: the rail was lifted off this value on purpose
+        // (`state::SIDEBAR_SELECTED`) once the tab that owns the pane area
+        // measured as the faintest mark in its own column, and this pin is
+        // here to catch the constant drifting, not that decision.
+        let fg = legible_foreground(bg, dracula.foreground);
         for (what, now, legacy) in [
             (
                 "resting",
-                s.sidebar.selected,
+                raise(s.sidebar.base, fg, state::SELECTED),
                 mix(bg, dracula.foreground, 0.12),
             ),
             ("cursor", s.window.cursor, mix(bg, dracula.foreground, 0.17)),
@@ -1986,12 +2072,59 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_title_is_stepped_off_its_caption() {
+        // The three rungs of a sidebar row — title, branch line, group
+        // header — all sat at the same 4.5:1 grey once; this is the guard
+        // against that column flattening again. The caption is dimmed on the
+        // window and painted on the sidebar, so measure it where it lands.
+        for t in builtins() {
+            let m = t.neutrals();
+            let step = contrast(m.sidebar_fg, m.muted_foreground);
+            assert!(
+                step >= state::TEXT_STEP - 0.01,
+                "{}: title {:#08x} is only {step:.2}:1 off the caption {:#08x}",
+                t.id,
+                m.sidebar_fg,
+                m.muted_foreground
+            );
+        }
+    }
+
+    #[test]
+    fn resting_semantic_ink_keeps_the_text_floor() {
+        for t in builtins() {
+            let m = t.neutrals();
+            let sem = t.semantics();
+            let beside: Hsla = gpui::rgb(m.muted_foreground).into();
+            for (name, ink) in [("success", sem.success.ink), ("danger", sem.danger.ink)] {
+                for (surface_name, surface) in [
+                    ("window", m.background),
+                    ("sidebar", m.sidebar),
+                    ("popover", m.popover),
+                ] {
+                    let resting = pack(resting_ink(
+                        gpui::rgb(ink).into(),
+                        beside,
+                        gpui::rgb(surface).into(),
+                    ));
+                    let ratio = contrast(resting, surface);
+                    assert!(
+                        ratio >= TEXT_FLOOR - 0.02,
+                        "{}/{surface_name}: resting {name} {resting:#08x} is only {ratio:.2}:1",
+                        t.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn sidebar_text_reads_on_the_fill_it_is_painted_on() {
         for t in builtins() {
             let m = t.neutrals();
             let ratio = contrast(m.sidebar_fg, m.sidebar);
             assert!(
-                ratio >= TEXT_FLOOR - 0.01,
+                ratio >= TITLE_FLOOR - 0.01,
                 "{}: sidebar text {:#08x} is only {ratio:.2}:1 on the sidebar fill {:#08x}",
                 t.id,
                 m.sidebar_fg,
@@ -2022,27 +2155,46 @@ mod tests {
     fn hairlines_are_worth_the_same_in_every_theme() {
         for t in builtins() {
             let m = t.neutrals();
-            for (name, surface) in [
-                ("background", m.background),
-                ("sidebar", m.sidebar),
-                ("popover", m.popover),
+            for (tier, ink, floor) in [
+                ("border", m.border, BORDER_FLOOR),
+                ("divider", m.divider, DIVIDER_FLOOR),
             ] {
-                let ratio = contrast(m.border, surface);
-                assert!(
-                    ratio >= BORDER_FLOOR - 0.01,
-                    "{}: border {:#08x} is only {ratio:.2}:1 on the {name}",
-                    t.id,
-                    m.border
-                );
-                // A floor, not a target — a hairline that shouts is worse than
-                // one that whispers.
-                assert!(
-                    ratio <= 2.2,
-                    "{}: border {:#08x} is {ratio:.2}:1 on the {name} and reads as a frame",
-                    t.id,
-                    m.border
-                );
+                for (name, surface) in [
+                    ("background", m.background),
+                    ("sidebar", m.sidebar),
+                    ("popover", m.popover),
+                ] {
+                    let ratio = contrast(ink, surface);
+                    assert!(
+                        ratio >= floor - 0.01,
+                        "{}: {tier} {ink:#08x} is only {ratio:.2}:1 on the {name}",
+                        t.id
+                    );
+                    // A floor, not a target — a hairline that shouts is worse
+                    // than one that whispers.
+                    assert!(
+                        ratio <= 2.2,
+                        "{}: {tier} {ink:#08x} is {ratio:.2}:1 on the {name} and reads as a frame",
+                        t.id
+                    );
+                }
             }
+        }
+    }
+
+    /// The two tiers have to stay apart, or the split is decoration. A divider
+    /// that lands on the same value as the border is the state this replaced.
+    #[test]
+    fn a_divider_is_lighter_than_a_border_in_every_theme() {
+        for t in builtins() {
+            let m = t.neutrals();
+            assert!(
+                contrast(m.divider, m.sidebar) < contrast(m.border, m.sidebar),
+                "{}: divider {:#08x} is not lighter than border {:#08x}",
+                t.id,
+                m.divider,
+                m.border
+            );
         }
     }
 

@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
+/// A frame is a little-endian `u32` length, a one-byte kind, then the payload.
+const HEADER: usize = 5;
+
 pub const PROTOCOL_VERSION: u32 = 6;
 
 pub const FEATURE_PANE_OWNER: &str = "pane-owner";
@@ -461,10 +464,86 @@ impl PortEntry {
     }
 }
 
+/// Whether the answer in `PaneProcs::ports` can be believed.
+///
+/// An empty port list used to mean two very different things at once: nothing
+/// in this pane is listening, or the thing that looks for listeners never got
+/// to say. On unix that look is an `lsof` subprocess, and every way it can go
+/// wrong — absent from the daemon's `PATH`, killed, hung on a wedged mount,
+/// pointed at sockets it has no permission to read — arrived as the same empty
+/// vector as a genuinely quiet pane. Whoever reads the list gets to know which
+/// one it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "detail", rename_all = "snake_case")]
+pub enum PortProbe {
+    /// The probe ran and the list is its whole answer.
+    #[default]
+    Ok,
+    /// The probe ran, but at least one process in this pane belongs to another
+    /// user — `sudo go run`, a root-owned server on a low port — and a probe
+    /// running as this user cannot see that process's sockets. The list holds
+    /// what could be seen, which may be nothing.
+    Restricted,
+    /// The probe could not be run at all. The string is for a log line or for
+    /// `tty7 procs`, not for the panel: it names the tool and what went wrong.
+    Unavailable(String),
+}
+
+impl PortProbe {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, PortProbe::Ok)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneProcs {
     pub procs: Vec<ProcEntry>,
     pub ports: Vec<PortEntry>,
+    /// `serde(default)` because a daemon from before this field existed
+    /// answers `QueryProcs` without it, and its silence is read the way that
+    /// daemon's callers read every answer it gives: as a complete one.
+    #[serde(default)]
+    pub probe: PortProbe,
+    /// What the pane can say about itself that the process list cannot — see
+    /// [`PaneContext`]. `None` from a daemon built before the field existed,
+    /// which reads as "this daemon cannot say", never as a set of falses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<PaneContext>,
+}
+
+/// Where a pane's session actually lives, and what its shell says about itself.
+///
+/// The process list beside it is always *this* machine's: it starts at the
+/// pty's own child and walks down. For a pane that is only the near end of a
+/// connection — an `ssh` the shell is running, a native-SSH pane whose pty is
+/// on another host — that list describes the tunnel, not the work. This is the
+/// part of the answer that can still speak for the far side.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneContext {
+    /// The host the pane is pointed at, when it is not this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteContext>,
+    /// Whether this machine holds the pane's pty at all. `false` for a
+    /// native-SSH pane, whose `procs` is empty because there is nothing here
+    /// to walk — not because the walk failed.
+    pub local_pty: bool,
+    /// What the pane's shell integration last said, `None` until it emits its
+    /// first OSC 133 mark.
+    ///
+    /// This is the mark's own reading, taken before the suppression that keeps
+    /// a foreground program's prompt marks from engaging the local line editor.
+    /// That suppression is right for the editor and wrong here: on a pane
+    /// running `ssh` the marks are the *far* shell's, and they are the only
+    /// thing on this side that knows whether the far shell is busy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_prompt: Option<bool>,
+    /// Whether a prompt mark has arrived while the pane was pointed at
+    /// `remote`. Only the far shell can be at a prompt while the near one is
+    /// occupied by the connection, so this is the proof that the far side's
+    /// shell integration is loaded and reporting. Without it, "not at a
+    /// prompt" on a remote pane means nothing: the newest mark is then the
+    /// near shell's own "I started `ssh`", and it will never be replaced.
+    pub remote_prompt_seen: bool,
 }
 
 fn default_term() -> String {
@@ -952,9 +1031,33 @@ pub fn write_frame<W: Write>(w: &mut W, kind: u8, payload: &[u8]) -> io::Result<
             "frame payload exceeds MAX_FRAME",
         ));
     }
-    w.write_all(&(len as u32).to_le_bytes())?;
-    w.write_all(&[kind])?;
-    w.write_all(payload)?;
+    // One write, not three. The pane socket is a loopback `TcpStream` with
+    // `TCP_NODELAY` set, so three `write_all`s put the length, the kind and the
+    // payload on the wire as three separate segments, and the reader on the far
+    // side wakes from `read()` three times for one frame. Under a PTY flood the
+    // daemon frames every ConPTY read, so that is two extra syscalls on each
+    // side per frame, tens of thousands a second (issue #713).
+    let mut header = [0u8; HEADER];
+    header[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    header[4] = kind;
+    let mut bufs = [io::IoSlice::new(&header), io::IoSlice::new(payload)];
+    let mut rest: &mut [io::IoSlice<'_>] = &mut bufs;
+    while !rest.is_empty() {
+        match w.write_vectored(rest) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the frame could not be written in full",
+                ));
+            }
+            // A writer that does not implement `write_vectored` natively falls
+            // back to writing the first non-empty slice, so this loop still
+            // terminates — it just costs the two writes it used to cost.
+            Ok(n) => io::IoSlice::advance_slices(&mut rest, n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
@@ -984,7 +1087,6 @@ pub fn is_error_kind(kind: u8) -> bool {
 }
 
 pub fn take_frame(buf: &mut Vec<u8>) -> io::Result<Option<(u8, Vec<u8>)>> {
-    const HEADER: usize = 5;
     if buf.len() < HEADER {
         return Ok(None);
     }
@@ -2048,6 +2150,57 @@ mod tests {
         assert!(buf.is_empty());
     }
 
+    /// The pane socket has `TCP_NODELAY` set, so a write is a segment and a
+    /// segment is a wakeup on the far side. A frame must therefore cost one
+    /// write, not one for the length, one for the kind and one for the payload
+    /// (issue #713) — at flood rates that difference is tens of thousands of
+    /// syscalls a second on each end.
+    #[test]
+    fn a_frame_is_one_write_on_a_vectored_writer() {
+        #[derive(Default)]
+        struct Counting {
+            writes: usize,
+            bytes: Vec<u8>,
+        }
+        impl Write for Counting {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                self.bytes.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn write_vectored(&mut self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+                self.writes += 1;
+                let mut n = 0;
+                for b in bufs {
+                    self.bytes.extend_from_slice(b);
+                    n += b.len();
+                }
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut w = Counting::default();
+        write_frame(&mut w, kind::OUTPUT, b"a chunk of pty output").expect("write the frame");
+        assert_eq!(w.writes, 1, "one frame must cost one write");
+
+        // An empty payload is a frame too — the header still has to land, and
+        // the empty second slice must not spin the loop.
+        let mut empty = Counting::default();
+        write_frame(&mut empty, kind::DETACH, &[]).expect("write the empty frame");
+        assert_eq!(empty.writes, 1);
+
+        // Whatever the write count, the bytes on the wire are unchanged: a
+        // `read_frame` over them gives back exactly what went in.
+        let mut cursor = io::Cursor::new(w.bytes);
+        assert_eq!(
+            read_frame(&mut cursor).expect("read it back"),
+            (kind::OUTPUT, b"a chunk of pty output".to_vec())
+        );
+    }
+
     #[test]
     fn from_frame_rejects_unknown_kind() {
         assert!(ClientMsg::from_frame(99, vec![]).is_err());
@@ -2115,6 +2268,35 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
         let mut empty2 = std::io::Cursor::new(Vec::<u8>::new());
         assert!(ClientMsg::read(&mut empty2).is_err());
+    }
+
+    /// The port probe's verdict travels over the same wire as the ports, and
+    /// the two ends of that wire are regularly different builds: a remote
+    /// workspace's panes are answered for by whatever `tty7-server` is
+    /// installed on the peer. An older one says nothing about the probe, and
+    /// its silence has to read as "this list is the whole answer" rather than
+    /// failing the frame or, worse, arriving as a doubt the panel then shows.
+    #[test]
+    fn a_procs_answer_without_a_probe_verdict_is_a_complete_one() {
+        let old = r#"{"procs":[],"ports":[{"port":3000,"pid":7,"name":"node"}]}"#;
+        let procs: PaneProcs = serde_json::from_str(old).unwrap();
+        assert_eq!(procs.probe, PortProbe::Ok);
+        assert!(procs.probe.is_ok());
+        assert_eq!(procs.ports[0].addr, "");
+
+        for probe in [
+            PortProbe::Ok,
+            PortProbe::Restricted,
+            PortProbe::Unavailable("lsof: not found".into()),
+        ] {
+            let wire = serde_json::to_string(&PaneProcs {
+                probe: probe.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+            let back: PaneProcs = serde_json::from_str(&wire).unwrap();
+            assert_eq!(back.probe, probe, "round trip through {wire}");
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, WindowExt as _, h_flex};
 use super::TermSize;
 use super::cmd_editor::CmdEditor;
 use super::completion::{self, CandidateKind, CompletionSession};
-use super::element::TerminalElement;
+use super::element::{GridSnapshot, RenderCell, TerminalElement};
 use super::highlight::{self, TokenKind};
 use super::hold::{GapHold, Verdict};
 use super::remote::RemoteTerminal;
@@ -25,9 +25,10 @@ use super::scrollbar::{GridScroll, TerminalScrollHandle};
 use super::search::{LinkTarget, SearchState};
 use super::typeahead::{RawInput, Typeahead};
 use crate::core::actions::{
-    CloseActiveTab, DecreaseFontSize, ForkAgentSessionDown, ForkAgentSessionLeft,
-    ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab, SendBackTab, SendTab,
-    SplitDown, SplitRight, ToggleMaximizePane,
+    CloseActiveTab, CopyLinkPathUnderPointer, DecreaseFontSize, ForkAgentSessionDown,
+    ForkAgentSessionLeft, ForkAgentSessionRight, ForkAgentSessionUp, IncreaseFontSize, NewTab,
+    OpenLinkUnderPointer, RevealLinkUnderPointer, SendBackTab, SendTab, SplitDown, SplitRight,
+    ToggleMaximizePane,
 };
 use crate::core::config::{BellMode, Config, LinkFileOpen, MouseZoomModifier, NotifyMode};
 use crate::core::shell_quote::quote_for_shell;
@@ -98,7 +99,7 @@ pub fn declare_displayed(cx: &App, panes: impl IntoIterator<Item = (EntityId, bo
 
 /// What the registry holds for `id`: `None` when the pane never registered
 /// (or already released), otherwise the flag the output gate would consult.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn displayed_for_test(cx: &App, id: EntityId) -> Option<bool> {
     cx.try_global::<DisplayedRegistry>()?
         .0
@@ -163,68 +164,6 @@ pub struct NativeSshParts {
 /// What a pane is called when nothing running in it has said otherwise.
 pub(crate) const DEFAULT_TITLE: &str = "Scottie";
 
-/// Which of a pane's facts its name was taken from.
-///
-/// The live-window twin of
-/// [`TabLabel`](tty7_core::core::tab_view::TabLabel), carrying the ranks a
-/// running pane can answer. Typed rather than a bare `String` because one
-/// caller needs the rank and not just the text: the switcher prints a tab's
-/// path under its label, and doing that under a label *made of* that path
-/// writes the same place twice.
-///
-/// The rank is not the whole of that answer — see
-/// [`TerminalView::named_by_its_place`], which a title that *is* a path has to
-/// be put through as well.
-pub enum PaneName {
-    /// What the program running in the pane called itself.
-    Title(String),
-    /// A validated Agent task title. Unlike a terminal title, this is prose,
-    /// not a path, so callers must clamp it without path abbreviation.
-    Task(String),
-    /// The agent working in it, for a pane that has not titled itself.
-    Agent(String),
-    /// The directory it sits in — nothing here named it, so its place has to.
-    Cwd(String),
-}
-
-impl PaneName {
-    pub fn text(&self) -> &str {
-        match self {
-            Self::Title(s) | Self::Task(s) | Self::Agent(s) | Self::Cwd(s) => s,
-        }
-    }
-
-    pub fn into_text(self) -> String {
-        match self {
-            Self::Title(s) | Self::Task(s) | Self::Agent(s) | Self::Cwd(s) => s,
-        }
-    }
-
-    /// This name cut down to a label, by the rule its *rank* calls for.
-    ///
-    /// Here rather than at each surface because the rule is not the surface's
-    /// to pick: a task title is prose and loses its tail
-    /// ([`clamp_text`](crate::ui::path_display::clamp_text)), while everything
-    /// else may be a path and loses its head
-    /// ([`short_title`](crate::ui::path_display::short_title)). Three places
-    /// draw this — the strip, the pane header, the mirrored switcher — and one
-    /// of them choosing differently is exactly the disagreement `PaneName`
-    /// exists to prevent.
-    ///
-    /// Whatever draws the result still has to elide it the same way: from the
-    /// front for a path, from the end for prose.
-    pub fn label(&self, home: Option<&std::path::Path>) -> String {
-        match self {
-            Self::Task(title) => {
-                crate::ui::path_display::clamp_text(title, crate::core::tab_view::LABEL_MAX)
-            }
-            Self::Title(s) | Self::Agent(s) | Self::Cwd(s) => {
-                crate::ui::path_display::short_title(s, home)
-            }
-        }
-    }
-}
-
 /// A pane's name, as its header draws it and as it came in.
 ///
 /// The two differ on exactly the panes that need the difference: a long path
@@ -236,6 +175,24 @@ pub struct HeaderTitle {
     /// What `label` was made from: the name the program wears, or the
     /// directory standing in for one.
     pub source: String,
+}
+
+/// What a pane is *saying* about itself, if anything — the reading behind
+/// [`TerminalView::stated_title`], split out so it can be pinned without a
+/// live pane.
+///
+/// Anything but the placeholder counts. That is wider than "arrived over OSC
+/// 0/2" on purpose: an SSH pane answers to the host it dialled and a workspace
+/// pane to its workspace's name, and those are names tty7 gave the pane
+/// deliberately (#438) rather than the absence of one. The literal string
+/// `tty7` is the only title that says nothing, because it is the app's own
+/// name standing in for a pane that has never introduced itself.
+pub(crate) fn stated_title(title: &str) -> Option<&str> {
+    match title.trim() {
+        "" => None,
+        t if t == DEFAULT_TITLE => None,
+        t => Some(t),
+    }
 }
 
 pub struct ShellParts {
@@ -294,6 +251,30 @@ fn cwd_is_on_host(pane_runs_remotely: bool, host_is_local: bool) -> bool {
     }
 }
 
+/// Which path dialect a pane's output is written in.
+///
+/// A pane running on this machine spells paths the way this OS does, and that
+/// is the end of it: `/etc` printed by a `cmd.exe` pane sitting on `C:` means
+/// `C:\etc`, exactly as `cd /etc` would there. Reading it as a rooted POSIX
+/// path would underline a file this machine has not got, and a link that
+/// cannot be opened is worse than no link.
+///
+/// A pane whose paths live somewhere else is asked instead — by the only thing
+/// that host ever says about its own spelling, the directory it reports. A
+/// `/`-rooted cwd is a POSIX host's. A pane that has not said where it is
+/// falls to POSIX: there is no local drive to measure it from either way, and
+/// every host tty7 installs a server on over SSH or WSL spells paths that way.
+fn link_path_style(
+    paths_are_local: bool,
+    host_cwd: Option<&std::path::Path>,
+) -> super::search::PathStyle {
+    use super::search::PathStyle;
+    match paths_are_local {
+        true => PathStyle::NATIVE,
+        false => host_cwd.map_or(PathStyle::Posix, PathStyle::of_dir),
+    }
+}
+
 pub struct TerminalView {
     pub terminal: RemoteTerminal,
     host_id: crate::ui::host_ops::HostId,
@@ -321,6 +302,22 @@ pub struct TerminalView {
     pub line_height_mul: f32,
     pub cell_width: Pixels,
     pub(super) line_height: Pixels,
+    /// The grid the last frame painted, and the snapshot that went with it.
+    /// A frame that cannot have the terminal lock repaints this rather than
+    /// waiting on the pane's reader — see [`TerminalElement::build_grid`].
+    /// Owned per pane rather than kept in one shared scratch buffer, because
+    /// what makes it reusable is that it is still the *previous frame of this
+    /// pane* when the next one starts.
+    pub(super) grid_buf: Vec<RenderCell>,
+    pub(super) grid_snap: Option<GridSnapshot>,
+    /// Terminal mode and selection as of the last frame that got the lock.
+    /// What the *frame* declares — the keymap context it publishes, whether it
+    /// draws a selection — is read from here, so drawing never queues behind
+    /// the pane's reader for two bits it can be one frame late about.
+    /// Everything with a decision to make (a keystroke asking whether a
+    /// full-screen program owns the screen) still asks the terminal itself.
+    frame_alt_screen: bool,
+    frame_has_selection: bool,
     selecting: bool,
     drag_scroll: Option<DragScroll>,
     drag_scroll_epoch: u64,
@@ -369,6 +366,10 @@ pub struct TerminalView {
     /// deferred callback, one turn after the click — can still see the
     /// modifiers the user actually held.
     context_menu_allowed: bool,
+    /// The file link the most recent right mouse-down landed on, latched for
+    /// the same reason [`context_menu_allowed`](Self::context_menu_allowed)
+    /// is: by the time the menu is built the pointer is only a memory.
+    menu_link: Option<super::search::LinkTarget>,
     scroll_debt: f32,
     /// Lines travelled under the zoom modifier that have not yet added up to a
     /// font-size step. Kept apart from [`scroll_debt`](Self::scroll_debt) so
@@ -423,6 +424,14 @@ pub struct TerminalView {
     history_ranked: Vec<String>,
     history_frecency: Vec<f64>,
     history_scope: super::history::Scope,
+    /// What each scope this pane has already loaded held when it was left, so
+    /// stepping back into one (`exit` out of an `ssh` session, most of all)
+    /// has a list to recall from right away instead of an empty one that only
+    /// refills once a background read lands (#817).
+    history_cache: Vec<(super::history::Scope, super::history::History)>,
+    /// Whether the current scope's list is a finished load rather than the
+    /// empty placeholder one starts as. Only a finished one is worth stashing.
+    history_ready: bool,
     ranked_cwd: Option<std::path::PathBuf>,
     history_nav: Option<usize>,
     history_stash: String,
@@ -468,6 +477,15 @@ pub struct TerminalView {
 pub(super) struct HoveredLink {
     pub start: Point,
     pub end: Point,
+    /// Whether the modifier that would open this link is down.
+    ///
+    /// A link underlines as soon as the pointer reaches it, so the user can
+    /// see there is something there without holding anything. Only once the
+    /// modifier is down does it look and behave like something clickable:
+    /// promising a hand cursor over a link a plain click will not follow is
+    /// the kind of small lie that teaches people to stop trusting the
+    /// underline.
+    pub armed: bool,
 }
 
 enum LoopbackOpen {
@@ -498,12 +516,44 @@ enum LinkAt {
     None,
 }
 
+/// What it takes to open one of a pane's loopback ports from this machine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PortRoute {
+    /// The port is already reachable here under its own number.
+    Direct,
+    /// A local forward has to exist first; the pane's `ForwardRoute` builds it.
+    Forward,
+    /// Another machine's port, with no way to reach it from here.
+    #[default]
+    Blocked,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum LoopbackPlan {
     Direct,
     NoForwardNeeded,
     ForwardOnPane(u64),
     ForwardOnWorkspace(Box<crate::terminal::PaneWorkspace>),
+}
+
+/// What a pane's loopback port takes to open, given how its links would be
+/// forwarded and whether the daemon listing it is this machine's.
+///
+/// Deliberately not "is the pane local": a remote pane's :3000 is perfectly
+/// reachable once a forward exists, and building that forward is something
+/// this app already knows how to do. Answering only "local or not" is what
+/// left the Ports list showing a port it then refused to open.
+pub(crate) fn port_route_of(plan: &LoopbackPlan, local: bool) -> PortRoute {
+    match plan {
+        // WSL shares this machine's loopback, so its ports are already here
+        // under the same number.
+        LoopbackPlan::NoForwardNeeded => PortRoute::Direct,
+        LoopbackPlan::ForwardOnPane(_) | LoopbackPlan::ForwardOnWorkspace(_) => PortRoute::Forward,
+        // No plan and no forwarding: this machine's own ports open, and
+        // another machine's do not.
+        LoopbackPlan::Direct if local => PortRoute::Direct,
+        LoopbackPlan::Direct => PortRoute::Blocked,
+    }
 }
 
 pub(super) fn loopback_plan(
@@ -772,14 +822,76 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     }
 }
 
-fn submit_bytes(line: &str, bracketed: bool) -> Vec<u8> {
+/// A line the shell can be handed byte for byte, as if it had been typed at its
+/// own prompt.
+///
+/// Control characters are what rule a line out. Under bracketed paste the shell
+/// inserts every byte literally; delivered raw, each one runs through the line
+/// editor's binding table instead, and a Tab completes, a `^U` kills, a `^C`
+/// abandons the line. ESC is already stripped upstream; `is_control` covers the
+/// rest, embedded newlines included — a multi-line command still goes as one
+/// paste, which is what [`submit_bytes`] was built for.
+///
+/// Printable keys are deliberately *not* excluded, and cannot be: a line editor
+/// binding one is exactly the mechanism this exists to reach. fish binds space
+/// to `expand-abbr`; zsh users bind `.` to `rationalise-dot` and quotes to
+/// zsh-autopair. Reaching the first means reaching the others, which is why the
+/// caller keeps pasted text away from this path entirely.
+///
+/// The length bound is a cost ceiling, not a correctness one, and it is a
+/// policy dial rather than a discontinuity in the data. A paste lands in one
+/// go; raw bytes make the shell's line editor redraw as it consumes them, so
+/// the added latency is linear in length from the very first byte — measured on
+/// a pty it rises perfectly smoothly, with no knee to hang a bound on.
+///
+/// What 512 buys is a ceiling on that latency. The worst configuration measured
+/// is zsh with zsh-syntax-highlighting and zsh-autosuggestions, which both
+/// re-run per keystroke: ~0.26 ms per byte, so +15 ms on a typical 60-byte
+/// command and +126 ms at the bound. Bare zsh is ~0.012 ms per byte (+6 ms at
+/// the bound), bash is free at every length, and fish — the shell #660 is about
+/// — shows no penalty this harness can resolve. Halving the bound would halve
+/// the worst case; the number is a judgement about how much latency a long
+/// typed line may pay, not something the curve picks out.
+fn types_cleanly(line: &str) -> bool {
+    line.len() <= 512 && !line.chars().any(char::is_control)
+}
+
+/// Build the byte sequence that submits the local editor's buffer to the shell.
+///
+/// A plain single-line command the user *typed* goes raw, no paste markers: the
+/// shell's own reader then sees the same bytes typing at its prompt would
+/// produce, so its input-time expansions run — fish abbreviations (#660), zsh
+/// `magic-space`, a readline macro on a printable key. Inside a bracketed paste
+/// none of that fires; fish's expand-on-execute only reaches the token under
+/// the cursor, so `j` expanded but `j build` ran literally.
+///
+/// `pasted` is what keeps that from rewriting text the user did not type. A
+/// paste's contract is that what went in is what runs, and a fish user with
+/// `abbr -a l 'ls -la'` pasting `l /tmp` from their notes must not get
+/// `ls -la /tmp`. So a line that has carried clipboard content keeps the paste
+/// framing whatever else is true of it — see [`CmdEditor::pasted`].
+///
+/// Multi-line and control characters keep it too. A multi-line command goes in
+/// as one paste and one CR, so it costs one prompt cycle instead of one per
+/// line — preexec, the user's precmd chain, a syntax-highlight pass over the
+/// whole buffer — and zle keeps the embedded newlines in its buffer, so
+/// backslash / open-quote continuation and heredocs still parse as one unit.
+///
+/// ESC is stripped either way (unlike the paste path): clipboard text carrying
+/// its own `ESC[201~` could otherwise close the paste early and have the rest
+/// run as typed input, and a raw ESC reaching zle is an editor command.
+///
+/// An empty buffer skips the markers: zsh's `bracketed-paste-magic` (which
+/// oh-my-zsh turns on) errors on a paste with nothing between them.
+fn submit_bytes(line: &str, bracketed: bool, pasted: bool) -> Vec<u8> {
     let clean: String = line
         .replace("\r\n", "\n")
         .chars()
         .filter(|&c| c != '\x1b')
         .map(|c| if c == '\r' { '\n' } else { c })
         .collect();
-    let mut bytes = paste_bytes(&clean, bracketed && !clean.is_empty());
+    let framed = bracketed && !clean.is_empty() && (pasted || !types_cleanly(&clean));
+    let mut bytes = paste_bytes(&clean, framed);
     bytes.push(b'\r');
     bytes
 }
@@ -1417,6 +1529,10 @@ impl TerminalView {
             line_height_mul,
             cell_width: px(8.),
             line_height: px(17.),
+            grid_buf: Vec::new(),
+            grid_snap: None,
+            frame_alt_screen: false,
+            frame_has_selection: false,
             selecting: false,
             drag_scroll: None,
             drag_scroll_epoch: 0,
@@ -1437,6 +1553,7 @@ impl TerminalView {
             link_repo_root: None,
             link_repo_root_pending: false,
             context_menu_allowed: true,
+            menu_link: None,
             scroll_debt: 0.,
             zoom_debt: 0.,
             scroll_frac: 0.,
@@ -1476,6 +1593,8 @@ impl TerminalView {
             history_ranked,
             history_frecency,
             history_scope: super::history::Scope::Local,
+            history_cache: Vec::new(),
+            history_ready: true,
             ranked_cwd: None,
             history_nav: None,
             history_stash: String::new(),
@@ -1552,146 +1671,90 @@ impl TerminalView {
         self.terminal.foreground_cwd()
     }
 
-    /// Which of this pane's facts names it, before anybody shortens it.
+    /// This pane as the shared label ladder reads it — the same
+    /// [`TabView`](tty7_core::core::tab_view::TabView) the machine tree hands
+    /// the switcher for a window it does not own, built from the live pane.
     ///
-    /// The one place that *choice* is made, as
-    /// [`short_title`](crate::ui::path_display::short_title) is the one place
-    /// the shortening is. A header, a tab chip and a sidebar row cut the same
-    /// name to three different widths and that is fine — picking three
-    /// different names is not, and is exactly what a header falling back to
-    /// the directory beside a tab reading `title` raw produced: `~/repo` on
-    /// the pane and `Scottie` on the tab above it.
+    /// The one place a pane's facts are put into that shape, so a tab chip, a
+    /// sidebar row, the pane's own header and a mirrored switcher row cannot
+    /// pick different evidence: `Tab::label_view` calls this for the leaf a
+    /// tab is named after, and [`Self::header_title`] for the pane alone.
     ///
-    /// The ranking below is the one the daemon's mirror uses for tabs this
-    /// process does not own (`tty7_core::core::tab_view::TabView::label`):
-    ///
-    /// 1. Whatever runs in the pane, once it has said something semantic.
-    ///    [`DEFAULT_TITLE`] is this app talking rather than the program, so it
-    ///    does not count; neither does a bare `user@host:`, which names
-    ///    nothing once the head comes off. An SSH pane's host *does* count —
-    ///    #438 puts it in `title` and puts it back there on `ResetTitle`,
-    ///    which is why the test is against the generic default and not against
-    ///    `default_title`. Agent activity prefixes are presentation metadata;
-    ///    bare self-names and session UUIDs do not count, and a previous valid
-    ///    task title survives those resets.
-    /// 2. The agent working in it, when one is and it has not said anything
-    ///    yet. Its directory answers a worse question than its name does: the
-    ///    shell that launched it was already sitting there, and so is the pane
-    ///    beside it. `TabLabel::Agent` ranks it here for the same reason, and
-    ///    a local pane that ranked it lower put `~/repo` on one switcher row
-    ///    and `Claude Code` on the mirrored row under it.
-    /// 3. The directory it sits in.
-    ///
-    /// **The ranking is shared; which pane it is asked of is not.** This is
-    /// one pane answering about itself. A tab picks the pane to ask — the
-    /// focused one, through `Tab::title_leaf` — while the mirror cannot: the
-    /// daemon is not told which pane has the keyboard, so `tab_views_of`
-    /// substitutes a heuristic, taking the agent's pane for the title and the
-    /// leading pane for the cwd. A split whose focused shell has said nothing
-    /// while an agent works beside it therefore reads `~/repo` on a local
-    /// switcher row and `Claude Code` on a mirrored one, and both are true of
-    /// a pane in that tab. Matching the mirror exactly would mean throwing
-    /// away the one thing this side knows and the other cannot.
-    ///
-    /// `None` when none of them has anything to say. What to draw then belongs
-    /// to the caller: a header has a strip to fill and spells the app's own
-    /// name, a tab row counts ("Shell 2").
-    pub fn display_source(&self) -> Option<PaneName> {
-        self.display_source_with_activity(false)
+    /// `osc_title` is what the pane has *said* — see [`stated_title`] — and
+    /// nothing when that shortens away to nothing: a bare `user@host:`, which
+    /// a shell integration writes for the fraction of a second it has a host
+    /// but not yet a directory, names less than the directory under it does.
+    /// The agent's cached task titles ride along so a later `claude` or UUID
+    /// reset falls back to the last real task rather than to the agent's name.
+    pub(crate) fn tab_view(
+        &self,
+        id: tty7_core::core::machine::TabId,
+        name: Option<String>,
+        panes: usize,
+    ) -> tty7_core::core::tab_view::TabView {
+        let session = self.agent_session();
+        tty7_core::core::tab_view::TabView {
+            id,
+            name,
+            // The tree's `title` is the foreground process name — what it falls
+            // back on once a pane has said nothing about itself. A live pane's
+            // equivalent is the placeholder it answers to unprompted: any
+            // *other* default it was given (an SSH host, a workspace name) is a
+            // name tty7 chose for it deliberately, and `stated_title` hands
+            // those up as the title the pane is showing.
+            title: DEFAULT_TITLE.to_string(),
+            osc_title: self
+                .stated_title()
+                .filter(|title| crate::ui::path_display::names_something(title))
+                .map(str::to_string),
+            cwd: self.cwd().map(|p| p.display().to_string()),
+            agent: self.agent(),
+            session_id: session.as_ref().and_then(|s| s.session_id.clone()),
+            last_task_title: session.as_ref().and_then(|s| s.last_task_title.clone()),
+            explicit_task_title: session.as_ref().and_then(|s| s.explicit_task_title.clone()),
+            status: session.map(|s| s.status),
+            live: !self.terminal.exited,
+            panes,
+        }
     }
 
-    pub fn display_source_with_activity(&self, show_activity_prefix: bool) -> Option<PaneName> {
-        let title = self.title.trim();
-        let agent = self.agent();
-        if let Some(agent) = agent {
-            let session = self.agent_session();
-            if let Some(title) = crate::core::agent_title::resolve_agent_title(
-                agent,
-                session
-                    .as_ref()
-                    .and_then(|state| state.session_id.as_deref()),
-                (title != DEFAULT_TITLE).then_some(title),
-                session
-                    .as_ref()
-                    .and_then(|state| state.explicit_task_title.as_deref()),
-                session
-                    .as_ref()
-                    .and_then(|state| state.last_task_title.as_deref()),
-                show_activity_prefix,
-            ) {
-                return Some(PaneName::Task(title.into_owned()));
-            }
-            return Some(PaneName::Agent(agent.display_name().to_string()));
-        }
-        if title != DEFAULT_TITLE && crate::ui::path_display::names_something(title) {
-            return Some(PaneName::Title(title.to_string()));
-        }
-        self.cwd()
-            .map(|cwd| cwd.to_string_lossy().into_owned())
-            .filter(|cwd| crate::ui::path_display::names_something(cwd))
-            .map(PaneName::Cwd)
-    }
-
-    /// What the pane's header calls it: [`Self::display_source`] shortened the
-    /// way every other surface naming this pane shortens it.
+    /// What the pane's header calls it: [`Self::tab_view`] rendered the way
+    /// every other surface naming this pane renders it
+    /// ([`rendered_label`](crate::ui::tab_strip::rendered_label)).
+    ///
     /// A shell titles itself `user@host:~/work/tty7/src`, which reads the same
     /// in every pane and is too long to take in at a glance; the cut has to
     /// come off the *front*, because the tail is what tells three panes apart.
+    /// A task title is prose and is cut from the end instead. Nothing to go on
+    /// at all — no name, no directory — and the header still has a strip to
+    /// fill, so it spells the app's own name.
     pub fn header_title(&self, cx: &gpui::App) -> HeaderTitle {
         let home = self.display_home(cx);
-        let show_activity_prefix = cx
-            .global::<crate::core::config::Config>()
-            .show_agent_title_activity_prefix;
-        self.display_source_with_activity(show_activity_prefix)
-            .and_then(|source| {
-                let label = source.label(home.as_deref());
-                if label.trim().is_empty() {
-                    return None;
-                }
-                Some(HeaderTitle {
-                    label,
-                    source: source.into_text(),
-                })
-            })
-            .unwrap_or_else(|| HeaderTitle {
+        let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
+        let view = self.tab_view(tty7_core::core::machine::TabId::new(), None, 1);
+        let label = crate::ui::tab_strip::rendered_label(&view, home.as_deref(), show_activity_prefix)
+            .filter(|label| !label.trim().is_empty());
+        match label {
+            Some(label) => HeaderTitle {
+                label,
+                source: crate::ui::tab_strip::source_of(&view, show_activity_prefix)
+                    .unwrap_or_default(),
+            },
+            None => HeaderTitle {
                 label: DEFAULT_TITLE.to_string(),
                 source: DEFAULT_TITLE.to_string(),
-            })
+            },
+        }
     }
 
-    /// Whether this pane's name already says where the pane is.
-    ///
-    /// Asked by a row that draws the pane's directory on a second line under
-    /// its name: the line is worth having right up until it repeats the one
-    /// above it.
-    ///
-    /// **Not the same question as "did [`Self::display_source`] fall through
-    /// to the cwd".** That was the first answer and it was half of one. A
-    /// shell integration titles its pane `user@host:~/repo` — a
-    /// [`PaneName::Title`] by provenance, and the working directory in fact,
-    /// which [`short_title`](crate::ui::path_display::short_title) then draws
-    /// as `~/repo` directly above a `~/repo` of its own. So the two are
-    /// compared as *places*, under this pane's own host and home (#580),
-    /// rather than trusted on which rank the name arrived by.
-    ///
-    /// An agent's name is never a place, and a pane with nothing to go on has
-    /// no name to repeat: both come back `false`, which leaves the line drawn.
-    /// Failing that way costs a redundant row; failing the other way loses one
-    /// that was carrying something.
-    pub fn named_by_its_place(&self, cx: &gpui::App) -> bool {
-        let title = match self.display_source() {
-            Some(PaneName::Cwd(_)) => return true,
-            Some(PaneName::Title(title)) => title,
-            Some(PaneName::Task(_)) | Some(PaneName::Agent(_)) | None => return false,
-        };
-        let Some(cwd) = self.cwd() else {
-            return false;
-        };
-        crate::ui::path_display::same_place(
-            &title,
-            &cwd.to_string_lossy(),
-            self.display_home(cx).as_deref(),
-        )
+    /// The title this pane is showing, or `None` while it is still answering
+    /// to the app's own name — see [`stated_title`]. The label ladder reads
+    /// this where the machine tree reads
+    /// [`PaneRecord::osc_title`](tty7_core::core::machine::PaneRecord::osc_title),
+    /// which is what lets the tab strip and the switcher name a tab the same
+    /// way.
+    pub(crate) fn stated_title(&self) -> Option<&str> {
+        stated_title(&self.title)
     }
 
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
@@ -1929,6 +1992,15 @@ impl TerminalView {
 
     pub fn git_status_cwd(&self) -> Option<&std::path::Path> {
         self.git_status_cwd.as_deref()
+    }
+
+    /// Plant the cwd the git-status poll would have found. For tests that
+    /// need a pane to look like it is sitting somewhere known — a real poll
+    /// needs a live shell reporting a directory, which a quiet test pane has
+    /// no way to do.
+    #[cfg(test)]
+    pub(crate) fn set_git_status_cwd_for_test(&mut self, cwd: Option<std::path::PathBuf>) {
+        self.git_status_cwd = cwd;
     }
 
     /// The directory this pane's *work* is happening in — what every panel
@@ -2473,6 +2545,7 @@ impl TerminalView {
         let key = ks.key.as_str();
         self.cursor_visible = true;
         self.jump_to_prompt();
+        self.adopt_typeahead();
 
         let aliased;
         let ks = if m.control && !m.platform && !m.alt && matches!(key, "p" | "n") {
@@ -2541,6 +2614,19 @@ impl TerminalView {
         }
 
         self.close_completion();
+
+        // A function key means nothing to this editor and everything to the
+        // shell — PSReadLine puts CharacterSearch on F3 and HistorySearch on
+        // F8, and both of those act on the line that is currently on the
+        // prompt. So it takes the same route an unknown Ctrl chord takes:
+        // hand the line over first, then send the key, with every modifier
+        // combination going the same way (Alt+F7 is ClearHistory).
+        if super::input::is_function_key(key) && !m.platform {
+            if let Some(bytes) = super::input::keystroke_to_bytes(ks, self.key_flags()) {
+                self.handoff_line_to_shell(&bytes, cx);
+                return;
+            }
+        }
 
         if m.control && !m.platform && !m.alt {
             if cfg!(not(target_os = "macos")) {
@@ -2877,8 +2963,12 @@ impl TerminalView {
         self.terminal.term.lock().selection.is_some()
     }
 
+    /// Whether *this frame* draws a selection. The grid half comes from
+    /// [`Self::sync_frame_facts`] rather than the terminal, which is what keeps
+    /// the draw off the lock; a selection that appears while the reader holds
+    /// it is drawn one frame later.
     fn any_selection(&self) -> bool {
-        self.has_selection() || (self.input_active() && self.cmd.selected_text().is_some())
+        self.frame_has_selection || (self.input_active() && self.cmd.selected_text().is_some())
     }
 
     /// The keymap context this pane declares each frame.
@@ -2890,7 +2980,13 @@ impl TerminalView {
     pub(super) fn key_context(&self) -> gpui::KeyContext {
         let mut context = gpui::KeyContext::new_with_defaults();
         context.add("Terminal");
-        if self.on_alt_screen() {
+        // The frame's own answer, not the terminal's. gpui matches keystrokes
+        // against the context the last painted frame published, so this was
+        // already a frame-old reading of the mode even when it locked; the
+        // chord that must not be a frame late (`AlternatePaste`) asks the
+        // terminal again in `alternate_paste`, which is what that comment
+        // below is about.
+        if self.frame_alt_screen {
             context.add("alt_screen");
         }
         context
@@ -2976,7 +3072,7 @@ impl TerminalView {
         self.jump_to_prompt();
         if self.input_active() {
             let trimmed = text.strip_suffix('\n').unwrap_or(&text);
-            self.cmd.insert_str(trimmed);
+            self.cmd.insert_pasted(trimmed);
             self.history_nav = None;
             self.editor_goal_col = None;
             self.close_completion();
@@ -2990,7 +3086,7 @@ impl TerminalView {
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        self.write_gap_text(&text, paste_bytes(&text, bracketed), cx);
+        self.write_gap_text(&text, paste_bytes(&text, bracketed), true, cx);
         cx.notify();
     }
 
@@ -3689,21 +3785,70 @@ impl TerminalView {
         super::history::Scope::Local
     }
 
+    /// How many scopes' lists to keep around. A pane hops between a handful of
+    /// hosts at most; the cap is only here so a long-lived pane that reaches
+    /// many of them cannot grow without bound.
+    const HISTORY_CACHE_MAX: usize = 4;
+
+    /// Park the current scope's list so coming back to it is instant. A list
+    /// that never finished loading is not worth parking — the empty one it
+    /// would leave behind is exactly what the cache exists to avoid handing
+    /// back.
+    fn stash_history(&mut self) {
+        if !self.history_ready {
+            return;
+        }
+        let scope = self.history_scope.clone();
+        self.history_cache.retain(|(cached, _)| *cached != scope);
+        self.history_cache.push((
+            scope,
+            super::history::History {
+                entries: std::mem::take(&mut self.history),
+                counts: std::mem::take(&mut self.history_counts),
+                cwds: std::mem::take(&mut self.history_cwds),
+                meta: std::mem::take(&mut self.history_meta),
+            },
+        ));
+        if self.history_cache.len() > Self::HISTORY_CACHE_MAX {
+            self.history_cache.remove(0);
+        }
+    }
+
     fn follow_history_scope(&mut self, cx: &mut Context<Self>) {
         let scope = self.desired_history_scope();
         if scope == self.history_scope {
             return;
         }
         self.flush_pending_history();
+        self.stash_history();
         self.history_scope = scope.clone();
-        self.history.clear();
-        self.history_counts.clear();
-        self.history_cwds.clear();
-        self.history_meta.clear();
+        match self
+            .history_cache
+            .iter()
+            .position(|(cached, _)| *cached == scope)
+        {
+            Some(i) => {
+                let (_, cached) = self.history_cache.remove(i);
+                self.history = cached.entries;
+                self.history_counts = cached.counts;
+                self.history_cwds = cached.cwds;
+                self.history_meta = cached.meta;
+                self.history_ready = true;
+            }
+            None => {
+                self.history.clear();
+                self.history_counts.clear();
+                self.history_cwds.clear();
+                self.history_meta.clear();
+                self.history_ready = false;
+            }
+        }
         self.history_ranked.clear();
         self.history_frecency.clear();
         self.history_nav = None;
         self.reverse_search = None;
+        let ranked_cwd = self.ranked_cwd.clone();
+        self.rerank_history(ranked_cwd.as_deref());
         cx.notify();
 
         let shell_files = self.remote_shell_history_sources(cx);
@@ -3731,6 +3876,7 @@ impl TerminalView {
                 view.history_counts = loaded.counts;
                 view.history_cwds = loaded.cwds;
                 view.history_meta = loaded.meta;
+                view.history_ready = true;
                 let cwd = view.ranked_cwd.clone();
                 view.rerank_history(cwd.as_deref());
                 cx.notify();
@@ -4153,12 +4299,36 @@ impl TerminalView {
     }
 
     fn flush_typeahead(&mut self) {
+        let pasted = self.typeahead.pasted();
         let Some(seed) = self.typeahead.drain() else {
             return;
         };
         self.terminal.write(vec![0x15]);
         if !seed.is_empty() {
-            self.cmd.prepend_str(&seed);
+            self.prepend_into_editor(&seed, pasted);
+        }
+    }
+
+    /// Take the record into the editor without paying the wipe yet. Every door
+    /// into the editor opens with this.
+    ///
+    /// `at_prompt` comes back on the `D` mark, a whole prompt draw ahead of the
+    /// `B` that arms `zle_reading`, and this editor is live for that whole
+    /// window. Everything it offers rewrites the line — history recall and the
+    /// ghost suggestion replace it wholesale, ⌃U empties it, completion filters
+    /// on it — so the line has to be whole *before* those run, not stitched
+    /// back together at submit time in front of whatever replaced it. Folding
+    /// it in that late made `↑` then Enter run the recalled entry with the gap
+    /// text glued to its front, and ⌃U then Enter bring back the text ⌃U had
+    /// just cleared.
+    ///
+    /// The `^U` stays owed until `flush_typeahead`, which keeps it where it has
+    /// always been on the wire: immediately before the line. Sending it here
+    /// instead would put it out before the shell's own editor is reading.
+    fn adopt_typeahead(&mut self) {
+        let pasted = self.typeahead.pasted();
+        if let Some(seed) = self.typeahead.adopt() {
+            self.prepend_into_editor(&seed, pasted);
         }
     }
 
@@ -4172,14 +4342,21 @@ impl TerminalView {
         self.terminal.shell_active() && !self.on_alt_screen() && !self.shell_owns_prompt()
     }
 
-    fn write_gap_text(&mut self, text: &str, bytes: Vec<u8>, cx: &mut Context<Self>) {
+    /// `pasted` says the text came off the clipboard rather than the keyboard,
+    /// so that a paste the hold keeps for the editor still reaches it marked.
+    fn write_gap_text(&mut self, text: &str, bytes: Vec<u8>, pasted: bool, cx: &mut Context<Self>) {
         if self.shell_owns_prompt() {
             self.release_hold();
             self.terminal.write(bytes);
             return;
         }
         if self.gap_holdable() && !text.chars().any(char::is_control) {
-            match self.hold.hold_text(text, &bytes) {
+            let held = if pasted {
+                self.hold.hold_pasted_text(text, &bytes)
+            } else {
+                self.hold.hold_text(text, &bytes)
+            };
+            match held {
                 Verdict::Held(arm) => {
                     if let Some(epoch) = arm {
                         self.arm_hold_timer(epoch, cx);
@@ -4192,13 +4369,52 @@ impl TerminalView {
             self.release_hold();
         }
         self.terminal.write(bytes);
-        self.observe_typeahead(RawInput::Text(text));
+        self.observe_gap_text(text, pasted);
+    }
+
+    /// Move whatever the gap hold collected into the editor's buffer, keeping
+    /// the paste mark with it.
+    ///
+    /// The hold is the one route into that buffer that does not run through
+    /// the editor: text arriving before the prompt does is kept out here and
+    /// prepended when the editor takes over. A paste that lost its provenance
+    /// on the way would be submitted as typed (#660) — see
+    /// [`CmdEditor::prepend_pasted`].
+    fn engage_hold_into_editor(&mut self) {
+        let pasted = self.hold.pasted();
+        let Some(net) = self.hold.engage() else {
+            return;
+        };
+        self.prepend_into_editor(&net, pasted);
+    }
+
+    /// Put text in front of the editor's line that the editor did not receive
+    /// through its own keys, keeping the provenance that decides how the line
+    /// is submitted (#660). Both routes that do this — the gap hold and the
+    /// typeahead record — carry a `pasted()` to read before they hand over.
+    fn prepend_into_editor(&mut self, text: &str, pasted: bool) {
+        if pasted {
+            self.cmd.prepend_pasted(text);
+        } else {
+            self.cmd.prepend_str(text);
+        }
+    }
+
+    /// A gap's text on its way to the record, which replays it into the editor
+    /// later — so a paste has to be recorded as one.
+    fn observe_gap_text(&mut self, text: &str, pasted: bool) {
+        self.observe_typeahead(if pasted {
+            RawInput::Pasted(text)
+        } else {
+            RawInput::Text(text)
+        });
     }
 
     fn release_hold(&mut self) {
+        let pasted = self.hold.pasted();
         if let Some((net, bytes)) = self.hold.release() {
             self.terminal.write(bytes);
-            self.observe_typeahead(RawInput::Text(&net));
+            self.observe_gap_text(&net, pasted);
         }
     }
 
@@ -4215,9 +4431,10 @@ impl TerminalView {
             let _ = self.hold.timeout(epoch);
             return;
         }
+        let pasted = self.hold.pasted();
         if let Some((net, bytes)) = self.hold.timeout(epoch) {
             self.terminal.write(bytes);
-            self.observe_typeahead(RawInput::Text(&net));
+            self.observe_gap_text(&net, pasted);
             cx.notify();
         }
     }
@@ -4267,9 +4484,17 @@ impl TerminalView {
         if self.terminal.exited || !self.accepts_input(cx) {
             return;
         }
-        if let Some(net) = self.hold.engage() {
-            self.cmd.prepend_str(&net);
-        }
+        self.engage_hold_into_editor();
+        // The shell is still holding the recorded text on its own line, and the
+        // ^U that erases it has not gone out yet: `at_prompt` comes back on the
+        // `D` mark, before the prompt is even drawn, while the wipe waits for
+        // `B`. The key that got here has folded the seed into the line already,
+        // so this is usually just paying the wipe that left owed; where nothing
+        // has, the drain still puts the seed back the way every other drain
+        // does. Dropping it submitted only what was typed after the handover,
+        // and an empty command when that was nothing, which is the blank line
+        // #433 reports.
+        self.flush_typeahead();
         let line = self.cmd.text();
         if !line.trim().is_empty() {
             let cwd = self.cwd();
@@ -4305,14 +4530,14 @@ impl TerminalView {
         self.history_prefix.clear();
         self.close_completion();
 
-        self.wipe_pending_typeahead();
         let bracketed = self
             .terminal
             .term
             .lock()
             .mode()
             .contains(TermMode::BRACKETED_PASTE);
-        self.terminal.write(submit_bytes(&line, bracketed));
+        let pasted = self.cmd.pasted();
+        self.terminal.write(submit_bytes(&line, bracketed, pasted));
         self.cmd.clear();
         self.cursor_visible = true;
         self.jump_to_prompt();
@@ -4539,16 +4764,19 @@ impl TerminalView {
         if !self.accepts_input(cx) {
             return;
         }
-        if let Some(net) = self.hold.engage() {
-            self.cmd.prepend_str(&net);
-        }
+        self.engage_hold_into_editor();
+        // Same reason as `submit_command`: what the record holds is on the
+        // shell's own line, so it belongs in front of the line handed back.
+        // The wipe waits until past the multi-line bail, which hands nothing
+        // over and so must put nothing on the wire either.
+        self.adopt_typeahead();
         let line = self.cmd.text();
         if line.contains('\n') {
             cx.notify();
             return;
         }
         self.close_completion();
-        self.wipe_pending_typeahead();
+        self.flush_typeahead();
         let tail = line.chars().count().saturating_sub(self.cmd.cursor());
         if !line.is_empty() {
             self.terminal.write(line.into_bytes());
@@ -5023,6 +5251,7 @@ impl TerminalView {
             return;
         }
         if self.input_active() {
+            self.adopt_typeahead();
             self.cmd.insert_str(text);
             self.history_nav = None;
             self.editor_goal_col = None;
@@ -5032,7 +5261,7 @@ impl TerminalView {
             cx.notify();
             return;
         }
-        self.write_gap_text(text, text.as_bytes().to_vec(), cx);
+        self.write_gap_text(text, text.as_bytes().to_vec(), false, cx);
         self.cursor_visible = true;
         cx.notify();
     }
@@ -5408,7 +5637,12 @@ impl TerminalView {
             // paint the grid shifted off the row the thumb just picked.
             self.scroll_frac = 0.;
         }
-        let term = self.terminal.term.lock();
+        // Not worth a wait: the scrollbar is a picture of where the grid is,
+        // and a frame that cannot have the lock keeps the picture it drew last
+        // time rather than parking the whole window to refresh a thumb.
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
+            return;
+        };
         let grid = GridScroll {
             history: term.grid().history_size(),
             display_offset: term.grid().display_offset(),
@@ -5417,6 +5651,23 @@ impl TerminalView {
         };
         drop(term);
         self.scroll_handle.sync(grid);
+    }
+
+    /// Re-read the two things the frame itself declares — the terminal mode its
+    /// keymap context is built from, and whether there is a selection to draw.
+    ///
+    /// One `try_lock` at the top of the frame, not one per reader: every
+    /// caller inside `render` would otherwise take the lock separately, and
+    /// each of those is another chance to sit behind the pane's reader with the
+    /// whole window's frame in hand. Failing to get it leaves the previous
+    /// frame's answers in place, which is the same bargain the grid makes in
+    /// [`TerminalElement::build_grid`].
+    fn sync_frame_facts(&mut self) {
+        let Some(term) = self.terminal.term.try_lock_unfair() else {
+            return;
+        };
+        self.frame_alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        self.frame_has_selection = term.selection.is_some();
     }
 
     /// The scrollback bar, laid down the right edge of the grid.
@@ -5474,6 +5725,70 @@ impl TerminalView {
             LinkAt::None => return false,
         }
         true
+    }
+
+    /// Latches the file link under a right mouse-down for the context menu.
+    ///
+    /// Resolving here rather than in the menu builder is what lets the menu
+    /// name a real file: the builder runs a turn later, with no event and no
+    /// pointer, and asking the grid then would be asking about wherever the
+    /// mouse has since gone.
+    pub fn record_menu_link(&mut self, col: usize, row: usize, cx: &mut Context<Self>) {
+        // The same switch that decides whether a path underlines and whether a
+        // click follows one. Without this the menu would go on offering to
+        // open files in a pane where link detection is turned off.
+        if !cx.global::<Config>().link_url {
+            self.menu_link = None;
+            return;
+        }
+        let include_loopback = self.can_forward_loopback(cx);
+        self.menu_link = match self.resolve_link_at(col, row, true, include_loopback, cx) {
+            LinkAt::Found(target @ LinkTarget::File { .. }, ..) => Some(target),
+            _ => None,
+        };
+    }
+
+    /// Drops a latched link, for a right click the application is taking.
+    pub fn forget_menu_link(&mut self) {
+        self.menu_link = None;
+    }
+
+    /// The path the context menu is about, if it is about one.
+    fn menu_link_path(&self) -> Option<&std::path::Path> {
+        match self.menu_link.as_ref()? {
+            LinkTarget::File { path, .. } => Some(path),
+            LinkTarget::Url(_) => None,
+        }
+    }
+
+    fn open_menu_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(LinkTarget::File {
+            path,
+            line,
+            column,
+            is_dir,
+        }) = self.menu_link.clone()
+        else {
+            return;
+        };
+        self.open_file_link(path, line, column, is_dir, window, cx);
+    }
+
+    fn reveal_menu_link(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.menu_link_path().map(std::path::Path::to_path_buf) else {
+            return;
+        };
+        if let Err(e) = reveal_file_path(&path) {
+            self.warn_file_open_failed(&path, &e, window, cx);
+        }
+    }
+
+    fn copy_menu_link_path(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.menu_link_path() else {
+            return;
+        };
+        let text = path.to_string_lossy().into_owned();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     /// Hands a resolved file link to whatever the user wants opening files.
@@ -5544,9 +5859,10 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        let roots = self.link_roots(cx);
         // A word that is not written like a path was never a link, and saying
         // so on every modifier-click over ordinary output would be noise.
-        if !candidate.looks_like_a_path() {
+        if !candidate.looks_like_a_path(roots.style) {
             return false;
         }
         // The host has not answered yet. The underline is the promise that it
@@ -5557,10 +5873,10 @@ impl TerminalView {
         // An absolute or `~`-rooted path was never measured from anywhere, so
         // naming a directory it was "looked for under" would send the user to
         // somewhere nothing was ever asked about.
-        let rooted = candidate.is_rooted();
+        let rooted = candidate.is_rooted(roots.style);
         let root = match rooted {
             true => None,
-            false => self.link_roots(cx).dirs.into_iter().next(),
+            false => roots.dirs.into_iter().next(),
         };
         let message = match root {
             Some(root) => t_fmt(
@@ -5600,12 +5916,9 @@ impl TerminalView {
         }
 
         let forwarded = match &plan {
-            LoopbackPlan::ForwardOnPane(pane_id) => RemoteTerminal::ensure_loopback_forward(
-                *pane_id,
-                loopback.forward_host(),
-                loopback.port,
-            ),
-            LoopbackPlan::ForwardOnWorkspace(ws) => self.ensure_workspace_loopback(ws, &loopback),
+            LoopbackPlan::ForwardOnPane(_) | LoopbackPlan::ForwardOnWorkspace(_) => self
+                .forward_route()
+                .ensure_loopback(loopback.forward_host(), loopback.port),
             LoopbackPlan::Direct | LoopbackPlan::NoForwardNeeded => unreachable!("handled above"),
         };
         match forwarded {
@@ -5623,27 +5936,14 @@ impl TerminalView {
         }
     }
 
-    fn ensure_workspace_loopback(
-        &self,
-        ws: &crate::terminal::PaneWorkspace,
-        loopback: &super::loopback::LoopbackUrl,
-    ) -> anyhow::Result<crate::daemon::protocol::LoopbackForward> {
-        let req = RemoteTerminal::workspace_request(
-            ws,
-            self.pane_id,
-            crate::daemon::protocol::WorkspaceOp::EnsureLoopback {
-                remote_host: loopback.forward_host().to_string(),
-                remote_port: loopback.port,
-            },
-        )
-        .ok_or_else(|| anyhow::anyhow!("this workspace has no SSH connection to forward over"))?;
-        match RemoteTerminal::on_workspace(req)? {
-            crate::daemon::protocol::DaemonMsg::LoopbackForward(f) => Ok(f),
-            other => Err(anyhow::anyhow!("unexpected reply: {other:?}")),
-        }
+    /// How forward requests about this pane reach the daemon that owns them —
+    /// through the workspace when there is one, and by pane id when there is
+    /// not. The Ports list and the port watcher build the same thing.
+    pub(crate) fn forward_route(&self) -> crate::ui::app::ForwardRoute {
+        crate::ui::app::ForwardRoute::new(self.pane_id, self.workspace.clone())
     }
 
-    fn loopback_plan(&self, cx: &mut Context<Self>) -> LoopbackPlan {
+    fn loopback_plan(&self, cx: &gpui::App) -> LoopbackPlan {
         loopback_plan(
             cx.global::<Config>().ssh_loopback_forward,
             self.workspace.as_ref(),
@@ -5652,24 +5952,60 @@ impl TerminalView {
         )
     }
 
-    fn can_forward_loopback(&self, cx: &mut Context<Self>) -> bool {
+    fn can_forward_loopback(&self, cx: &gpui::App) -> bool {
         !matches!(self.loopback_plan(cx), LoopbackPlan::Direct)
+    }
+
+    /// How a loopback port this pane is serving can be reached from here.
+    ///
+    /// The Ports list asks this about every listener it found, and it is a
+    /// different question from "is this pane local": a remote pane's :3000 is
+    /// perfectly reachable once a forward exists, and building that forward is
+    /// something this app already knows how to do. Answering only "local or
+    /// not" is what left the list showing a port it refused to open.
+    pub(crate) fn port_route(&self, cx: &gpui::App) -> PortRoute {
+        port_route_of(&self.loopback_plan(cx), self.host_id().is_local())
     }
 
     pub fn hover_link_at(
         &mut self,
         col: usize,
         row: usize,
-        include_files: bool,
+        armed: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A mouse crossing a pane lands on the same cell many times over.
+        // Nothing about the answer depends on where inside the cell the
+        // pointer is, so the work is worth doing once.
+        if self.last_hover_cell == Some((col, row)) && self.link_modifier_down == armed {
+            return self.hovered_link.is_some();
+        }
         self.last_hover_cell = Some((col, row));
+        self.link_modifier_down = armed;
         if !cx.global::<Config>().link_url {
             self.clear_hovered_link(cx);
             return false;
         }
+        // A full-screen application drew what is on the grid and is watching
+        // the mouse itself, so pointing things out inside it is tty7 drawing
+        // on somebody else's window. Holding the modifier says the user wants
+        // tty7's reading of the screen anyway, and then it is theirs to have.
+        if !armed && self.on_alt_screen() {
+            if self.hovered_link.take().is_some() {
+                cx.notify();
+            }
+            return false;
+        }
+        // Most of a screen is blanks, and reading one cell costs a fraction
+        // of lifting a whole soft-wrapped logical line out of the grid.
+        if self.cell_is_blank(col, row) {
+            if self.hovered_link.take().is_some() {
+                cx.notify();
+            }
+            return false;
+        }
         let include_loopback = self.can_forward_loopback(cx);
-        let next = self.link_span_at(col, row, include_files, include_loopback, cx);
+        let next = self.link_span_at(col, row, armed, include_loopback, cx);
         if next != self.hovered_link {
             self.hovered_link = next;
             cx.notify();
@@ -5677,12 +6013,47 @@ impl TerminalView {
         self.hovered_link.is_some()
     }
 
-    pub fn refresh_link_hover(&mut self, include_files: bool, cx: &mut Context<Self>) -> bool {
-        self.link_modifier_down = include_files;
+    /// Whether the cell under the pointer holds anything a link could be made
+    /// of.
+    fn cell_is_blank(&self, col: usize, row: usize) -> bool {
+        use alacritty_terminal::term::cell::Flags;
+
+        let term = self.terminal.term.lock();
+        let Some(line) = Self::grid_line(&term, row) else {
+            return true;
+        };
+        if col >= term.columns() {
+            return true;
+        }
+        let cell = &term.grid()[line][Column(col)];
+        // The second column of a wide glyph is written as a space, and the
+        // logical line hands a click there back to the character that owns it.
+        // Reading it as empty would drop the underline on every other column
+        // of a path spelled in CJK or emoji.
+        if cell.flags.intersects(
+            Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER | Flags::WIDE_CHAR,
+        ) {
+            return false;
+        }
+        cell.c.is_whitespace()
+    }
+
+    pub fn refresh_link_hover(&mut self, armed: bool, cx: &mut Context<Self>) -> bool {
         let Some((col, row)) = self.last_hover_cell else {
+            self.link_modifier_down = armed;
             return false;
         };
-        self.hover_link_at(col, row, include_files, cx)
+        self.hover_link_at(col, row, armed, cx)
+    }
+
+    /// Runs the hover again from scratch, for when the answer may have
+    /// changed under a mouse that never moved: a probe landing, a repository
+    /// root arriving.
+    fn recompute_link_hover(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some((col, row)) = self.last_hover_cell.take() else {
+            return false;
+        };
+        self.hover_link_at(col, row, self.link_modifier_down, cx)
     }
 
     pub fn link_modifier_down(&self) -> bool {
@@ -5700,12 +6071,12 @@ impl TerminalView {
         &mut self,
         col: usize,
         row: usize,
-        include_files: bool,
+        armed: bool,
         include_loopback: bool,
         cx: &mut Context<Self>,
     ) -> Option<HoveredLink> {
-        match self.resolve_link_at(col, row, include_files, include_loopback, cx) {
-            LinkAt::Found(_, start, end) => Some(HoveredLink { start, end }),
+        match self.resolve_link_at(col, row, true, include_loopback, cx) {
+            LinkAt::Found(_, start, end) => Some(HoveredLink { start, end, armed }),
             LinkAt::Unresolved { .. } | LinkAt::None => None,
         }
     }
@@ -5753,12 +6124,11 @@ impl TerminalView {
             pending |= matches!(answer, super::search::Probe::Unknown);
             answer
         };
-        let lookup = super::search::link_lookup_at(&text, click_idx, &roots, files, &mut probe);
+        let link = super::search::link_at(&text, click_idx, &roots, files, &mut probe);
         // `probe` holds the cache borrow; nothing below touches it, so the
         // borrow ends here and `self` is whole again for the flush.
         self.flush_link_probes(cx);
 
-        let super::search::LinkLookup { link, candidate } = lookup;
         let link = link.or_else(|| {
             include_loopback.then(|| {
                 super::loopback::loopback_url_span_at(&text, click_idx).map(|(start, end, url)| {
@@ -5774,7 +6144,10 @@ impl TerminalView {
             Some(link) => LinkAt::Found(link.target, points[link.start], points[link.end]),
             // Nothing answered. Hand back what the token *said* so a click can
             // say so out loud instead of looking broken.
-            None => match candidate {
+            None => match files
+                .then(|| super::search::unresolved_candidate(&text, click_idx, roots.style))
+                .flatten()
+            {
                 Some(candidate) => LinkAt::Unresolved { candidate, pending },
                 None => LinkAt::None,
             },
@@ -5811,10 +6184,12 @@ impl TerminalView {
     /// that exists in both is the near one.
     fn link_roots(&mut self, cx: &mut Context<Self>) -> super::search::LinkRoots {
         let local_home = self.host_id.is_local();
+        let style = self.link_path_style();
         let Some(cwd) = self.effective_host_cwd() else {
             return super::search::LinkRoots {
                 dirs: Vec::new(),
                 local_home,
+                style,
             };
         };
         self.request_link_repo_root(&cwd, cx);
@@ -5825,7 +6200,17 @@ impl TerminalView {
         {
             dirs.push(root.clone());
         }
-        super::search::LinkRoots { dirs, local_home }
+        super::search::LinkRoots {
+            dirs,
+            local_home,
+            style,
+        }
+    }
+
+    /// Which path dialect this pane's output is written in — see
+    /// [`link_path_style`].
+    fn link_path_style(&self) -> super::search::PathStyle {
+        link_path_style(self.paths_are_local(), self.effective_host_cwd().as_deref())
     }
 
     fn request_link_repo_root(&mut self, cwd: &std::path::Path, cx: &mut Context<Self>) {
@@ -5866,8 +6251,7 @@ impl TerminalView {
             move |view, root, cx| {
                 view.link_repo_root_pending = false;
                 view.link_repo_root = Some((cwd, root));
-                let down = view.link_modifier_down;
-                view.refresh_link_hover(down, cx);
+                view.recompute_link_hover(cx);
             },
         );
     }
@@ -5911,8 +6295,7 @@ impl TerminalView {
             },
             |view, answers, cx| {
                 if view.link_probes.land(answers) {
-                    let down = view.link_modifier_down;
-                    view.refresh_link_hover(down, cx);
+                    view.recompute_link_hover(cx);
                 }
             },
         );
@@ -6532,6 +6915,7 @@ impl Drop for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_frame_facts();
         self.sync_typeahead_owner();
         self.sync_scrollbar();
         if self.shell_owns_prompt() {
@@ -6540,9 +6924,7 @@ impl Render for TerminalView {
             }
             self.typeahead.drain();
         } else if self.input_active() {
-            if let Some(net) = self.hold.engage() {
-                self.cmd.prepend_str(&net);
-            }
+            self.engage_hold_into_editor();
             if self.terminal.zle_reading() {
                 self.flush_typeahead();
             }
@@ -6574,6 +6956,11 @@ impl Render for TerminalView {
 
         div()
             .id("terminal-surface")
+            // The surface, not the grid inside it, is what carries the role:
+            // a11y focus is only ever reported for a `div` that tracks a focus
+            // handle *and* has a node of its own, so a terminal with no role
+            // here is a window whose focused element is the window.
+            .role(gpui::Role::MultilineTextInput)
             .track_focus(&self.focus_handle)
             .key_context(self.key_context())
             .size_full()
@@ -6626,13 +7013,36 @@ impl Render for TerminalView {
             .on_action(
                 cx.listener(|this, _: &FindInTerminal, window, cx| this.open_search(window, cx)),
             )
+            // Off macOS these two live on F3 and Shift+F3, which is also where
+            // PSReadLine keeps CharacterSearch and readline users put their
+            // own widgets. With no find bar open there is no next match to
+            // step to, so the keystroke is given back the way `EditorSave`
+            // gives back Ctrl+S — otherwise the action swallows the key and
+            // the shell never sees it (#834).
             .on_action(cx.listener(|this, _: &FindNext, _w, cx| {
+                if this.search.is_none() {
+                    cx.propagate();
+                    return;
+                }
                 this.step_match(Direction::Right, cx);
             }))
             .on_action(cx.listener(|this, _: &FindPrevious, _w, cx| {
+                if this.search.is_none() {
+                    cx.propagate();
+                    return;
+                }
                 this.step_match(Direction::Left, cx);
             }))
             .on_action(cx.listener(|this, _: &ClearScrollback, _w, cx| this.clear_scrollback(cx)))
+            .on_action(cx.listener(|this, _: &OpenLinkUnderPointer, window, cx| {
+                this.open_menu_link(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RevealLinkUnderPointer, window, cx| {
+                this.reveal_menu_link(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CopyLinkPathUnderPointer, _w, cx| {
+                this.copy_menu_link_path(cx);
+            }))
             .on_action(cx.listener(|this, _: &InsertNewline, _w, cx| {
                 this.insert_newline_action(cx);
             }))
@@ -6663,6 +7073,37 @@ impl Render for TerminalView {
                 if !menu_view.read(cx).context_menu_allowed {
                     return menu;
                 }
+                let view = menu_view.read(cx);
+                // A path is the most specific thing the pointer can be on, so
+                // what it can do goes above what the pane can do.
+                let menu = match view.menu_link_path() {
+                    Some(path) => {
+                        let local = view.host_id.is_local();
+                        let reveal = match cfg!(target_os = "macos") {
+                            true => L10nKey::AppMenuRevealInFinder,
+                            false => L10nKey::AppMenuRevealInFolder,
+                        };
+                        let label = link_menu_label(path);
+                        menu.min_w(px(220.))
+                            .action_context(menu_focus.clone())
+                            .label(label)
+                            .menu(t(L10nKey::AppMenuOpenLink), Box::new(OpenLinkUnderPointer))
+                            // A file on another machine has no folder here to
+                            // show it in, and naming this one's would show
+                            // whatever it happens to keep at that path.
+                            .menu_element_with_disabled(
+                                Box::new(RevealLinkUnderPointer),
+                                !local,
+                                menu_row_with_hint(t(reveal), None),
+                            )
+                            .menu(
+                                t(L10nKey::AppMenuCopyLinkPath),
+                                Box::new(CopyLinkPathUnderPointer),
+                            )
+                            .separator()
+                    }
+                    None => menu,
+                };
                 let menu = menu
                     .min_w(px(220.))
                     .action_context(menu_focus.clone())
@@ -6691,7 +7132,6 @@ impl Render for TerminalView {
                         Box::new(ClearScrollback),
                     );
 
-                let view = menu_view.read(cx);
                 // `fork_label` is tty7-core's capability probe, and core has no
                 // locale table — take the answer, not its English wording.
                 let can_fork = view.agent().and_then(|a| a.fork_label()).is_some();
@@ -6740,6 +7180,15 @@ impl Render for TerminalView {
                     .menu(t(L10nKey::AppMenuClosePaneTab), Box::new(CloseActiveTab))
             })
     }
+}
+
+/// The header the link section of the context menu wears: the file's own
+/// name, so a menu opened over a long path says which one it is about without
+/// making the menu as wide as the path.
+fn link_menu_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn menu_row_with_hint(
@@ -6974,6 +7423,39 @@ pub(crate) fn open_file_path(path: &std::path::Path) -> std::io::Result<()> {
         "xdg-open"
     };
     std::process::Command::new(opener).arg(path).spawn()?;
+    Ok(())
+}
+
+/// Shows a path where it lives, rather than opening it.
+///
+/// `open -R` and `explorer /select,` both select the file inside its folder;
+/// no desktop-neutral Linux equivalent exists, so there the folder is opened
+/// and the file is left for the eye to find.
+pub(crate) fn reveal_file_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    // Explorer wants `/select,` bare and the path quoted behind it. `arg`
+    // quotes the whole thing the moment the path holds a space, and Explorer
+    // answers a quoted switch by opening Documents and reporting success —
+    // so the command line is written out by hand.
+    #[cfg(windows)]
+    let mut command = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("explorer");
+        c.raw_arg(format!("/select,\"{}\"", path.display()));
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    command.spawn()?;
     Ok(())
 }
 
@@ -7473,6 +7955,31 @@ fn drag_scroll_step(overshoot: f32) -> i32 {
 #[cfg(test)]
 mod tests {
 
+    /// What the label ladder asks a pane: are you showing a name of your own,
+    /// or still standing under the app's? (#740)
+    #[test]
+    fn a_pane_states_a_title_whenever_it_is_not_the_placeholder() {
+        use super::stated_title;
+
+        // Nothing has spoken — this is the pane a directory stands in for.
+        assert_eq!(stated_title("tty7"), None);
+        assert_eq!(stated_title("  tty7  "), None);
+        assert_eq!(stated_title("   "), None);
+
+        // A title from the program running in it.
+        assert_eq!(stated_title("vim — main.rs"), Some("vim — main.rs"));
+        assert_eq!(stated_title(" user@host:~/repo "), Some("user@host:~/repo"));
+        // A default tty7 chose for the pane itself is a name, not the absence
+        // of one: an SSH pane answers to its host (#438) and a workspace pane
+        // to its workspace, and neither gives way to a directory.
+        assert_eq!(stated_title("prod-web"), Some("prod-web"));
+        // So does the state a finished pane is left showing.
+        assert_eq!(
+            stated_title("tty7 — process exited"),
+            Some("tty7 — process exited")
+        );
+    }
+
     #[test]
     fn an_unfocused_input_caret_is_always_a_steady_outline() {
         use super::{InputCaretPaint, input_caret_paint};
@@ -7534,9 +8041,10 @@ mod tests {
         assert!(!out.contains(" …"), "{out:?}");
     }
     use super::{
-        COMPLETION_MENU_MAX_W, LoopbackPlan, RawInput, SelectEndCopy, Typeahead, WheelRoute,
-        clipboard_paste_text, compose_notification_title, cwd_is_on_host, display_width,
-        is_typeahead_interrupt, loopback_plan, observe_typeahead_for_owner,
+        COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
+        WheelRoute, clipboard_paste_text, compose_notification_title, cwd_is_on_host,
+        display_width, is_typeahead_interrupt, link_path_style, loopback_plan,
+        observe_typeahead_for_owner,
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
@@ -7770,6 +8278,34 @@ mod tests {
         assert_eq!(
             loopback_plan(true, Some(&w), Some(RemoteKind::NativeSsh), 7),
             LoopbackPlan::ForwardOnWorkspace(Box::new(w))
+        );
+    }
+
+    /// What the Ports list asks about every listener it found. The middle
+    /// case is the one that matters: a remote pane's port is not unreachable,
+    /// it is one forward away.
+    #[test]
+    fn a_remote_port_is_a_forward_away_rather_than_out_of_reach() {
+        use super::port_route_of;
+        assert_eq!(
+            port_route_of(&LoopbackPlan::ForwardOnPane(7), false),
+            PortRoute::Forward
+        );
+        assert_eq!(
+            port_route_of(&LoopbackPlan::NoForwardNeeded, false),
+            PortRoute::Direct,
+            "WSL serves onto this machine's own loopback"
+        );
+        assert_eq!(
+            port_route_of(&LoopbackPlan::Direct, true),
+            PortRoute::Direct,
+            "this machine's ports open with no help"
+        );
+        assert_eq!(
+            port_route_of(&LoopbackPlan::Direct, false),
+            PortRoute::Blocked,
+            "another machine's port with forwarding turned off is not ours to \
+             open — opening it here would reach some unrelated local service"
         );
     }
 
@@ -8643,45 +9179,122 @@ mod tests {
     #[test]
     fn submit_bytes_sends_a_multi_line_command_as_one_bracketed_paste() {
         assert_eq!(
-            submit_bytes("echo a\necho b\necho c", true),
+            submit_bytes("echo a\necho b\necho c", true, false),
             b"\x1b[200~echo a\necho b\necho c\x1b[201~\r".to_vec()
         );
-        let out = submit_bytes("a\nb\nc\nd", true);
+        let out = submit_bytes("a\nb\nc\nd", true, false);
         assert_eq!(out.iter().filter(|&&b| b == b'\r').count(), 1);
+    }
+
+    #[test]
+    fn submit_bytes_types_a_plain_single_line_instead_of_pasting_it() {
+        // #660: inside a bracketed paste fish never runs `expand-abbr`, so an
+        // abbreviation with arguments reached the shell verbatim and `j build`
+        // died as "command not found". Raw bytes are what typing produces, and
+        // that is the delivery every input-time expansion -- fish
+        // abbreviations, zsh magic-space -- is bound to.
+        assert_eq!(submit_bytes("j build", true, false), b"j build\r".to_vec());
         assert_eq!(
-            submit_bytes("ls -la", true),
-            b"\x1b[200~ls -la\x1b[201~\r".to_vec()
+            submit_bytes("echo 'a  b' | cat", true, false),
+            b"echo 'a  b' | cat\r".to_vec()
+        );
+        // Non-ASCII is text, not a control character.
+        assert_eq!(
+            submit_bytes("echo 中文", true, false),
+            "echo 中文\r".as_bytes()
+        );
+
+        // A control character would be acted on by the shell's binding table
+        // rather than inserted -- a Tab completes, a ^U kills the line -- so
+        // those keep the paste framing.
+        assert_eq!(
+            submit_bytes("echo a\tb", true, false),
+            b"\x1b[200~echo a\tb\x1b[201~\r".to_vec()
+        );
+        assert_eq!(
+            submit_bytes("echo a\x15b", true, false),
+            b"\x1b[200~echo a\x15b\x1b[201~\r".to_vec()
+        );
+
+        // Past the length bound the flat cost of a paste wins over the shell's
+        // per-byte redraw. The bound is a latency ceiling, not a knee in the
+        // curve -- see `types_cleanly`.
+        let at_bound = format!("echo {}", "y".repeat(507));
+        assert_eq!(at_bound.len(), 512);
+        assert_eq!(
+            submit_bytes(&at_bound, true, false),
+            [at_bound.as_bytes(), b"\r"].concat()
+        );
+        let over_bound = format!("echo {}", "y".repeat(508));
+        assert_eq!(over_bound.len(), 513);
+        assert_eq!(
+            submit_bytes(&over_bound, true, false),
+            [b"\x1b[200~", over_bound.as_bytes(), b"\x1b[201~\r"].concat()
         );
     }
 
     #[test]
+    fn submit_bytes_keeps_pasted_text_inside_a_bracketed_paste() {
+        // A paste's contract is that what went in is what runs. The typed path
+        // hands the line to the shell's binding table, and a printable key can
+        // be bound there: a fish user with `abbr -a l 'ls -la'` who pastes
+        // `l /tmp` out of their notes must not run `ls -la /tmp`, and a zsh
+        // user with `bindkey . rationalise-dot` must not have a pasted
+        // `echo a...b` become `echo a../..b`. Both were reproduced on a pty.
+        assert_eq!(
+            submit_bytes("l /tmp", true, true),
+            b"\x1b[200~l /tmp\x1b[201~\r".to_vec()
+        );
+        assert_eq!(
+            submit_bytes("echo a...b", true, true),
+            b"\x1b[200~echo a...b\x1b[201~\r".to_vec()
+        );
+        // Same text typed rather than pasted takes the typed path -- that is
+        // the whole point, and it is the same delivery the user's own shell
+        // prompt would have given it.
+        assert_eq!(submit_bytes("l /tmp", true, false), b"l /tmp\r".to_vec());
+        // A shell with no bracketed paste has no framing to fall back on, so
+        // the mark changes nothing there.
+        assert_eq!(submit_bytes("l /tmp", false, true), b"l /tmp\r".to_vec());
+        // An empty buffer still skips the markers, pasted or not.
+        assert_eq!(submit_bytes("", true, true), b"\r".to_vec());
+    }
+
+    #[test]
     fn submit_bytes_falls_back_to_per_line_cr_without_bracketed_paste() {
-        assert_eq!(submit_bytes("a\nb", false), b"a\rb\r".to_vec());
-        assert_eq!(submit_bytes("a\r\nb", false), b"a\rb\r".to_vec());
+        assert_eq!(submit_bytes("a\nb", false, false), b"a\rb\r".to_vec());
+        assert_eq!(submit_bytes("a\r\nb", false, false), b"a\rb\r".to_vec());
     }
 
     #[test]
     fn submit_bytes_normalizes_line_breaks_inside_the_paste() {
         assert_eq!(
-            submit_bytes("a\r\nb", true),
+            submit_bytes("a\r\nb", true, false),
             b"\x1b[200~a\nb\x1b[201~\r".to_vec()
         );
         assert_eq!(
-            submit_bytes("a\rb", true),
+            submit_bytes("a\rb", true, false),
             b"\x1b[200~a\nb\x1b[201~\r".to_vec()
         );
-        assert_eq!(submit_bytes("a\rb", false), b"a\rb\r".to_vec());
+        assert_eq!(submit_bytes("a\rb", false, false), b"a\rb\r".to_vec());
     }
 
     #[test]
     fn submit_bytes_strips_esc_and_skips_markers_on_an_empty_line() {
-        let out = submit_bytes("foo\x1b[201~\nrm -rf ~", true);
+        let out = submit_bytes("foo\x1b[201~\nrm -rf ~", true, false);
         let end = b"\x1b[201~";
         assert_eq!(out.windows(end.len()).filter(|w| *w == end).count(), 1);
         assert_eq!(out, b"\x1b[200~foo[201~\nrm -rf ~\x1b[201~\r".to_vec());
-        assert_eq!(submit_bytes("a\x1bb", false), b"ab\r".to_vec());
+        assert_eq!(submit_bytes("a\x1bb", false, false), b"ab\r".to_vec());
+        // The same smuggling attempt on the typed path is just literal text at
+        // the prompt: there is no paste to break out of, and no ESC survives to
+        // reach the line editor as a command.
+        assert_eq!(
+            submit_bytes("foo\x1b[201~; rm -rf ~", true, false),
+            b"foo[201~; rm -rf ~\r".to_vec()
+        );
 
-        assert_eq!(submit_bytes("", true), b"\r".to_vec());
+        assert_eq!(submit_bytes("", true, false), b"\r".to_vec());
     }
 
     #[test]
@@ -9107,6 +9720,39 @@ mod tests {
         assert!(!cwd_is_on_host(false, false));
     }
 
+    /// Which machine's spelling a pane's paths are read in. Ungated on
+    /// purpose: the bug this settles was a Windows-only one that hid behind a
+    /// `#[cfg(unix)]` on the test that covered it.
+    #[test]
+    fn a_panes_paths_are_read_in_its_own_hosts_spelling() {
+        use super::super::search::PathStyle;
+        use std::path::Path;
+
+        assert_eq!(
+            link_path_style(true, Some(Path::new("/home/u/proj"))),
+            PathStyle::NATIVE,
+            "a pane on this machine reads its own output this OS's way, \
+             whatever its shell spells the cwd like"
+        );
+        assert_eq!(
+            link_path_style(false, Some(Path::new("/home/u/proj"))),
+            PathStyle::Posix,
+            "an SSH host, a remote workspace or a WSL distro reporting a \
+             /-rooted cwd is a POSIX one on every client"
+        );
+        assert_eq!(
+            link_path_style(false, Some(Path::new(r"C:\Users\u\proj"))),
+            PathStyle::Windows,
+            "and a remote Windows host is not"
+        );
+        assert_eq!(
+            link_path_style(false, None),
+            PathStyle::Posix,
+            "a remote pane that has not said where it is still has no local \
+             drive its paths could hang off"
+        );
+    }
+
     #[test]
     fn a_panes_host_is_its_workspaces_machine() {
         use crate::core::session::{RemoteTarget, WorkspaceId};
@@ -9143,60 +9789,108 @@ mod tests {
     }
 }
 
+/// A connected pair of [`crate::daemon::transport::Stream`]s, one for each end
+/// of a pane's link to its daemon.
+///
+/// The client half is what a pane really reads and writes; the daemon half is
+/// the test's, to speak protocol into.
+///
+/// This is the one thing a pane harness needs that Unix and Windows spell
+/// differently — `socketpair` there, a loopback connect here — and every gpui
+/// test in this crate is portable once it goes through this instead of naming
+/// `UnixStream` itself.
+#[cfg(test)]
+pub(crate) fn test_stream_pair() -> (
+    crate::daemon::transport::Stream,
+    crate::daemon::transport::Stream,
+) {
+    #[cfg(unix)]
+    {
+        std::os::unix::net::UnixStream::pair().unwrap()
+    }
+    #[cfg(windows)]
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_side = std::net::TcpStream::connect(addr).unwrap();
+        let (daemon_side, _) = listener.accept().unwrap();
+        (client_side, daemon_side)
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn quiet_test_pane(
     pane_id: u64,
     window: &mut Window,
     cx: &mut gpui::App,
 ) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
-    #[cfg(unix)]
-    let (client_side, daemon_side) = std::os::unix::net::UnixStream::pair().unwrap();
-    #[cfg(windows)]
-    let (client_side, daemon_side) = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let client_side = std::net::TcpStream::connect(addr).unwrap();
-        let (daemon_side, _) = listener.accept().unwrap();
-        (client_side, daemon_side)
-    };
+    let (client_side, daemon_side) = test_stream_pair();
     let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
         .expect("quiet test terminal");
     let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
     (view, daemon_side)
 }
 
-#[cfg(all(test, unix))]
+/// A quiet pane that was dialled by hand, with no saved host behind it.
+///
+/// Ungated on purpose: the transport this hands back is already
+/// platform-neutral, and gating it left every test that wanted an SSH pane
+/// silently skipped on Windows.
+#[cfg(test)]
 pub(crate) fn quiet_test_ssh_pane(
     pane_id: u64,
     window: &mut Window,
     cx: &mut gpui::App,
-) -> (gpui::Entity<TerminalView>, std::os::unix::net::UnixStream) {
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    quiet_test_ssh_pane_of(pane_id, None, window, cx)
+}
+
+/// The same, for a pane opened from a saved host — `profile_id` is what tells
+/// the two apart everywhere the connection is offered back to the user.
+#[cfg(test)]
+pub(crate) fn quiet_test_ssh_pane_of(
+    pane_id: u64,
+    profile_id: Option<uuid::Uuid>,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    let mut spec: crate::daemon::protocol::NativeSshSpec =
+        serde_json::from_str(r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#)
+            .expect("a minimal NativeSshSpec decodes");
+    spec.profile_id = profile_id.map(|id| id.to_string());
+    quiet_test_ssh_pane_with(pane_id, spec, window, cx)
+}
+
+/// The same again, over a spec the caller shaped — for everything a live
+/// connection carries beyond its address.
+#[cfg(test)]
+pub(crate) fn quiet_test_ssh_pane_with(
+    pane_id: u64,
+    spec: crate::daemon::protocol::NativeSshSpec,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
     let (view, stream) = quiet_test_pane(pane_id, window, cx);
     view.update(cx, |view, _| {
-        view.ssh_spec = Some(Box::new(
-            serde_json::from_str(
-                r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
-            )
-            .expect("a minimal NativeSshSpec decodes"),
-        ));
+        view.ssh_spec = Some(Box::new(spec));
     });
     (view, stream)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod gpui_tests {
     use super::*;
     use crate::daemon::protocol::{ClientMsg, DaemonMsg};
+    use crate::daemon::transport::Stream;
     use gpui::{Entity, TestAppContext, point};
-    use std::os::unix::net::UnixStream;
 
-    fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, UnixStream) {
+    fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
         // Building a view reads the config. Whether that hit the real user
         // directory used to come down to which test happened to pin the
         // scratch dir first.
         crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
-        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let (client_side, daemon_side) = super::test_stream_pair();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
@@ -9221,11 +9915,11 @@ mod gpui_tests {
     ) -> (
         gpui::WindowHandle<gpui_component::Root>,
         Entity<TerminalView>,
-        UnixStream,
+        Stream,
     ) {
         crate::core::config::pin_test_config_dir();
         cx.executor().allow_parking();
-        let (client_side, daemon_side) = UnixStream::pair().unwrap();
+        let (client_side, daemon_side) = super::test_stream_pair();
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
@@ -9251,7 +9945,7 @@ mod gpui_tests {
     fn prompt_ready(
         window: &gpui::WindowHandle<TerminalView>,
         cx: &mut TestAppContext,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
     ) {
         DaemonMsg::Prompt {
             active: true,
@@ -9275,7 +9969,7 @@ mod gpui_tests {
     fn alt_screen_ready(
         window: &gpui::WindowHandle<TerminalView>,
         cx: &mut TestAppContext,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
     ) {
         DaemonMsg::Output(b"\x1b[?1049h".to_vec())
             .encode(daemon)
@@ -9303,7 +9997,7 @@ mod gpui_tests {
             .encode(&mut daemon)
             .unwrap();
 
-        let report = |status: AgentStatus, daemon: &mut UnixStream| {
+        let report = |status: AgentStatus, daemon: &mut Stream| {
             DaemonMsg::AgentStatus(Some(AgentSessionState {
                 status,
                 message: None,
@@ -9414,7 +10108,7 @@ mod gpui_tests {
         status: crate::core::cli_agent::AgentStatus,
         pane: &gpui::Entity<TerminalView>,
         cx: &mut TestAppContext,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
     ) {
         use crate::core::cli_agent::AgentSessionState;
 
@@ -9790,8 +10484,16 @@ mod gpui_tests {
                     "the file is right there under the pane's directory"
                 );
                 assert!(
-                    !view.hover_link_at(7, 0, false, cx),
-                    "without the modifier a file path is not a link"
+                    view.hovered_link.as_ref().is_some_and(|link| link.armed),
+                    "with the modifier down it is ready to be clicked"
+                );
+                assert!(
+                    view.hover_link_at(7, 0, false, cx),
+                    "a path is pointed out before the modifier is down, not after"
+                );
+                assert!(
+                    view.hovered_link.as_ref().is_some_and(|link| !link.armed),
+                    "but held back, because a plain click will not follow it"
                 );
 
                 let gone = "ready (scratchpad/notes.md) and (".len();
@@ -9803,16 +10505,152 @@ mod gpui_tests {
                     LinkAt::Unresolved { candidate, pending } => {
                         assert_eq!(candidate.path, "scratchpad/gone.md");
                         assert!(
-                            candidate.looks_like_a_path(),
+                            candidate.looks_like_a_path(view.link_path_style()),
                             "so the click reports it instead of staying silent"
                         );
                         assert!(!pending, "a local pane answers on the spot");
                     }
                     _ => panic!("expected an unresolved path-shaped candidate"),
                 }
+
+                view.record_menu_link(7, 0, cx);
+                assert!(
+                    matches!(
+                        view.menu_link_path(),
+                        Some(path) if path.ends_with("scratchpad/notes.md")
+                    ),
+                    "a right click over a path opens a menu about that path"
+                );
+                view.record_menu_link(0, 0, cx);
+                assert!(
+                    view.menu_link_path().is_none(),
+                    "and a right click over `ready` opens the ordinary one"
+                );
+
+                let mut off = cx.global::<Config>().clone();
+                off.link_url = false;
+                cx.set_global(off);
+                view.record_menu_link(7, 0, cx);
+                assert!(
+                    view.menu_link_path().is_none(),
+                    "and with link detection turned off the menu offers nothing \
+                     the underline and the click both refuse"
+                );
+                cx.set_global(Config::default());
+
+                // `ready (scratchpad...`: the blank between the two words.
+                assert!(!view.hover_link_at(5, 0, false, cx));
+                assert!(view.hovered_link.is_none(), "a blank holds no link");
+                assert_eq!(
+                    view.last_hover_cell,
+                    Some((5, 0)),
+                    "and the pointer is still remembered, so crossing a run \
+                     of blanks costs one look each rather than one a frame"
+                );
             })
             .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Coming back from an `ssh` session left the pane with no history at all:
+    /// the scope switch cleared the list, and the reload that refills it is a
+    /// background task, so ↑ recalled nothing until that landed (#817).
+    #[gpui::test]
+    fn a_pane_back_from_ssh_still_recalls_its_local_history(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.history = vec!["cargo build".to_string(), "ssh box".to_string()];
+            })
+            .unwrap();
+
+        let away = crate::daemon::protocol::RemoteContext {
+            kind: crate::daemon::protocol::RemoteKind::Ssh,
+            argv: vec!["ssh".into(), "box".into()],
+            target: "box".into(),
+        };
+        DaemonMsg::RemoteContext(Some(away))
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.remote_context().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        window
+            .update(cx, |view, _, cx| view.follow_history_scope(cx))
+            .unwrap();
+
+        DaemonMsg::RemoteContext(None).encode(&mut daemon).unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.remote_context().is_none())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                view.follow_history_scope(cx);
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "ssh box",
+                    "↑ right after the ssh session ended recalled nothing"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The cache above must not hand a scope someone else's list: stepping into
+    /// an `ssh` session still starts from nothing until the far end's own
+    /// history is read.
+    #[gpui::test]
+    fn a_pane_going_out_to_ssh_does_not_inherit_the_local_history(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| {
+                view.history = vec!["rm -rf ./build".to_string()];
+            })
+            .unwrap();
+
+        DaemonMsg::RemoteContext(Some(crate::daemon::protocol::RemoteContext {
+            kind: crate::daemon::protocol::RemoteKind::Ssh,
+            argv: vec!["ssh".into(), "box".into()],
+            target: "box".into(),
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.remote_context().is_some())
+                .unwrap()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                view.follow_history_scope(cx);
+                view.handle_editor_key(&key("up"), cx);
+                assert_eq!(
+                    view.cmd.text(),
+                    "",
+                    "a local command was recalled onto a remote prompt"
+                );
+            })
+            .unwrap();
     }
 
     /// Absolute paths in a pane that is `ssh`-ed somewhere used to be resolved
@@ -9868,6 +10706,21 @@ mod gpui_tests {
     /// must not have made the promise. Otherwise those paths sit "not answered
     /// yet" for the life of the pane — no underline, and a click that says
     /// nothing, which is the silence this whole path exists to remove.
+    ///
+    /// Was unix-only because the path it prints is: `Path::new("/etc/hosts")`
+    /// is not absolute on Windows, so `FileCandidate::paths` measured it from
+    /// the roots rather than letting it stand alone — and a workspace that
+    /// never connected has no roots, so nothing was ever wanted. Which was
+    /// itself the divergence: a Windows tty7 looking at a *remote* Linux pane
+    /// never probed the POSIX paths that pane printed.
+    ///
+    /// #795 settled that. `paths` now asks the pane's own
+    /// [`super::search::PathStyle`] rather than this machine's, and a remote
+    /// pane that has not reported a cwd is read as `Posix`, so `/etc/hosts`
+    /// stands alone on every client. The gate is only still here because
+    /// nothing has run this test on Windows yet; lifting it belongs in a
+    /// change that can show it green, not in a merge.
+    #[cfg(unix)]
     #[gpui::test]
     fn a_probe_with_no_host_to_ask_stays_wanted(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
@@ -9941,6 +10794,7 @@ mod gpui_tests {
                 view.hovered_link = Some(HoveredLink {
                     start: Point::new(Line(23), Column(0)),
                     end: Point::new(Line(23), Column(3)),
+                    armed: true,
                 });
                 view.set_grid_size(80, 24, px(8.), px(17.), 1., cx);
                 assert_eq!(view.last_hover_cell, Some((0, 23)));
@@ -9949,6 +10803,154 @@ mod gpui_tests {
                 assert!(view.hovered_link.is_none(), "so is the link it resolved");
             })
             .unwrap();
+    }
+
+    /// The seam is invisible to the user, so it has to be invisible to the
+    /// hover too: pointing at either half underlines the whole path, and the
+    /// span the element paints reaches across both rows.
+    #[gpui::test]
+    fn a_path_the_terminal_wrapped_is_hovered_as_one_link(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("tty7-view-wrap-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a/bb/ccc/dddd")).expect("create dirs");
+        std::fs::write(dir.join("a/bb/ccc/dddd/notes.md"), b"# notes").expect("create notes.md");
+
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.set_grid_size(20, 6, px(8.), px(17.), 1., cx);
+            })
+            .unwrap();
+        DaemonMsg::Cwd(dir.clone()).encode(&mut daemon).unwrap();
+        DaemonMsg::Output(b"see a/bb/ccc/dddd/notes.md here\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| {
+                    view.cwd().is_some()
+                        && view.terminal.term.lock().grid()[Line(1)][Column(0)].c == 'e'
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                // Row 0 holds `see a/bb/ccc/dddd/n`, row 1 the rest.
+                for (col, row, where_) in [(6, 0, "before the seam"), (2, 1, "after it")] {
+                    assert!(
+                        view.hover_link_at(col, row, true, cx),
+                        "the wrapped path is a link from {where_}"
+                    );
+                    let link = view.hovered_link.as_ref().expect("a span");
+                    assert_eq!(
+                        (link.start.line, link.end.line),
+                        (Line(0), Line(1)),
+                        "and the span the element paints covers both rows"
+                    );
+                    assert_eq!(link.start.column, Column(4), "starting at the path itself");
+                }
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A wide character owns two columns, and the second one holds a space.
+    /// The hover has to read that as part of the glyph, or the underline goes
+    /// out on every other column of a path written in CJK.
+    #[gpui::test]
+    fn the_second_column_of_a_wide_character_still_hovers(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("tty7-view-wide-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("文档")).expect("create dirs");
+        std::fs::write(dir.join("文档/笔记.md"), b"# notes").expect("create notes");
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Cwd(dir.clone()).encode(&mut daemon).unwrap();
+        DaemonMsg::Output("see 文档/笔记.md here\r\n".as_bytes().to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| {
+                    view.cwd().is_some()
+                        && view.terminal.term.lock().grid()[Line(0)][Column(4)].c == '文'
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                // `see 文档/…`: column 4 carries 文, column 5 is its spacer.
+                assert!(!view.cell_is_blank(5, 0), "the spacer belongs to the glyph");
+                for col in [4, 5] {
+                    assert!(
+                        view.hover_link_at(col, 0, true, cx),
+                        "column {col} of the same character is the same link"
+                    );
+                }
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A full-screen application drew the grid and is watching the mouse
+    /// itself, so tty7 stays out of it until asked.
+    #[gpui::test]
+    fn a_path_under_a_full_screen_application_waits_for_the_modifier(cx: &mut TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("tty7-view-alt-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scratchpad")).expect("create scratchpad dir");
+        std::fs::write(dir.join("scratchpad/notes.md"), b"# notes").expect("create notes.md");
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Cwd(dir.clone()).encode(&mut daemon).unwrap();
+        DaemonMsg::Output(b"\x1b[?1049hready scratchpad/notes.md\r\n".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let seen = window
+                .update(cx, |view, _, _| {
+                    view.cwd().is_some()
+                        && view.on_alt_screen()
+                        && view.terminal.term.lock().grid()[Line(0)][Column(6)].c == 's'
+                })
+                .unwrap();
+            if seen {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        window
+            .update(cx, |view, _, cx| {
+                assert!(view.on_alt_screen(), "the application took the grid");
+                assert!(
+                    !view.hover_link_at(6, 0, false, cx),
+                    "nothing is pointed out over somebody else's window"
+                );
+                assert!(
+                    view.hover_link_at(6, 0, true, cx),
+                    "asking for tty7's reading of the screen still gets it"
+                );
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_link_menu_is_headed_by_the_file_it_is_about() {
+        assert_eq!(
+            link_menu_label(std::path::Path::new("/a/very/long/way/down/notes.md")),
+            "notes.md",
+            "the name, so the menu is not as wide as the path"
+        );
+        assert_eq!(link_menu_label(std::path::Path::new("/")), "/");
     }
 
     /// Runs out the wait a new title is held for.
@@ -10065,7 +11067,7 @@ mod gpui_tests {
     fn seed_cwd(
         cx: &mut TestAppContext,
         window: &gpui::WindowHandle<TerminalView>,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
         dir: &str,
     ) {
         let want = std::path::PathBuf::from(dir);
@@ -10088,7 +11090,7 @@ mod gpui_tests {
     fn seed_agent(
         cx: &mut TestAppContext,
         window: &gpui::WindowHandle<TerminalView>,
-        daemon: &mut UnixStream,
+        daemon: &mut Stream,
         agent: crate::core::cli_agent::CLIAgent,
     ) {
         DaemonMsg::Agent(Some(agent)).encode(daemon).unwrap();
@@ -10347,7 +11349,7 @@ mod gpui_tests {
         assert_eq!(header(cx, &window), DEFAULT_TITLE);
     }
 
-    fn next_input(daemon: &mut UnixStream) -> Vec<u8> {
+    fn next_input(daemon: &mut Stream) -> Vec<u8> {
         loop {
             match ClientMsg::read(daemon).expect("client socket stays open") {
                 ClientMsg::Input(bytes) => return bytes,
@@ -10379,7 +11381,7 @@ mod gpui_tests {
         }
     }
 
-    fn next_input_until_timeout(daemon: &mut UnixStream) -> Option<Vec<u8>> {
+    fn next_input_until_timeout(daemon: &mut Stream) -> Option<Vec<u8>> {
         use std::io::ErrorKind;
 
         daemon
@@ -11502,6 +12504,59 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// The whole chain for #834, through the real dispatch tree: F3 is bound
+    /// to Find Next off macOS, and gpui matches bindings before the pane's key
+    /// handler. With no find bar open the action gives the key back, the pane
+    /// encodes it, and PSReadLine's CharacterSearch gets its `\EOR`.
+    ///
+    /// F7 has no binding at all and is the control: it takes the same route
+    /// with nothing to fall through.
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn an_unused_find_binding_gives_f3_back_to_the_shell(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| crate::ui::keymap::init(cx));
+        prompt_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+                view.commit_text("echo a", cx);
+            })
+            .unwrap();
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        for (chord, seq) in [("f3", b"\x1bOR".to_vec()), ("f7", b"\x1b[18~".to_vec())] {
+            window
+                .update(cx, |view, _, _| {
+                    // The previous handoff gave this prompt to the shell for
+                    // good; take it back so both keys are tested from the
+                    // same starting state.
+                    view.editor_handoff = None;
+                    view.cmd.set("echo a");
+                    assert!(view.search.is_none(), "no find bar is open");
+                })
+                .unwrap();
+            vcx.simulate_keystrokes(chord);
+            window
+                .update(cx, |view, _, _| {
+                    assert!(view.search.is_none(), "{chord} did not open the find bar");
+                    assert_eq!(view.cmd.text(), "", "{chord} handed the line over");
+                })
+                .unwrap();
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(b"echo a".to_vec()),
+                "{chord} puts the line on the shell's prompt first"
+            );
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(seq),
+                "{chord} reaches the PTY"
+            );
+        }
+    }
+
     #[gpui::test]
     fn ctrl_r_fuzzy_search_accepts_into_the_editor(cx: &mut TestAppContext) {
         let (window, _daemon) = harness(cx);
@@ -11567,6 +12622,41 @@ mod gpui_tests {
             Some(b"git status\r".to_vec()),
             "Cmd+Enter ships the selected line to the PTY"
         );
+    }
+
+    /// The second half of #834. Even once the encoder knew the F keys, the
+    /// inline editor still ate them: `handle_editor_key` had no arm for a
+    /// named key it does not bind, so F8 fell out of the bottom of the match
+    /// and died on a `cx.notify()`. PSReadLine's HistorySearchBackward acts on
+    /// the line that is on the prompt, so the fix is the unknown-chord route —
+    /// the line goes over first, then the key.
+    #[gpui::test]
+    fn function_keys_hand_the_line_to_the_shell(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        for (chord, seq) in [
+            ("f8", b"\x1b[19~".to_vec()),
+            ("shift-f8", b"\x1b[19;2~".to_vec()),
+            ("alt-f7", b"\x1b[18;3~".to_vec()),
+            ("f3", b"\x1bOR".to_vec()),
+        ] {
+            window
+                .update(cx, |view, _, cx| {
+                    view.cmd.set("git st");
+                    view.handle_editor_key(&key(chord), cx);
+                    assert_eq!(view.cmd.text(), "", "{chord} handed the line over");
+                })
+                .unwrap();
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(b"git st".to_vec()),
+                "{chord} puts the line on the shell's prompt first"
+            );
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(seq),
+                "{chord} follows the line"
+            );
+        }
     }
 
     #[gpui::test]
@@ -13124,7 +14214,7 @@ mod gpui_tests {
         }
         assert_eq!(seen, "before", "the pre-drop screen is what we relink over");
 
-        let (new_client, mut new_daemon) = UnixStream::pair().unwrap();
+        let (new_client, mut new_daemon) = super::test_stream_pair();
         window
             .update(cx, |view, _, cx| {
                 view.adopt_relink(
@@ -13539,6 +14629,74 @@ mod gpui_tests {
                 });
             })
             .unwrap();
+    }
+
+    /// Drawing must never queue for the grid lock.
+    ///
+    /// One UI thread paints every pane in every window, and the thread holding
+    /// this lock is the pane's own reader part-way through feeding a batch of
+    /// output into the emulator. A draw that waited for it would wire one
+    /// pane's write speed to the frame rate of the whole window — the read-side
+    /// twin of #709, which was this same thread parked in `write(2)`.
+    ///
+    /// No second thread and no timing: `try_lock` fails against a lock this
+    /// thread already holds, so "the reader has it" is reproduced exactly, with
+    /// nothing to race. The cost of that trade is what a regression looks like
+    /// — put `lock()` back and this test hangs on the re-entry rather than
+    /// failing, which reads as a CI timeout on exactly this name.
+    #[gpui::test]
+    fn a_frame_that_cannot_have_the_grid_leaves_the_previous_one_alone(cx: &mut TestAppContext) {
+        use super::super::element::PaintColors;
+
+        let (_window, view, _daemon) = rooted_harness(cx);
+        let element = TerminalElement::new(view.clone());
+        let mut buf = Vec::new();
+        let build = |cx: &mut TestAppContext, buf: &mut Vec<RenderCell>, must_block: bool| {
+            cx.update(|cx| {
+                let colors = PaintColors::resolve(cx.theme(), cx);
+                element.build_grid(
+                    &colors,
+                    buf,
+                    24,
+                    80,
+                    false,
+                    cx,
+                    1.,
+                    gpui::Rgba::default(),
+                    must_block,
+                )
+            })
+        };
+
+        assert!(
+            build(cx, &mut buf, true).is_some(),
+            "the first frame has no previous grid to stand in for it, so it waits and builds"
+        );
+        assert_eq!(buf.len(), 24 * 80);
+
+        // Shortened so the next call cannot touch the buffer without saying so:
+        // building would `clear` and `resize` it back to a full grid.
+        buf.truncate(3);
+        let term = cx.update(|cx| view.read(cx).terminal.term.clone());
+        let held = term.lock();
+        let refused = build(cx, &mut buf, false);
+        drop(held);
+
+        assert!(
+            refused.is_none(),
+            "a frame that cannot have the lock says so instead of waiting for it"
+        );
+        assert_eq!(
+            buf.len(),
+            3,
+            "the previous frame's cells have to survive for that frame to be painted again"
+        );
+
+        assert!(
+            build(cx, &mut buf, false).is_some(),
+            "with the lock free, a frame builds without being told to wait"
+        );
+        assert_eq!(buf.len(), 24 * 80);
     }
 
     #[gpui::test]
@@ -14449,5 +15607,352 @@ mod gpui_tests {
                 );
             })
             .unwrap();
+    }
+}
+
+/// The window between the shell reporting a prompt and its line editor
+/// actually reading, which is where a fast typist's line goes missing (#433).
+///
+/// These drive a real `TerminalView` over a pane link on every platform, so
+/// they are not gated to unix the way `gpui_tests` is.
+#[cfg(test)]
+mod prompt_handover_tests {
+    use super::*;
+    use crate::daemon::protocol::{ClientMsg, DaemonMsg};
+    use crate::daemon::transport::Stream;
+    use gpui::TestAppContext;
+
+    fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        let (client_side, daemon_side) = test_stream_pair();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            let terminal = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24))
+                .expect("link-backed terminal");
+            TerminalView::with_terminal(terminal, 1, window, cx)
+        });
+        (window, daemon_side)
+    }
+
+    /// Everything the pane has written to the PTY, in order.
+    fn drain(daemon: &mut Stream) -> Vec<u8> {
+        daemon
+            .set_read_timeout(Some(std::time::Duration::from_millis(150)))
+            .unwrap();
+        let mut out = Vec::new();
+        loop {
+            match ClientMsg::read(daemon) {
+                Ok(ClientMsg::Input(bytes)) => out.extend_from_slice(&bytes),
+                Ok(_) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(e) => panic!("pane link failed: {e}"),
+            }
+        }
+        out
+    }
+
+    fn settle(
+        cx: &mut TestAppContext,
+        window: &gpui::WindowHandle<TerminalView>,
+        what: &str,
+        f: impl Fn(&TerminalView) -> bool,
+    ) {
+        for _ in 0..300 {
+            cx.run_until_parked();
+            if window.update(cx, |view, _, _| f(view)).unwrap() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        panic!("never settled: {what}");
+    }
+
+    /// Printable text arrives the way the platform delivers it — through the
+    /// text-input path, which is what the gap hold and the typeahead record see.
+    fn type_text(window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext, text: &str) {
+        for ch in text.chars() {
+            window
+                .update(cx, |view, _, cx| view.commit_text(&ch.to_string(), cx))
+                .unwrap();
+        }
+    }
+
+    fn press(window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext, key: &str) {
+        window
+            .update(cx, |view, window, cx| {
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: gpui::Keystroke::parse(key).unwrap(),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+    }
+
+    fn prompt(daemon: &mut Stream, at_prompt: bool) {
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt,
+            last_exit: None,
+        }
+        .encode(daemon)
+        .unwrap();
+    }
+
+    /// Types `text` into the gap of a running command and lets the hold window
+    /// expire, so the bytes go to the PTY and are recorded for replay. Then
+    /// puts the pane back at a prompt the way the `D` mark does — before the
+    /// prompt is drawn, so the shell's line editor is not reading yet.
+    fn typed_into_the_gap_then_handed_back(
+        cx: &mut TestAppContext,
+        window: &gpui::WindowHandle<TerminalView>,
+        daemon: &mut Stream,
+        text: &str,
+    ) {
+        prompt(daemon, true);
+        DaemonMsg::Output(b"\x1b]133;B\x07".to_vec())
+            .encode(daemon)
+            .unwrap();
+        settle(cx, window, "the editor takes the first prompt", |view| {
+            view.input_active() && view.terminal.zle_reading()
+        });
+
+        prompt(daemon, false);
+        DaemonMsg::Output(b"\x1b]133;C\x07".to_vec())
+            .encode(daemon)
+            .unwrap();
+        settle(cx, window, "a command takes the pane", |view| {
+            !view.input_active()
+        });
+
+        type_text(window, cx, text);
+        cx.executor().advance_clock(HOLD_WINDOW * 2);
+        cx.run_until_parked();
+        assert_eq!(
+            drain(daemon),
+            text.as_bytes(),
+            "the hold window gives up and dumps what it held"
+        );
+
+        prompt(daemon, true);
+        settle(cx, window, "the editor takes the prompt back", |view| {
+            view.input_active()
+        });
+        assert!(
+            !window
+                .update(cx, |view, _, _| view.terminal.zle_reading())
+                .unwrap(),
+            "this is the D-to-B window: the shell is not reading its line yet"
+        );
+    }
+
+    #[gpui::test]
+    fn a_line_typed_into_the_gap_survives_a_prompt_that_is_not_reading_yet(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo hi");
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15echo hi\r".to_vec(),
+            "the line the shell is holding must be erased and submitted whole, \
+             not erased and replaced by an empty command"
+        );
+    }
+
+    #[gpui::test]
+    fn a_prompt_handover_keeps_the_held_text_in_front_of_what_follows_it(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo");
+
+        // Typing carries straight on into the editor that just took the prompt.
+        type_text(&window, cx, " hi");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            Vec::<u8>::new(),
+            "the editor owns these keys, so none of them reach the PTY"
+        );
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15echo hi\r".to_vec(),
+            "what the shell was holding leads the line, not the tail alone"
+        );
+    }
+
+    /// The editor takes the held line over the moment it is touched, before it
+    /// edits anything — and takes it over without putting the wipe on the wire,
+    /// which is still the shell's line editor's to receive when it starts
+    /// reading.
+    #[gpui::test]
+    fn the_editor_takes_the_held_line_over_before_it_edits_it(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo");
+
+        // `home` moves the caret and nothing else: any editor key is enough.
+        press(&window, cx, "home");
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(
+                    view.cmd.text(),
+                    "echo",
+                    "the line the shell is sitting on is the editor's line now"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            drain(&mut daemon),
+            Vec::<u8>::new(),
+            "taking the line over owes the wipe, it does not send it early"
+        );
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15echo\r".to_vec(),
+            "the owed wipe is paid on submit, still in front of the line"
+        );
+    }
+
+    /// The half of the window the seed alone does not cover: the editor is
+    /// live, so the user can *replace* the line before submitting it. Recalling
+    /// history and pressing Enter has to run the entry recalled — not that
+    /// entry with the text the shell was holding glued to its front.
+    #[gpui::test]
+    fn recalling_history_in_the_gap_window_replaces_the_held_line(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo");
+        window
+            .update(cx, |view, _, _| {
+                view.history.push("echo from history".to_string());
+            })
+            .unwrap();
+
+        press(&window, cx, "up");
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(
+                    view.cmd.text(),
+                    "echo from history",
+                    "the recall searches on the whole line, held text included"
+                );
+            })
+            .unwrap();
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15echo from history\r".to_vec(),
+            "the recalled entry runs on its own, with the held text replaced \
+             rather than prefixed to it"
+        );
+    }
+
+    /// A paste that landed in the gap is still a paste after the handover. The
+    /// record replays it into the editor, and a line that arrives there looking
+    /// typed is submitted raw through the shell's binding table (#660) — the
+    /// hole `GapHold::pasted` closed for the hold's own route.
+    #[gpui::test]
+    fn a_paste_held_in_the_gap_is_still_a_paste_after_the_handover(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        // Bracketed paste is what a live prompt advertises; without it there is
+        // no framing to lose in the first place.
+        DaemonMsg::Output(b"\x1b[?2004h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        settle(cx, &window, "the shell turns bracketed paste on", |view| {
+            view.terminal
+                .term
+                .lock()
+                .mode()
+                .contains(TermMode::BRACKETED_PASTE)
+        });
+
+        prompt(&mut daemon, true);
+        DaemonMsg::Output(b"\x1b]133;B\x07".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        settle(cx, &window, "the editor takes the first prompt", |view| {
+            view.input_active() && view.terminal.zle_reading()
+        });
+        prompt(&mut daemon, false);
+        DaemonMsg::Output(b"\x1b]133;C\x07".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        settle(cx, &window, "a command takes the pane", |view| {
+            !view.input_active()
+        });
+
+        window
+            .update(cx, |view, _, cx| view.paste("echo hi".to_string(), cx))
+            .unwrap();
+        cx.executor().advance_clock(HOLD_WINDOW * 2);
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x1b[200~echo hi\x1b[201~".to_vec(),
+            "the hold window gives up and dumps the paste as a paste"
+        );
+
+        prompt(&mut daemon, true);
+        settle(cx, &window, "the editor takes the prompt back", |view| {
+            view.input_active()
+        });
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15\x1b[200~echo hi\x1b[201~\r".to_vec(),
+            "the replayed line keeps its framing instead of being typed at the \
+             shell's binding table"
+        );
+    }
+
+    /// The same for an emptied line: ⌃U clears what the editor is holding, and
+    /// the shell's copy of it goes too instead of coming back at submit.
+    #[gpui::test]
+    fn clearing_the_line_in_the_gap_window_clears_the_held_text_too(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        typed_into_the_gap_then_handed_back(cx, &window, &mut daemon, "echo");
+
+        press(&window, cx, "ctrl-u");
+        cx.run_until_parked();
+        window
+            .update(cx, |view, _, _| assert_eq!(view.cmd.text(), ""))
+            .unwrap();
+
+        press(&window, cx, "enter");
+        cx.run_until_parked();
+        assert_eq!(
+            drain(&mut daemon),
+            b"\x15\r".to_vec(),
+            "an emptied line submits empty: the wipe is still owed, the seed is not"
+        );
     }
 }

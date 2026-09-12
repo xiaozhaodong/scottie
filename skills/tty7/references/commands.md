@@ -136,11 +136,21 @@ Each keystroke goes out as its own event 200 ms after the last, which is what
 keeps a raw-mode TUI from reading the sequence as a paste; the first write is
 not delayed, so an interrupt is immediate.
 
-### `tty7 capture [%PANE] [--plain] [--scrollback]`
-The pane's replay. Two independent choices: **how much** — the newest scrollback
-segment by default, the whole ring with `--scrollback` (the ring splits into
-segments on resize, so for a pane that was never resized the two are identical)
-— and **in what form**.
+### `tty7 capture [%PANE] [--plain] [--scrollback] [--tail N]`
+The pane's replay. Three independent choices: **how much** — the newest
+scrollback segment by default, the whole ring with `--scrollback` (the ring
+splits into segments on resize, so for a pane that was never resized the two are
+identical) — **in what form**, and **how many lines**.
+
+The default's boundary is the pane's last *resize*, which is an event in the
+window rather than in the pane's output: a resize seals the segment holding
+everything printed so far, and on Unix the shell answers the SIGWINCH by
+repainting its prompt into the new one — so straight after a resize the newest
+segment can hold that repaint and nothing else, while the command's output sits
+in the segment behind it. Nothing in the byte stream tells a repaint apart from
+real output, so `capture` cannot decide it for you. When you are reading a pane
+whose window may have changed size — anything under the GUI — ask for
+`--scrollback`, and take the tail with `--tail N` if the tail is what you wanted.
 
 Without `--plain` you get the stored bytes, ANSI escapes intact, decoded as
 UTF-8 (invalid bytes become U+FFFD). That is the faithful form: it is exactly
@@ -163,9 +173,23 @@ Reach for it whenever a human would want to read the output. It is still a
 screen, though: what scrolled past the top is gone, and an exit code was never
 on screen — redirect to a file when you want the answer rather than the view.
 
+`--tail N` keeps the last N lines of the answer and drops the rest — "how did
+the last command end?" without a pipe through `tail(1)`, a program Windows does
+not have. It trims last, after `--plain` has decided what a line is, so a line
+the shell wrapped counts once: `--plain --tail 1` hands back the whole of the
+last line rather than its final row. `N` must be at least 1 — a tail of nothing
+would read as a blank pane. The server still replays the whole ring, so the
+saving is the pipe and not the wire.
+
 Either way it is a snapshot, not a stream: it collects the replay the server
 sends, settles for ~300 ms, and returns. Call it again for a newer one.
-JSON: `{"pane","text"}`, where `text` is whichever form was asked for.
+JSON: `{"pane","text","bytes"}`, where `text` is whichever form was asked for,
+`--tail` included, and `bytes` is how much the replay carried, counted before
+`--plain` rendered it or `--tail` trimmed it. `bytes` is what tells an empty
+`text` apart: `0` is a pane that has printed nothing, while a count with no text
+is a screen whose bytes produced nothing visible — a pane that was cleared, say.
+That second case also prints one line on stderr, so a script that reads only
+stdout still sees it.
 
 ### `tty7 procs [%PANE]`
 The process tree inside the pane, indented by depth, `*` on the foreground

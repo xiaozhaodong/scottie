@@ -17,6 +17,11 @@ use crate::ui::i18n::{L10nKey, t};
 
 const MAX_MATCHES: usize = 10_000;
 
+/// How many readings of one token the candidate ladder may produce. Each one
+/// costs a probe per root, so the cap is what keeps a separator-dense token
+/// from turning a hover into a burst of filesystem calls.
+const MAX_FILE_CANDIDATES: usize = 8;
+
 /// How long a printing pane has to stay quiet before an open search bar
 /// rescans it. Short enough that a command's output is re-counted by the time
 /// the eye gets back to the bar, long enough that a flood costs one scan per
@@ -727,6 +732,103 @@ pub(super) fn local_probe(path: &Path, require_file: bool) -> Probe {
     }
 }
 
+/// Which language a pane's paths are written in.
+///
+/// The machine tty7 runs on and the machine a pane's paths live on need not
+/// agree, and `std::path` only ever speaks the first one's dialect. On a
+/// Windows client that is the whole difference between a link and nothing: a
+/// leading `/` is not absolute to `Path` there, so `/etc/hosts` printed by a
+/// Linux pane used to be measured from that pane's directory instead of
+/// standing alone, and a relative `src/lib.rs` was joined onto it with a
+/// backslash the far side has never heard of.
+///
+/// The two arms are the two dialects, not the two operating systems: a WSL
+/// distro and an SSH host both speak [`PathStyle::Posix`] whatever the client
+/// is, and a pane on this machine speaks [`PathStyle::NATIVE`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathStyle {
+    /// `/`-rooted and `/`-joined. Everything a Unix host, a WSL distro or a
+    /// Git-Bash-style shell prints.
+    Posix,
+    /// Rooted by a drive letter or a UNC share, joined with `\`.
+    Windows,
+}
+
+impl Default for PathStyle {
+    fn default() -> Self {
+        Self::NATIVE
+    }
+}
+
+impl PathStyle {
+    /// The dialect the machine tty7 is running on speaks.
+    pub const NATIVE: PathStyle = match cfg!(windows) {
+        true => PathStyle::Windows,
+        false => PathStyle::Posix,
+    };
+
+    /// The dialect a host that called `sample` one of its own directories
+    /// speaks: a drive letter or a UNC share is a Windows host's, and anything
+    /// else is read as POSIX.
+    ///
+    /// Only a directory that names a *Windows* root counts as one, rather than
+    /// every directory that does not name a POSIX one. A cwd that is neither —
+    /// a relative one, or an empty one from a host that has not settled yet —
+    /// is the same "nothing to go on" as no cwd at all, and has to fall the
+    /// same way; reading it as Windows would spell a Linux host's paths with
+    /// backslashes on the strength of a directory it never really reported.
+    ///
+    /// This is inference from what a host says about itself in passing. It is
+    /// sound in the direction that matters: nothing but a POSIX host reports a
+    /// `/`-rooted cwd.
+    pub fn of_dir(sample: &Path) -> Self {
+        match PathStyle::Windows.is_absolute(&sample.to_string_lossy()) {
+            true => PathStyle::Windows,
+            false => PathStyle::Posix,
+        }
+    }
+
+    /// Whether a token says for itself which filesystem root it hangs off.
+    ///
+    /// Deliberately textual rather than [`Path::is_absolute`], which answers
+    /// for *this* machine: the same string has to be read the pane's way on
+    /// every client, or a link works on a Mac and not on the Windows box next
+    /// to it.
+    pub fn is_absolute(self, path: &str) -> bool {
+        match self {
+            PathStyle::Posix => path.starts_with('/'),
+            // A UNC share, or a drive letter with a separator behind it.
+            // `C:foo` is drive-*relative* and deliberately not included, which
+            // is what `Path::is_absolute` says on Windows too.
+            PathStyle::Windows => {
+                if path.starts_with("\\\\") {
+                    return true;
+                }
+                let mut chars = path.chars();
+                chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && chars.next() == Some(':')
+                    && matches!(chars.next(), Some('\\' | '/'))
+            }
+        }
+    }
+
+    /// `rel` measured from `root`, spelled the way the pane's host spells it.
+    ///
+    /// The POSIX arm joins textually because `Path::join` would reach for this
+    /// machine's separator: on Windows it turns `/home/u` and `src/lib.rs`
+    /// into `/home/u\src/lib.rs`, which the Linux box on the other end of the
+    /// probe cannot stat.
+    pub fn join(self, root: &Path, rel: &str) -> PathBuf {
+        match self {
+            PathStyle::Posix => PathBuf::from(format!(
+                "{}/{rel}",
+                root.to_string_lossy().trim_end_matches('/')
+            )),
+            PathStyle::Windows => root.join(rel),
+        }
+    }
+}
+
 /// Where a relative path printed by a pane is measured from.
 ///
 /// `local_home` is the part that is easy to miss. `~` has to become a real
@@ -743,15 +845,18 @@ pub(super) struct LinkRoots {
     /// Whether this machine's `$HOME` may stand in for a `~` the roots cannot
     /// explain.
     pub local_home: bool,
+    /// How the pane's host spells the paths it prints.
+    pub style: PathStyle,
 }
 
 impl LinkRoots {
     /// Roots on the machine tty7 is running on, where `$HOME` means what it
-    /// says.
+    /// says and paths are spelled this OS's way.
     pub fn local(dirs: Vec<PathBuf>) -> Self {
         Self {
             dirs,
             local_home: true,
+            style: PathStyle::NATIVE,
         }
     }
 
@@ -762,21 +867,6 @@ impl LinkRoots {
     }
 }
 
-/// What a lookup found: the link, or — when nothing answered — the reading of
-/// the token worth naming in a report.
-///
-/// The two travel together because the readings are computed once. A caller
-/// that asked and got nothing already holds everything needed to say what the
-/// click *said*; going back to the text for it would re-tokenise the whole
-/// line on a path that runs on every hover.
-pub(super) struct LinkLookup {
-    pub link: Option<LinkMatch>,
-    /// Only ever set when `link` is `None`. See [`report_candidate`].
-    pub candidate: Option<FileCandidate>,
-}
-
-/// The link alone, for callers with nothing to report when there is none.
-#[cfg(test)]
 pub(super) fn link_at(
     text: &str,
     col: usize,
@@ -784,68 +874,40 @@ pub(super) fn link_at(
     include_files: bool,
     probe: &mut dyn FnMut(&Path, bool) -> Probe,
 ) -> Option<LinkMatch> {
-    link_lookup_at(text, col, roots, include_files, probe).link
-}
-
-pub(super) fn link_lookup_at(
-    text: &str,
-    col: usize,
-    roots: &LinkRoots,
-    include_files: bool,
-    probe: &mut dyn FnMut(&Path, bool) -> Probe,
-) -> LinkLookup {
     if let Some((start, end, url)) = url_span_at(text, col) {
-        return LinkLookup {
-            link: Some(LinkMatch {
-                start,
-                end,
-                target: LinkTarget::Url(url),
-            }),
-            candidate: None,
-        };
+        return Some(LinkMatch {
+            start,
+            end,
+            target: LinkTarget::Url(url),
+        });
     }
     if !include_files {
-        return LinkLookup {
-            link: None,
-            candidate: None,
-        };
+        return None;
     }
-    // Every reading of the token gets its own look and the first one something
-    // answers for wins. The winner's span is what gets underlined, so on a
-    // Chinese line the underline lands on the path alone rather than on the
-    // prose that happened to touch it.
-    let candidates = file_candidates_at(text, col);
-    for candidate in &candidates {
-        let Some((path, is_dir)) = resolve_candidate(candidate, roots, probe) else {
+    for candidate in file_candidates_at(text, col) {
+        let Some((path, is_dir)) = resolve_candidate(&candidate, roots, probe) else {
             continue;
         };
-        return LinkLookup {
-            link: Some(LinkMatch {
-                start: candidate.start,
-                end: candidate.end,
-                target: LinkTarget::File {
-                    path,
-                    line: candidate.line,
-                    column: candidate.column,
-                    is_dir,
-                },
-            }),
-            candidate: None,
+        // A path can carry its line number instead of wearing it: only once
+        // something has answered for the file is it worth reading the prose
+        // beside it, and a directory has no line to land on.
+        let line = match (candidate.line, is_dir) {
+            (Some(line), _) => Some(line),
+            (None, true) => None,
+            (None, false) => location_after(text, candidate.end + 1),
         };
+        return Some(LinkMatch {
+            start: candidate.start,
+            end: candidate.end,
+            target: LinkTarget::File {
+                path,
+                line,
+                column: candidate.column,
+                is_dir,
+            },
+        });
     }
-    LinkLookup {
-        link: None,
-        candidate: report_candidate(candidates),
-    }
-}
-
-fn report_candidate(candidates: Vec<FileCandidate>) -> Option<FileCandidate> {
-    let narrowest = candidates
-        .iter()
-        .filter(|candidate| candidate.looks_like_a_path())
-        .min_by_key(|candidate| candidate.end - candidate.start)
-        .cloned();
-    narrowest.or_else(|| candidates.into_iter().next())
+    None
 }
 
 /// The first of `candidate`'s possible paths that something answers for.
@@ -896,18 +958,18 @@ impl FileCandidate {
     /// Every path this token could mean, best guess first: absolute paths
     /// stand alone, relative ones are joined onto each root in turn.
     pub fn paths(&self, roots: &LinkRoots) -> Vec<PathBuf> {
-        let Some(expanded) = expand_home(&self.path, roots.cwd(), roots.local_home) else {
+        let Some(expanded) = expand_home(&self.path, roots) else {
             return Vec::new();
         };
-        if expanded.as_os_str().is_empty() {
+        if expanded.is_empty() {
             return Vec::new();
         }
-        if expanded.is_absolute() {
-            return vec![expanded];
+        if roots.style.is_absolute(&expanded) {
+            return vec![PathBuf::from(expanded)];
         }
         let mut out: Vec<PathBuf> = Vec::new();
         for root in &roots.dirs {
-            let joined = root.join(&expanded);
+            let joined = roots.style.join(root, &expanded);
             if !out.contains(&joined) {
                 out.push(joined);
             }
@@ -919,113 +981,220 @@ impl FileCandidate {
     /// measured from anywhere. [`Self::paths`] ignores the roots entirely for
     /// these, so a report about one must not name a directory as the place it
     /// was looked for.
-    pub fn is_rooted(&self) -> bool {
-        self.path.starts_with('~') || Path::new(&self.path).is_absolute()
+    ///
+    /// Takes the pane's own dialect for the same reason `paths` does: on a
+    /// Windows client `/etc/hosts` printed by a Linux pane is rooted and
+    /// `/etc/hosts` printed by a `cmd.exe` pane is not, and `Path` alone
+    /// cannot tell those apart.
+    pub fn is_rooted(&self, style: PathStyle) -> bool {
+        self.path.starts_with('~') || style.is_absolute(&self.path)
     }
 
     /// Whether the token is written enough like a path to be worth telling the
     /// user about when nothing answers for it. A bare word is not — every
     /// modifier-click on ordinary output would raise a notification saying so.
-    pub fn looks_like_a_path(&self) -> bool {
-        is_path_shaped(&self.path)
+    ///
+    /// A backslash counts only where it separates directories. In a POSIX
+    /// pane it is an escape or an ordinary filename character, so `foo\ bar`
+    /// there is a word, not a path.
+    pub fn looks_like_a_path(&self, style: PathStyle) -> bool {
+        self.path.starts_with('~')
+            || self.path.contains('/')
+            || (style == PathStyle::Windows && self.path.contains('\\'))
     }
 }
 
-/// Whether a run of text is written like a path rather than like a word: it
-/// says where it starts, or it names a directory on the way.
-fn is_path_shaped(token: &str) -> bool {
-    token.starts_with('~') || token.contains('/') || (cfg!(windows) && token.contains('\\'))
-}
-
-/// Every reading of the token under `col`, most conservative first.
+/// Every path-shaped reading of the token under `col`, best first.
 ///
-/// Two things widen a token into several readings. Where it *ends* is a
-/// question only on a CJK line, because prose written with no spaces in it
-/// leaves the path nothing to stop at — [`TokenEdge::CjkPunct`] comes first
-/// because it keeps `docs/设计文档.md` whole, and [`TokenEdge::Cjk`] follows to
-/// rescue the lines where nothing but a han character separates the prose from
-/// the path. Where it *starts* is a question on any line, and
-/// [`push_readings`] answers it.
+/// The syntactic half of file detection: everything that can be decided from
+/// the text alone, with no filesystem behind it. One token can be read more
+/// than one way, and two things widen it.
 ///
-/// A token with no CJK in it is tokenised once rather than three times: the
-/// three edge sets agree character for character on such a token, so the other
-/// two scans can only repeat the first.
+/// Where it *ends* is a question only on a CJK line, because prose written
+/// with no spaces in it leaves the path nothing to stop at — so the token is
+/// read three times, under each of [`TokenEdge`]'s boundary sets:
+/// [`TokenEdge::CjkPunct`] keeps `docs/设计文档.md` whole, [`TokenEdge::Cjk`]
+/// rescues the lines where nothing but a han character separates the prose
+/// from the path, and the whitespace token is what a filename that really
+/// does carry CJK punctuation needs. A token with no CJK in it is tokenised
+/// once rather than three times: the three edge sets agree character for
+/// character on such a token, so the other two scans can only repeat the
+/// first.
+///
+/// Where it *starts* is a question on any line, because terminal output wraps
+/// paths in a small set of known prefixes and suffixes — `--file=src/main.rs`,
+/// `+++ b/src/main.rs`, `Update(src/main.rs)`, `src@` from `ls -F` — and
+/// [`left_cuts`] answers it. Which reading is the real one is a question only
+/// the filesystem can settle, so the ladder hands them all to the caller in
+/// the order they are worth asking about, longest path first: `/srv/app/log`
+/// beats the `/srv/app` inside it when both exist, and a peeled reading only
+/// gets its turn once the one that was actually written has missed. The
+/// winner's span is what gets underlined, so on a Chinese line the underline
+/// lands on the path alone rather than on the prose that happened to touch it.
+///
+/// Deliberately a short ladder rather than every substring between every
+/// separator: naming the prefixes costs a handful of readings where
+/// enumerating pairs costs a probe per pair, on every hover.
 pub(super) fn file_candidates_at(text: &str, col: usize) -> Vec<FileCandidate> {
-    let Some((start, end, widest)) = token_at(text, col, TokenEdge::Whitespace) else {
+    let Some((start, _, widest)) = token_at(text, col, TokenEdge::Whitespace) else {
         return Vec::new();
     };
-    let mut out: Vec<FileCandidate> = Vec::new();
-    // The fast path, and the one nearly every hover takes: a token with no CJK
-    // character anywhere in it reads the same under all three edge sets, so
-    // the other two scans can only repeat this one. The CJK arms of
+    // Each tokenisation's readings carry its rank, most conservative first:
+    // on a Chinese line the whole sentence is a reading too, and probing it
+    // before the path inside it is a wasted round trip on a remote pane. On an
+    // ASCII line there is one rank, and the order is purely longest first.
+    let mut ranked: Vec<(u8, FileCandidate)> = Vec::new();
+    let mut take = |rank: u8, base: usize, token: &str| {
+        let mut readings = Vec::new();
+        push_readings(&mut readings, base, token, col);
+        ranked.extend(readings.into_iter().map(|reading| (rank, reading)));
+    };
+    // The fast path, and the one nearly every hover takes. The CJK arms of
     // [`TokenEdge::ends_token`] match nothing inside such a token, and the
     // half-width rule needs CJK on the far side of the mark — which, at this
     // token's own edges, is the whitespace that ended it.
-    if !widest.chars().any(super::smart_select::is_cjk) {
-        push_readings(&mut out, start, end, &widest, col);
-        return out;
+    let has_cjk = widest.chars().any(super::smart_select::is_cjk);
+    if has_cjk {
+        for (rank, edge) in [(0, TokenEdge::CjkPunct), (1, TokenEdge::Cjk)] {
+            if let Some((start, _, token)) = token_at(text, col, edge) {
+                take(rank, start, &token);
+            }
+        }
     }
-
-    for edge in [TokenEdge::CjkPunct, TokenEdge::Cjk] {
-        let Some((start, end, token)) = token_at(text, col, edge) else {
-            continue;
-        };
-        push_readings(&mut out, start, end, &token, col);
+    take(2, start, &widest);
+    ranked.sort_by(|(rank_a, a), (rank_b, b)| {
+        rank_a
+            .cmp(rank_b)
+            .then(b.path.chars().count().cmp(&a.path.chars().count()))
+            .then(a.start.cmp(&b.start))
+    });
+    let mut out: Vec<FileCandidate> = Vec::new();
+    for (_, reading) in ranked {
+        if !out.contains(&reading) {
+            out.push(reading);
+        }
     }
-    push_readings(&mut out, start, end, &widest, col);
+    // Three tokenisations of a CJK line can each fill their share; cutting
+    // them to one share would throw away the narrow readings, which are the
+    // ones such a line exists to find.
+    out.truncate(match has_cjk {
+        true => MAX_FILE_CANDIDATES * 3,
+        false => MAX_FILE_CANDIDATES,
+    });
     out
 }
 
-/// The token as it stands, then the same token read again from after each
-/// prefix something glued onto the path.
-///
-/// The whole token goes first and the anchored readings are the fallback,
-/// because `=`, `(` and the rest of [`is_prefix_boundary`] are all legal in a
-/// Unix filename: a file really called `my=notes.txt` has to answer for itself
-/// before anything reads it as an assignment. An anchored reading that lands
-/// on a span already here costs nothing — an emitter that closed the call it
-/// opened has been unwrapped by [`trim_file_token`] already, and
-/// [`push_candidate`] drops the duplicate.
-fn push_readings(out: &mut Vec<FileCandidate>, start: usize, end: usize, token: &str, col: usize) {
-    push_candidate(out, file_candidate_from(start, end, token.to_string(), col));
-    for (offset, rest) in prefix_anchors(token) {
-        let start = start + token[..offset].chars().count();
-        push_candidate(out, file_candidate_from(start, end, rest.to_string(), col));
+/// Files every reading of one tokenisation of the line, whose first character
+/// sits at column `base`.
+fn push_readings(out: &mut Vec<FileCandidate>, base: usize, token: &str, col: usize) {
+    let chars: Vec<char> = token.chars().collect();
+    for cut in left_cuts(&chars) {
+        push_candidates(base, &chars, cut, col, out);
     }
 }
 
-/// Where inside `token` a path starts over, as a byte offset and the rest of
-/// the token from there.
+/// The best reading of the token under `col`, which is what most of the
+/// carving tests are about.
+#[cfg(test)]
+fn file_candidate_at(text: &str, col: usize) -> Option<FileCandidate> {
+    file_candidates_at(text, col).into_iter().next()
+}
+
+/// The reading a click that resolved nothing should name.
 ///
-/// [`trim_file_token`] walks wrappers off the *front*, which is enough for
-/// `(src/main.rs)` and useless for `Bash(D=/tmp/x.md`: the shell assignment
-/// and the call that never closes on this line each leave a *name* in front of
-/// the path, and no amount of front-trimming reaches past a name. A coding
-/// agent echoing the command it is about to run prints exactly that shape, on
-/// every tool call it makes.
+/// The shortest one still written like a path, which is the part the user was
+/// pointing at rather than the `--flag=` or `label:` wrapped around it. A
+/// token that is not written like a path at all still comes back, so the
+/// caller can decide to say nothing at all about it.
+pub(super) fn unresolved_candidate(
+    text: &str,
+    col: usize,
+    style: PathStyle,
+) -> Option<FileCandidate> {
+    let candidates = file_candidates_at(text, col);
+    candidates
+        .iter()
+        .rev()
+        .find(|c| c.looks_like_a_path(style))
+        .or_else(|| candidates.first())
+        .cloned()
+}
+
+/// Where inside a token a path could start, besides the token's own start.
 ///
-/// Two things hold the readings down to the ones worth a probe. The rest has
-/// to be path-shaped, which is what keeps `foo(bar)` and `src/foo(bar.txt` —
-/// filenames that are legally called that — from being quietly re-read as
-/// `bar`. And an anchor whose rest opens at another boundary is skipped, so
-/// `Bash(D=/tmp/x` yields the one reading that matters rather than one per
-/// boundary crossed.
-fn prefix_anchors(token: &str) -> impl Iterator<Item = (usize, &str)> {
-    token.char_indices().filter_map(move |(i, c)| {
-        if !is_prefix_boundary(c) {
-            return None;
+/// Each rule is applied to every cut it produces, so the prefixes stack the
+/// way they do in real output: `git diff`'s `a/` behind a `--file=`, a label
+/// behind that. The cap is what stops a separator-dense token from walking.
+fn left_cuts(chars: &[char]) -> Vec<usize> {
+    let mut cuts = vec![0usize];
+    let mut next = 0;
+    while next < cuts.len() && cuts.len() < MAX_FILE_CANDIDATES {
+        let base = cuts[next];
+        next += 1;
+        let rest = &chars[base..];
+        let mut offsets: Vec<usize> = Vec::new();
+        // `--file=src/main.rs`, `PATH=/usr/bin`. The last `=` wins, so a value
+        // that is itself an assignment keeps only its tail.
+        if let Some(i) = rest.iter().rposition(|&c| c == '=') {
+            offsets.push(i + 1);
         }
-        let offset = i + c.len_utf8();
-        let rest = &token[offset..];
-        let starts_over = rest.chars().next().is_some_and(|c| !is_prefix_boundary(c));
-        (starts_over && is_path_shaped(rest)).then_some((offset, rest))
-    })
+        // `note:src/main.rs`. Only a plain word may sit in front: one letter
+        // is a Windows drive (`C:\src`), and a prefix carrying a `/` or a `.`
+        // is more likely a path with a line number written onto it. What
+        // follows has to be spelled like a path too, or `branch:main` and
+        // `remote:origin` become links the moment the pane's directory holds
+        // a `main/` or an `origin/`.
+        if let Some(i) = rest.iter().position(|&c| c == ':')
+            && i >= 2
+            && rest[0].is_ascii_alphabetic()
+            && rest[..i]
+                .iter()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'))
+            && rest[i + 1..]
+                .iter()
+                .any(|c| matches!(c, '/' | '\\' | '.' | '~'))
+        {
+            offsets.push(i + 1);
+        }
+        // What `git diff` calls the two sides of a change.
+        if matches!(rest.first(), Some('a' | 'b')) && rest.get(1) == Some(&'/') {
+            offsets.push(2);
+        }
+        // A *name* glued in front of the path: `Update(src/main.rs)`,
+        // `Bash(D=/tmp/x` — the call a coding agent echoes on every tool it
+        // runs, closed on this line or not — and the marks a list of paths is
+        // separated with. Skipping the wrappers only walks characters off the
+        // front, and no amount of that reaches past a name.
+        //
+        // The rest has to be path-shaped, which is what keeps `foo(bar)` and
+        // `src/foo(bar.txt` — filenames that are legally called that — from
+        // being quietly re-read as `bar`. And an anchor whose rest opens at
+        // another boundary is skipped, so `Bash(D=/tmp/x` yields the one
+        // reading that matters rather than one per boundary crossed.
+        for (i, &c) in rest.iter().enumerate() {
+            if !is_prefix_boundary(c) {
+                continue;
+            }
+            let after = &rest[i + 1..];
+            let starts_over = after.first().is_some_and(|&c| !is_prefix_boundary(c));
+            if starts_over && is_path_shaped(after) {
+                offsets.push(i + 1);
+            }
+        }
+        for offset in offsets {
+            let cut = base + offset;
+            if cut < chars.len() && !cuts.contains(&cut) {
+                cuts.push(cut);
+            }
+        }
+    }
+    cuts
 }
 
 /// The characters that glue a prefix onto a path rather than standing inside
-/// one: a shell assignment (`D=/tmp/x`), a flag (`--config=/etc/app.conf`), a
-/// wrapper the emitter opens and does not close on this line (`Bash(/tmp/x`),
-/// and the marks a list of paths is separated with.
+/// one: a wrapper the emitter opens (`Bash(/tmp/x`), and the marks a list of
+/// paths is separated with. `=` is not here because [`left_cuts`] reads an
+/// assignment on its own, keeping only the value's tail.
 ///
 /// Two neighbours are deliberately absent. `|` and `&&` are followed by a
 /// *command*, not by a path, so an anchor there buys nothing and costs a probe.
@@ -1033,59 +1202,76 @@ fn prefix_anchors(token: &str) -> impl Iterator<Item = (usize, &str)> {
 /// this filesystem, which is how a click opens somebody else's file; the same
 /// judgement [`home_dir`] makes about `~`.
 fn is_prefix_boundary(c: char) -> bool {
-    matches!(c, '=' | '(' | '[' | '{' | '<' | ',' | ';' | '`')
+    matches!(c, '(' | '[' | '{' | '<' | ',' | ';' | '`')
 }
 
-/// Adds a reading unless one covering the same span is already there.
-fn push_candidate(out: &mut Vec<FileCandidate>, candidate: Option<FileCandidate>) {
-    let Some(candidate) = candidate else {
-        return;
-    };
-    if out
-        .iter()
-        .any(|seen| seen.start == candidate.start && seen.end == candidate.end)
-    {
-        return;
-    }
-    out.push(candidate);
+/// Whether a run of text is written like a path rather than like a word: it
+/// says where it starts, or it names a directory on the way. Asked before the
+/// pane's dialect is known, so a backslash counts here where
+/// [`FileCandidate::looks_like_a_path`] would ask which OS wrote it — the cost
+/// is one more reading on a POSIX line, not a wrong answer.
+fn is_path_shaped(chars: &[char]) -> bool {
+    chars.first() == Some(&'~') || chars.iter().any(|&c| matches!(c, '/' | '\\'))
 }
 
-/// The first reading of the token under `col`, for callers that only need to
-/// say what the click *said* rather than resolve it.
-#[cfg(test)]
-pub(super) fn file_candidate_at(text: &str, col: usize) -> Option<FileCandidate> {
-    file_candidates_at(text, col).into_iter().next()
-}
-
-/// The syntactic half of file detection: everything that can be decided from
-/// the token alone, with no filesystem behind it.
-fn file_candidate_from(
-    start: usize,
-    end: usize,
-    token: String,
+/// Turns one left cut into the readings it supports and files them in `out`.
+fn push_candidates(
+    base: usize,
+    chars: &[char],
+    cut: usize,
     col: usize,
-) -> Option<FileCandidate> {
-    let (start, mut end, mut token) = trim_file_token(start, end, token);
-    if token.is_empty() {
-        return None;
+    out: &mut Vec<FileCandidate>,
+) {
+    let mut start = cut;
+    while chars.get(start).is_some_and(|&c| is_left_wrapper(c)) {
+        start += 1;
+    }
+    let end = start + trim_token_end(&chars[start..]);
+    if end <= start {
+        return;
     }
 
-    let mut location = split_file_location(&token);
-    if location.line.is_none() && token.ends_with(':') {
-        token.pop();
-        end = end.saturating_sub(1);
-        location = split_file_location(&token);
+    let mut ends = vec![end];
+    // `ls -F` marks what it lists: `src@` is a symlink, `run*` an executable,
+    // `sock=` a socket, `fifo|` a FIFO. The mark is not part of the name.
+    if end - 1 > start && matches!(chars[end - 1], '@' | '*' | '=' | '|') {
+        ends.push(end - 1);
     }
-    if location.path.is_empty() {
-        return None;
+
+    for end in ends {
+        let mut token: String = chars[start..end].iter().collect();
+        let mut end = end - 1;
+        let mut location = split_file_location(&token);
+        // `foo.sh:` before `line 12`, and ripgrep's `path:` before a match.
+        if location.line.is_none() && token.ends_with(':') {
+            token.pop();
+            end = end.saturating_sub(1);
+            location = split_file_location(&token);
+        }
+        if location.path.is_empty() {
+            continue;
+        }
+        if !(base + start..=base + end).contains(&col) {
+            continue;
+        }
+        let mut readings = Vec::with_capacity(2);
+        if location.literal_too {
+            readings.push((token, None, None));
+        }
+        readings.push((location.path, location.line, location.column));
+        for (path, line, column) in readings {
+            let candidate = FileCandidate {
+                start: base + start,
+                end: base + end,
+                path,
+                line,
+                column,
+            };
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
     }
-    (start..=end).contains(&col).then_some(FileCandidate {
-        start,
-        end,
-        path: location.path,
-        line: location.line,
-        column: location.column,
-    })
 }
 
 pub(super) fn url_span_at(text: &str, col: usize) -> Option<(usize, usize, String)> {
@@ -1223,138 +1409,125 @@ fn token_at(text: &str, col: usize, edge: TokenEdge) -> Option<(usize, usize, St
     Some((start, end, chars[start..=end].iter().collect()))
 }
 
-fn trim_file_token(mut start: usize, mut end: usize, mut token: String) -> (usize, usize, String) {
-    while token
-        .chars()
-        .next()
-        .is_some_and(|c| matches!(c, '(' | '[' | '<' | '\'' | '"' | '{' | '`'))
-    {
-        token.remove(0);
-        start += 1;
-    }
-    strip_trailing_punct(&mut token, &mut end);
-    // `Update(src/main.rs)` — an emitter that writes the path inside a call.
-    // The strip above only walks characters off the *front*, so a name in
-    // front of the paren leaves the token starting at `U` and the path
-    // unreachable however far the front is trimmed.
-    //
-    // What tells a call from a filename is the shape of the whole token rather
-    // than the paren alone, because `foo(bar)`, `my(file).txt` and
-    // `src/foo(bar)` are all legal names on Unix and none of them is a call.
-    // Three things have to hold at once: the token ends at the `)` this `(`
-    // opened, what stands in front of the paren reads like a name rather than
-    // a path, and what stands inside it reads like a path. The last of those
-    // costs `Update(main.rs)` — a call naming a file in the pane's own
-    // directory — and is worth it: without it, a file that is really called
-    // `foo(bar)` gets silently rewritten to `bar`, which is how a click ends
-    // up opening a different file rather than none.
-    if let Some(open) = call_wrapper_open(&token) {
-        token.pop();
-        end = end.saturating_sub(1);
-        start += token[..open].chars().count() + 1;
-        token.drain(..=open);
-        strip_trailing_punct(&mut token, &mut end);
-    }
-    (start, end, token)
-}
-
-/// Walks trailing punctuation off the token.
-///
-/// Runs before the call-wrapper rule as well as after it, because that rule
-/// reads the token's *final* character and a sentence puts its own punctuation
-/// there first: `Update(src/main.rs).` has to lose the full stop before the
-/// `)` underneath it can be recognised as the wrapper's. A closing bracket the
-/// token opened for itself survives either pass, which is what keeps
-/// `src/foo(bar).` a filename with a full stop after it.
-fn strip_trailing_punct(token: &mut String, end: &mut usize) {
-    while let Some(c) = token.chars().next_back() {
-        if !is_file_trailing_punct(c) || closes_own_pair(token, c) {
-            return;
-        }
-        token.pop();
-        *end = end.saturating_sub(1);
-    }
-}
-
-/// The `(` a call wrapper opens with, as a byte index into `token`.
-///
-/// See [`trim_file_token`] for what has to hold before a paren counts as a
-/// wrapper rather than as part of a name.
-fn call_wrapper_open(token: &str) -> Option<usize> {
-    let close = token.strip_suffix(')').map(str::len)?;
-    let open = matching_open_paren(token, close)?;
-    let name = &token[..open];
-    if name.is_empty() || name.contains(['/', '\\', '(', ')']) {
-        return None;
-    }
-    is_path_shaped(&token[open + 1..close]).then_some(open)
-}
-
-/// The `(` that the `)` at byte index `close` closes.
-fn matching_open_paren(token: &str, close: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    for (i, c) in token[..close].char_indices().rev() {
-        match c {
-            ')' => depth += 1,
-            '(' if depth == 0 => return Some(i),
-            '(' => depth -= 1,
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Whether a trailing bracket is the closing half of a pair the token opened
-/// for itself.
-///
-/// `src/foo(bar)` and `notes[1]` are names; `src/foo.txt)` is a name somebody
-/// wrote inside brackets. Counting is enough to tell them apart — the same
-/// judgement [`trim_trailing_punct`] makes for a URL.
-fn closes_own_pair(token: &str, c: char) -> bool {
-    let open = match c {
-        ')' => '(',
-        ']' => '[',
-        '}' => '{',
-        _ => return false,
-    };
-    count_char(token, c) <= count_char(token, open)
-}
-
-fn is_file_trailing_punct(c: char) -> bool {
+/// What can open a path without being part of it: the brackets and quotes
+/// prose puts around one, and the box-drawing glyphs `tree` and friends draw
+/// in front of one.
+fn is_left_wrapper(c: char) -> bool {
     matches!(
         c,
-        ')' | ']'
-            | '}'
-            | '.'
-            | ','
-            | ';'
-            | '\''
-            | '"'
-            | '>'
-            | '`'
-            | '）'
-            | '］'
-            | '】'
-            | '》'
-            | '」'
-            | '。'
-            | '，'
-            | '；'
-    )
+        '(' | '[' | '<' | '{' | '\'' | '"' | '`' | '（' | '［' | '｛' | '《' | '「' | '『' | '【'
+    ) || ('\u{2500}'..='\u{257F}').contains(&c)
+}
+
+/// Where the path stops and the sentence around it starts again, as an
+/// exclusive char index.
+fn trim_token_end(chars: &[char]) -> usize {
+    let mut end = chars.len();
+    while end > 0 {
+        let strip = match chars[end - 1] {
+            // A close that has an open of its own inside the token belongs to
+            // the path: `report(1).pdf` is a filename, `(src/lib.rs)` is not.
+            ')' => count_chars(&chars[..end], ')') > count_chars(&chars[..end], '('),
+            ']' => count_chars(&chars[..end], ']') > count_chars(&chars[..end], '['),
+            '}' => count_chars(&chars[..end], '}') > count_chars(&chars[..end], '{'),
+            // `.`, `..` and `foo/.` are directories, not a sentence that ran
+            // into the path.
+            '.' => !matches!(
+                end.checked_sub(2).and_then(|i| chars.get(i)),
+                None | Some('.' | '/' | '\\')
+            ),
+            ',' | ';' | '\'' | '"' | '>' | '`' | '）' | '］' | '】' | '》' | '」' | '』' | '。'
+            | '，' | '、' | '；' | '：' => true,
+            _ => false,
+        };
+        if !strip {
+            break;
+        }
+        end -= 1;
+    }
+    end
+}
+
+fn count_chars(chars: &[char], needle: char) -> usize {
+    chars.iter().filter(|&&c| c == needle).count()
 }
 
 struct FileLocation {
     path: String,
     line: Option<u32>,
     column: Option<u32>,
+    /// Whether the whole token is also worth reading as a filename.
+    ///
+    /// `backup(1)` and `main.ts(10)` are spelled identically, and only the
+    /// filesystem knows which is which, so both readings go on the ladder.
+    /// A `:10:2` suffix gets no such courtesy: a colon is illegal in a
+    /// Windows filename and vanishingly rare in a POSIX one, and doubling
+    /// the probes for the spelling every compiler uses is not worth it.
+    literal_too: bool,
 }
 
+/// The path, and the `line:column` written onto the end of it.
+///
+/// Three spellings cover what build tools actually print: `main.rs:10:2`
+/// (rustc, clang, ripgrep, eslint), `main.ts(10,2)` (tsc, MSVC, and every
+/// compiler that grew up on Windows) and `main.rs#L10` (a permalink pasted
+/// into a shell).
 fn split_file_location(token: &str) -> FileLocation {
+    if let Some(location) = paren_location(token) {
+        return location;
+    }
+    if let Some(location) = anchor_location(token) {
+        return location;
+    }
+    colon_location(token)
+}
+
+/// `main.ts(10,2)` and `main.ts(10)`.
+fn paren_location(token: &str) -> Option<FileLocation> {
+    let inner = token.strip_suffix(')')?;
+    let open = inner.rfind('(')?;
+    let (path, digits) = inner.split_at(open);
+    let digits = &digits['('.len_utf8()..];
+    if path.is_empty() || digits.is_empty() {
+        return None;
+    }
+    let mut parts = digits.split(',').map(str::trim);
+    let line = parts.next()?.parse().ok()?;
+    let column = match parts.next() {
+        Some(column) => Some(column.parse().ok()?),
+        None => None,
+    };
+    parts.next().is_none().then_some(FileLocation {
+        path: path.to_string(),
+        line: Some(line),
+        column,
+        literal_too: true,
+    })
+}
+
+/// `main.rs#L10`, and the `#L10-L20` a GitHub range permalink carries.
+fn anchor_location(token: &str) -> Option<FileLocation> {
+    let (path, anchor) = token.rsplit_once("#L")?;
+    if path.is_empty() {
+        return None;
+    }
+    let line = anchor.split('-').next()?.parse().ok()?;
+    Some(FileLocation {
+        path: path.to_string(),
+        line: Some(line),
+        column: None,
+        literal_too: true,
+    })
+}
+
+/// `main.rs:10:2` and `main.rs:10`.
+fn colon_location(token: &str) -> FileLocation {
     let Some((prefix, last)) = strip_numeric_suffix(token) else {
         return FileLocation {
             path: token.to_string(),
             line: None,
             column: None,
+            literal_too: false,
         };
     };
     if let Some((path, line)) = strip_numeric_suffix(prefix) {
@@ -1362,12 +1535,14 @@ fn split_file_location(token: &str) -> FileLocation {
             path: path.to_string(),
             line: Some(line),
             column: Some(last),
+            literal_too: false,
         }
     } else {
         FileLocation {
             path: prefix.to_string(),
             line: Some(last),
             column: None,
+            literal_too: false,
         }
     }
 }
@@ -1411,14 +1586,70 @@ fn parse_line_number(s: &str) -> Option<u32> {
     s.parse().ok()
 }
 
-fn expand_home(path: &str, cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
+/// The line number written *next to* a path rather than onto it.
+///
+/// Python's traceback is why this exists: `File "handlers.py", line 214` puts
+/// the number two tokens away, and landing on the file but not the line is
+/// most of the way to useless in the one place where clicking a path is worth
+/// the most. `bash`, `make` and `pytest` spell it the same way.
+fn location_after(text: &str, from: usize) -> Option<u32> {
+    /// Far enough to clear `", line ` and the number, and short enough that a
+    /// `line` belonging to the next sentence is out of reach.
+    const WINDOW: usize = 24;
+
+    let chars: Vec<char> = text.chars().skip(from).take(WINDOW).collect();
+    let at = |i: usize| chars.get(i).copied();
+    let mut i = 0;
+    // Whatever closed the path: the quote around it, the comma after it, the
+    // colon `bash` puts there.
+    while at(i)
+        .is_some_and(|c| matches!(c, '"' | '\'' | ',' | ':' | ')' | ']') || c.is_whitespace())
+    {
+        i += 1;
+    }
+    let word: String = chars.iter().skip(i).take(4).collect();
+    if !word.eq_ignore_ascii_case("line") {
+        return None;
+    }
+    i += 4;
+    // `lineage 5` is not a location.
+    if !at(i).is_some_and(char::is_whitespace) {
+        return None;
+    }
+    while at(i).is_some_and(char::is_whitespace) {
+        i += 1;
+    }
+    let digits: String = chars
+        .iter()
+        .skip(i)
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// The token with a leading `~` turned into a real directory, still spelled
+/// the pane's way — a string rather than a `PathBuf`, because deciding what is
+/// absolute and how to join is the [`PathStyle`]'s job from here on and
+/// `Path` would answer for the wrong machine.
+fn expand_home(path: &str, roots: &LinkRoots) -> Option<String> {
+    let home = || {
+        home_dir(roots.cwd(), roots.local_home, roots.style)
+            .map(|home| home.to_string_lossy().into_owned())
+    };
     if path == "~" {
-        return home_dir(cwd, local_home);
+        return home();
     }
-    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
-        return home_dir(cwd, local_home).map(|home| home.join(rest));
+    let rest = match roots.style {
+        PathStyle::Posix => path.strip_prefix("~/"),
+        PathStyle::Windows => path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")),
+    };
+    if let Some(rest) = rest {
+        return home().map(|home| match roots.style {
+            PathStyle::Posix => format!("{}/{rest}", home.trim_end_matches('/')),
+            PathStyle::Windows => Path::new(&home).join(rest).to_string_lossy().into_owned(),
+        });
     }
-    Some(PathBuf::from(path))
+    Some(path.to_string())
 }
 
 /// The home `~` stands for, read out of the cwd where it can be and out of the
@@ -1429,8 +1660,8 @@ fn expand_home(path: &str, cwd: Option<&Path>, local_home: bool) -> Option<PathB
 /// box says nothing about that box's home, and turning `~/.zshrc` into
 /// `/Users/me/.zshrc` and asking the far side about it is how a link ends up
 /// pointing at a file nobody meant.
-fn home_dir(cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
-    if let Some(home) = cwd.and_then(home_from_cwd) {
+fn home_dir(cwd: Option<&Path>, local_home: bool, style: PathStyle) -> Option<PathBuf> {
+    if let Some(home) = cwd.and_then(|cwd| home_from_cwd(cwd, style)) {
         return Some(home);
     }
     if !local_home {
@@ -1442,25 +1673,26 @@ fn home_dir(cwd: Option<&Path>, local_home: bool) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-#[cfg(unix)]
-fn home_from_cwd(cwd: &Path) -> Option<PathBuf> {
-    let mut components = cwd.components();
-    let root = components.next()?;
-    let base = components.next()?;
-    let user = components.next()?;
-    let base = base.as_os_str().to_str()?;
-    matches!(base, "Users" | "home").then(|| {
-        let mut home = PathBuf::new();
-        home.push(root.as_os_str());
-        home.push(base);
-        home.push(user.as_os_str());
-        home
-    })
-}
-
-#[cfg(not(unix))]
-fn home_from_cwd(_cwd: &Path) -> Option<PathBuf> {
-    None
+/// The `/home/<user>` or `/Users/<user>` a POSIX cwd sits under.
+///
+/// Read off the string rather than `Path::components`, and keyed off the
+/// pane's dialect rather than `cfg!(unix)`. The old spelling was gated to Unix
+/// clients, which meant a Windows tty7 could not say what `~` meant in *any*
+/// pane it was looking at — `~/.zshrc` printed by a Linux host resolved on a
+/// Mac and silently did not on a Windows box beside it.
+///
+/// A Windows-dialect cwd still gets no answer: nothing about `D:\Users\team`
+/// says whose home it is, and the environment fallback in [`home_dir`] is both
+/// available and right for the panes that spell paths that way.
+fn home_from_cwd(cwd: &Path, style: PathStyle) -> Option<PathBuf> {
+    if style != PathStyle::Posix {
+        return None;
+    }
+    let cwd = cwd.to_str()?;
+    let mut parts = cwd.strip_prefix('/')?.split('/').filter(|p| !p.is_empty());
+    let base = parts.next()?;
+    let user = parts.next()?;
+    matches!(base, "Users" | "home").then(|| PathBuf::from(format!("/{base}/{user}")))
 }
 
 fn trim_trailing_punct(token: &mut String) {
@@ -1838,13 +2070,19 @@ mod tests {
         assert_eq!((link.start, link.end), (6, 21));
     }
 
+    /// Ungated with the rest: what a `~` in a POSIX pane stands for is that
+    /// pane's business and not its client's, and the `#[cfg(unix)]` this used
+    /// to carry described the wrong machine.
     #[test]
-    #[cfg(unix)]
     fn tilde_expansion_prefers_home_inferred_from_the_pane_cwd() {
-        let cwd = Path::new("/Users/alice/clone/tty7");
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/Users/alice/clone/tty7")],
+            local_home: true,
+            style: PathStyle::Posix,
+        };
         assert_eq!(
-            expand_home("~/clone/tty7/src/main.rs", Some(cwd), true),
-            Some(PathBuf::from("/Users/alice/clone/tty7/src/main.rs"))
+            expand_home("~/clone/tty7/src/main.rs", &roots),
+            Some("/Users/alice/clone/tty7/src/main.rs".to_string())
         );
     }
 
@@ -1852,17 +2090,24 @@ mod tests {
     /// machine: this machine's `$HOME` describes nobody there, and a path built
     /// out of it would be asked about — and possibly answered — on the far side.
     #[test]
-    #[cfg(unix)]
     fn tilde_expansion_does_not_borrow_this_machines_home_for_another_one() {
-        let cwd = Path::new("/srv/app");
-        assert_eq!(expand_home("~/.zshrc", Some(cwd), false), None);
+        let elsewhere = |cwd: &str| LinkRoots {
+            dirs: vec![PathBuf::from(cwd)],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        assert_eq!(expand_home("~/.zshrc", &elsewhere("/srv/app")), None);
         assert_eq!(
-            expand_home("~/.zshrc", Some(Path::new("/home/deploy/app")), false),
-            Some(PathBuf::from("/home/deploy/.zshrc")),
+            expand_home("~/.zshrc", &elsewhere("/home/deploy/app")),
+            Some("/home/deploy/.zshrc".to_string()),
             "a cwd that does reveal the home needs nothing from us"
         );
         assert!(
-            expand_home("~/.zshrc", Some(cwd), true).is_some(),
+            expand_home(
+                "~/.zshrc",
+                &LinkRoots::local(vec![PathBuf::from("/srv/app")])
+            )
+            .is_some(),
             "a local pane still falls back to the environment"
         );
     }
@@ -2037,15 +2282,14 @@ mod tests {
 
     /// `Update(src/main.rs)` is how Claude Code — and anything else that
     /// writes a path inside a call — prints the file it just touched. The
-    /// leading strip in [`trim_file_token`] only walks characters off the
+    /// leading strip in [`push_candidates`] only walks characters off the
     /// front, so before the call-wrapper rule this token stayed
     /// `Update(src/main.rs` however far it was trimmed: a path nothing could
     /// ever answer for, printed on every single tool call.
     #[test]
     fn a_path_written_inside_a_call_is_reachable() {
         let line = "⏺ Update(src/main.rs)";
-        let candidate = file_candidate_at(line, 9).expect("candidate");
-        assert_eq!(candidate.path, "src/main.rs");
+        let candidate = reading_named(line, 9, "src/main.rs");
         assert_eq!(
             line.chars()
                 .skip(candidate.start)
@@ -2057,19 +2301,12 @@ mod tests {
         );
 
         assert_eq!(
-            file_candidate_at("⏺ Update(src/main.rs:12)", 9)
-                .expect("candidate")
-                .line,
+            reading_named("⏺ Update(src/main.rs:12)", 9, "src/main.rs").line,
             Some(12),
             "unwrapping the call must not cost the line suffix"
         );
-        assert_eq!(
-            file_candidate_at("⏺ Update(docs/my(v2).md)", 9)
-                .expect("candidate")
-                .path,
-            "docs/my(v2).md",
-            "only the paren the token ends at is the wrapper"
-        );
+        // Only the paren the token ends at is the wrapper.
+        reading_named("⏺ Update(docs/my(v2).md)", 9, "docs/my(v2).md");
 
         // A sentence puts its own punctuation after the call, and the wrapper
         // rule reads the token's *final* character — so the tail has to come
@@ -2079,12 +2316,24 @@ mod tests {
             "⏺ Update(src/main.rs),",
             "⏺ Update(src/main.rs)、",
         ] {
-            assert_eq!(
-                file_candidate_at(line, 9).expect("candidate").path,
-                "src/main.rs",
-                "{line} names the same file the unpunctuated line does"
-            );
+            // Names the same file the unpunctuated line does.
+            reading_named(line, 9, "src/main.rs");
         }
+    }
+
+    /// The reading of the token under `col` whose path is `path`, from the
+    /// ladder. The ladder is ordered by what is worth probing first, not by
+    /// what a test wants to look at, so a reading is found by name.
+    fn reading_named(line: &str, col: usize, path: &str) -> FileCandidate {
+        let readings = file_candidates_at(line, col);
+        readings
+            .iter()
+            .find(|c| c.path == path)
+            .cloned()
+            .unwrap_or_else(|| {
+                let got: Vec<&str> = readings.iter().map(|c| c.path.as_str()).collect();
+                panic!("{line:?} @{col} has no reading {path:?}; got {got:?}")
+            })
     }
 
     /// Parens are legal in a Unix filename, and the call-wrapper rule has to
@@ -2131,7 +2380,7 @@ mod tests {
     /// The shape a coding agent prints on every tool call: the command it is
     /// about to run, echoed inside a call that opens on this line and closes
     /// on the next. Neither prefix is a wrapper — `Bash` and `D` are names —
-    /// so the front-trim in [`trim_file_token`] cannot reach past them, and
+    /// so skipping [`is_left_wrapper`]s cannot reach past them, and
     /// the call-wrapper rule wants a `)` this line does not have. The token
     /// stayed `Bash(D=/…/plan.md`, read as a *relative* path and therefore
     /// looked for under the pane's own directory, where it can never be.
@@ -2234,7 +2483,14 @@ mod tests {
     /// `url_at` gives for a hover on a CJK prefix.
     #[test]
     fn a_click_on_the_call_name_is_not_a_click_on_the_path() {
-        assert_eq!(file_candidate_at("⏺ Update(src/main.rs)", 3), None);
+        let readings: Vec<String> = file_candidates_at("⏺ Update(src/main.rs)", 3)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        assert!(
+            readings.iter().all(|path| path != "src/main.rs"),
+            "the unwrapped path's span does not reach the call's name; got {readings:?}"
+        );
     }
 
     /// CJK prose has no spaces in it, so a path printed inside a Chinese
@@ -2318,18 +2574,23 @@ mod tests {
     /// candidates that can only repeat each other — and on a remote pane a
     /// probe is a round trip.
     ///
-    /// The wrapped call is here for the second half of that: `Update(…)` does
-    /// carry a prefix boundary, and the anchored reading of it lands on the
-    /// span [`trim_file_token`] had already unwrapped. Charging a probe for
-    /// the same span twice is what the deduplication in [`push_candidate`] is
-    /// for, and this is what holds it in place.
+    /// A wrapped call is the exception that proves it: `Update(src/main.rs)`
+    /// is read twice — as the name it might really be, and as the path inside
+    /// the call — and both readings come off the one scan.
     #[test]
     fn an_ascii_line_yields_exactly_one_reading() {
+        assert_eq!(
+            file_candidates_at("⏺ Update(src/main.rs)", 9)
+                .into_iter()
+                .map(|c| c.path)
+                .collect::<Vec<_>>(),
+            ["Update(src/main.rs)", "src/main.rs"],
+            "the token as written, then the path the call wrapped — and nothing else"
+        );
         for (line, col) in [
             ("wrote scratchpad/notes.md now", 8),
             ("error in crates/core/src/lib.rs:88:5 here", 12),
             ("see (src/main.rs) ok", 6),
-            ("⏺ Update(src/main.rs)", 9),
             // The half-width edge is spelled with a lookout at CJK for exactly
             // this reason: `:` and `,` are ordinary characters on an ASCII
             // line and must not split it into readings.
@@ -2392,36 +2653,34 @@ mod tests {
         );
     }
 
-    /// What a failed click gets told. The readings are ordered most
-    /// conservative first, and the most conservative reading of a Chinese line
-    /// is the whole sentence — reporting *that* as a missing file is a
-    /// notification the user cannot act on.
+    /// What a failed click gets told. One reading of a Chinese line is the
+    /// whole sentence — reporting *that* as a missing file is a notification
+    /// the user cannot act on.
     #[test]
     fn an_unresolved_report_names_the_narrowest_path_shaped_reading() {
         let line = "修改了src/main.rs和docs/b.md";
-        let lookup = link_lookup_at(
-            line,
-            3,
-            &LinkRoots::local(vec![PathBuf::from("/work")]),
-            true,
-            &mut |_, _| Probe::Miss,
-        );
-        assert_eq!(lookup.link, None);
         assert_eq!(
-            lookup.candidate.expect("a report candidate").path,
+            link_at(
+                line,
+                3,
+                &LinkRoots::local(vec![PathBuf::from("/work")]),
+                true,
+                &mut |_, _| Probe::Miss,
+            ),
+            None
+        );
+        assert_eq!(
+            unresolved_candidate(line, 3, PathStyle::NATIVE)
+                .expect("a report candidate")
+                .path,
             "src/main.rs",
             "the sentence around the path is not what the user clicked"
         );
 
-        let word = link_lookup_at(
-            "wrote notes now",
-            8,
-            &LinkRoots::local(vec![PathBuf::from("/work")]),
-            true,
-            &mut |_, _| Probe::Miss,
-        );
         assert_eq!(
-            word.candidate.expect("a report candidate").path,
+            unresolved_candidate("wrote notes now", 8, PathStyle::NATIVE)
+                .expect("a report candidate")
+                .path,
             "notes",
             "a token that is not path-shaped still comes back, so the caller \
              is the one that decides it is not worth reporting"
@@ -2443,13 +2702,24 @@ mod tests {
     fn a_path_shaped_token_is_kept_apart_from_a_bare_word() {
         let path_shaped = file_candidate_at("wrote scratchpad/notes.md now", 8).expect("candidate");
         assert_eq!(path_shaped.path, "scratchpad/notes.md");
-        assert!(path_shaped.looks_like_a_path());
+        assert!(path_shaped.looks_like_a_path(PathStyle::NATIVE));
 
         let word = file_candidate_at("wrote notes now", 8).expect("candidate");
         assert_eq!(word.path, "notes");
         assert!(
-            !word.looks_like_a_path(),
+            !word.looks_like_a_path(PathStyle::NATIVE),
             "a bare word must not raise a notification on every modifier-click"
+        );
+
+        let escaped = file_candidate_at(r"wrote a\b now", 6).expect("candidate");
+        assert_eq!(escaped.path, r"a\b");
+        assert!(
+            escaped.looks_like_a_path(PathStyle::Windows),
+            "a backslash separates directories in a Windows pane"
+        );
+        assert!(
+            !escaped.looks_like_a_path(PathStyle::Posix),
+            "and escapes a space in a POSIX one, whatever this client runs"
         );
     }
 
@@ -2482,23 +2752,230 @@ mod tests {
     /// `is_rooted` decides whether a report about an unresolved token may name
     /// a directory it was "looked for under", so it has to agree with
     /// [`FileCandidate::paths`] about when the roots are consulted at all.
-    /// Both ask `is_absolute`, and on Windows a leading `/` does not make a
-    /// path that — which is why this only claims to hold where it does.
+    ///
+    /// Both used to ask `Path::is_absolute`, which answers for the machine
+    /// tty7 runs on rather than the one the pane's paths are on — so this only
+    /// held on Unix and was gated to it. Both now ask the pane's own dialect,
+    /// and the agreement holds on every client.
     #[test]
-    #[cfg(unix)]
     fn a_rooted_candidate_is_told_apart_from_one_measured_from_a_root() {
+        let posix_roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
         for line in ["open /etc/hosts now", "open ~/.zshrc now"] {
+            let candidate = file_candidate_at(line, 6).expect("candidate");
             assert!(
-                file_candidate_at(line, 6).expect("candidate").is_rooted(),
+                candidate.is_rooted(PathStyle::Posix),
+                "{line} says for itself where it starts"
+            );
+            let paths = candidate.paths(&posix_roots);
+            assert!(
+                !paths.iter().any(|p| p.starts_with("/home/u/proj")),
+                "{line} was not measured from the pane's directory: {paths:?}"
+            );
+        }
+        for line in [r"open C:\Windows\win.ini now", "open ~/.gitconfig now"] {
+            assert!(
+                file_candidate_at(line, 6)
+                    .expect("candidate")
+                    .is_rooted(PathStyle::Windows),
                 "{line} says for itself where it starts"
             );
         }
-        assert!(
-            !file_candidate_at("see src/lib.rs here", 5)
-                .expect("candidate")
-                .is_rooted(),
-            "a relative path is only ever found by measuring from somewhere"
+        for style in [PathStyle::Posix, PathStyle::Windows] {
+            assert!(
+                !file_candidate_at("see src/lib.rs here", 5)
+                    .expect("candidate")
+                    .is_rooted(style),
+                "a relative path is only ever found by measuring from somewhere"
+            );
+        }
+    }
+
+    /// The bug this whole [`PathStyle`] exists for: a Windows tty7 looking at
+    /// a Linux pane — a remote workspace, a native-SSH pane, or a WSL distro
+    /// reached as a host — used to read `/etc/hosts` as a *relative* path,
+    /// because `Path::is_absolute` speaks for the client and a leading `/` is
+    /// not absolute on Windows. The pane's paths were then measured from its
+    /// own directory and the far side was asked about something it never
+    /// printed, so nothing ever underlined.
+    #[test]
+    fn a_posix_pane_roots_its_own_paths_on_every_client() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let candidate = file_candidate_at("open /etc/hosts now", 6).expect("candidate");
+        assert_eq!(
+            candidate.paths(&roots),
+            vec![PathBuf::from("/etc/hosts")],
+            "the pane said where the path starts; the roots have nothing to add"
         );
+
+        // And with no cwd reported at all there is still exactly one thing it
+        // can mean. This is the case that failed outright: no roots meant no
+        // paths, so the host was never even asked.
+        let roots = LinkRoots {
+            dirs: Vec::new(),
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        assert_eq!(candidate.paths(&roots), vec![PathBuf::from("/etc/hosts")]);
+    }
+
+    /// A relative path is the other half, and it fails more quietly: the join
+    /// used to reach for the *client's* separator, so a Windows tty7 asked a
+    /// Linux host about `/home/u/proj\src/lib.rs`.
+    #[test]
+    fn a_posix_pane_joins_a_relative_path_with_its_own_separator() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj"), PathBuf::from("/home/u")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let paths = file_candidate_at("see src/lib.rs here", 5)
+            .expect("candidate")
+            .paths(&roots);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>(),
+            vec!["/home/u/proj/src/lib.rs", "/home/u/src/lib.rs"],
+            "the string the far side is asked about has to be one it can stat"
+        );
+    }
+
+    /// `~` in a POSIX pane is read out of the pane's own cwd — on every
+    /// client. The rule was gated to Unix ones, so a Windows tty7 could not
+    /// resolve `~/.zshrc` in any pane it was looking at.
+    #[test]
+    fn a_posix_pane_reads_a_tilde_out_of_its_own_cwd() {
+        let roots = LinkRoots {
+            dirs: vec![PathBuf::from("/home/u/proj")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        let paths = file_candidate_at("open ~/.zshrc now", 6)
+            .expect("candidate")
+            .paths(&roots);
+        assert_eq!(
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy())
+                .collect::<Vec<_>>(),
+            vec!["/home/u/.zshrc"]
+        );
+
+        let no_home = LinkRoots {
+            dirs: vec![PathBuf::from("/srv/app")],
+            local_home: false,
+            style: PathStyle::Posix,
+        };
+        assert!(
+            file_candidate_at("open ~/.zshrc now", 6)
+                .expect("candidate")
+                .paths(&no_home)
+                .is_empty(),
+            "a cwd that reveals no home may not borrow this machine's (#568)"
+        );
+    }
+
+    /// The deliberate other half: a pane *on this machine* keeps this OS's
+    /// reading of its own output. `/etc` in a `cmd.exe` pane sitting on `C:`
+    /// means `C:\etc`, the way `cd /etc` does there — so it is measured from
+    /// the pane's root and not turned into a link to a file Windows has not
+    /// got. Pinned because the temptation is to make every `/`-rooted token
+    /// stand alone, and that would underline `/etc/hosts` in a PowerShell pane
+    /// with nothing behind it.
+    #[test]
+    fn a_local_pane_reads_its_own_output_the_way_its_own_os_does() {
+        let candidate = file_candidate_at("open /etc/hosts now", 6).expect("candidate");
+        assert_eq!(
+            candidate.is_rooted(PathStyle::NATIVE),
+            cfg!(unix),
+            "a leading slash roots a path on Unix and names a drive-relative \
+             directory on Windows"
+        );
+
+        let roots = LinkRoots::local(vec![PathBuf::from("/w")]);
+        assert_eq!(
+            roots.style,
+            PathStyle::NATIVE,
+            "a pane on this machine spells paths this machine's way"
+        );
+        assert_eq!(
+            candidate.paths(&roots),
+            vec![PathBuf::from("/etc/hosts")],
+            "which comes to the same thing under a root with no drive letter"
+        );
+    }
+
+    /// The Windows half of the rule above, spelled out where it can be: the
+    /// drive the pane is on is what a leading `/` there is measured from.
+    /// Cannot be asserted on a Unix client, where `PathBuf` has no notion of a
+    /// drive at all — the *rule* is pinned ungated above, this is the reading.
+    #[test]
+    #[cfg(windows)]
+    fn a_local_windows_pane_measures_a_leading_slash_from_its_own_drive() {
+        let roots = LinkRoots::local(vec![PathBuf::from(r"C:\proj")]);
+        assert_eq!(
+            file_candidate_at("open /etc/hosts now", 6)
+                .expect("candidate")
+                .paths(&roots),
+            vec![PathBuf::from(r"C:\etc\hosts")],
+            "`/etc` in a cmd.exe pane on C: is C:\\etc, the way `cd /etc` is"
+        );
+    }
+
+    #[test]
+    fn a_windows_pane_roots_a_drive_letter_and_a_share() {
+        let style = PathStyle::Windows;
+        for rooted in [r"C:\Windows", "C:/Windows", r"\\server\share\x"] {
+            assert!(style.is_absolute(rooted), "{rooted} names its own root");
+        }
+        for measured in ["/etc/hosts", "C:notes.txt", r"src\lib.rs", "", "C:"] {
+            assert!(
+                !style.is_absolute(measured),
+                "{measured} has to be measured from somewhere"
+            );
+        }
+        for measured in [r"C:\Windows", r"src\lib.rs", ""] {
+            assert!(
+                !PathStyle::Posix.is_absolute(measured),
+                "{measured} is not a POSIX root"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hosts_dialect_is_read_off_the_directory_it_reports() {
+        assert_eq!(
+            PathStyle::of_dir(Path::new("/home/u/proj")),
+            PathStyle::Posix
+        );
+        assert_eq!(
+            PathStyle::of_dir(Path::new(r"C:\Users\u\proj")),
+            PathStyle::Windows
+        );
+        assert_eq!(
+            PathStyle::of_dir(Path::new(r"\\wsl$\Ubuntu\home\u")),
+            PathStyle::Windows
+        );
+        // A directory that names no root at all says nothing about the host,
+        // so it has to fall the way no directory does — POSIX. Reading it as
+        // Windows would hand a Linux host `\`-joined paths on the strength of
+        // a cwd it never really reported.
+        for nothing_to_go_on in ["", "proj", "~/proj", "C:notes"] {
+            assert_eq!(
+                PathStyle::of_dir(Path::new(nothing_to_go_on)),
+                PathStyle::Posix,
+                "{nothing_to_go_on:?} names no Windows root"
+            );
+        }
     }
 
     #[test]
@@ -2511,5 +2988,181 @@ mod tests {
             None
         );
         assert!(local_link_at("listening on localhost", 15, &one_root(cwd), true).is_some());
+    }
+
+    /// The span a link underlines, as `(start, end)` inclusive columns.
+    fn link_span(line: &str, col: usize, cwd: &Path) -> (usize, usize) {
+        let link = local_link_at(line, col, &one_root(cwd), true).expect("file link under cursor");
+        (link.start, link.end)
+    }
+
+    /// A path is rarely written on its own: build tools glue a flag, a label
+    /// or a diff side onto the front of it, and none of that is the path.
+    #[test]
+    fn a_path_is_found_inside_the_prefix_glued_onto_it() {
+        let path = temp_file("prefixed/src/main.rs");
+        let cwd = path.parent().and_then(Path::parent).unwrap();
+        let at = |line: &str| {
+            let byte = line.find("src/main.rs").expect("path start");
+            let col = line[..byte].chars().count();
+            (link_span(line, col, cwd), col)
+        };
+
+        for line in [
+            "rustc --emit=metadata --file=src/main.rs",
+            "note:src/main.rs",
+            "--- a/src/main.rs",
+            "+++ b/src/main.rs",
+            "├──src/main.rs",
+        ] {
+            let ((start, end), col) = at(line);
+            assert_eq!(
+                (start, end),
+                (col, col + "src/main.rs".chars().count() - 1),
+                "{line:?} must underline the path and nothing around it"
+            );
+            assert_file_link(line, col, cwd, &path, None, None);
+        }
+    }
+
+    /// `ls -F` says what it is listing by writing the type onto the name.
+    #[test]
+    fn an_ls_type_marker_is_not_part_of_the_name() {
+        let path = temp_file("marked/run.sh");
+        let cwd = path.parent().unwrap();
+
+        for marker in ['@', '*', '=', '|'] {
+            let line = format!("run.sh{marker}  other");
+            assert_file_link(&line, 2, cwd, &path, None, None);
+            assert_eq!(link_span(&line, 2, cwd), (0, 5), "{marker} is not a name");
+        }
+    }
+
+    /// What every compiler that grew up on Windows prints, `tsc` included.
+    #[test]
+    fn a_parenthesised_line_and_column_is_read_as_a_location() {
+        let path = temp_file("msvc/app.ts");
+        let cwd = path.parent().and_then(Path::parent).unwrap();
+
+        assert_file_link(
+            "msvc/app.ts(10,2): error TS2304",
+            2,
+            cwd,
+            &path,
+            Some(10),
+            Some(2),
+        );
+        assert_file_link("msvc/app.ts(10): warning", 2, cwd, &path, Some(10), None);
+        assert_file_link("msvc/app.ts#L7 pasted", 2, cwd, &path, Some(7), None);
+    }
+
+    /// The same spelling names a file on a machine that has downloaded
+    /// something twice, so the written-out reading is tried first.
+    #[test]
+    fn a_filename_that_looks_like_a_location_wins_over_the_location() {
+        let path = temp_file("dupes/backup(1)");
+        let cwd = path.parent().and_then(Path::parent).unwrap();
+
+        assert_file_link("kept dupes/backup(1) here", 5, cwd, &path, None, None);
+    }
+
+    /// Python puts the line number two tokens away from the file, and that is
+    /// the single place where clicking a path is worth the most.
+    #[test]
+    fn a_line_number_written_beside_a_path_is_still_a_location() {
+        let path = temp_file("beside/handlers.py");
+        let cwd = path.parent().and_then(Path::parent).unwrap();
+        // Found by the whole path rather than by its first separator: a
+        // Windows temp path keeps the `/` this one was built with, and looking
+        // for a separator lands three quarters of the way along it.
+        let shown = path.display().to_string();
+        let quoted = format!("  File \"{shown}\", line 214, in dispatch");
+        let byte = quoted.find(&shown).expect("the path in the line");
+        let col = quoted[..byte].chars().count();
+
+        assert_file_link(&quoted, col, Path::new("/"), &path, Some(214), None);
+        assert_eq!(
+            link_span(&quoted, col, Path::new("/")),
+            (col, col + path.to_string_lossy().chars().count() - 1),
+            "the underline stays on the path, not on the prose after it"
+        );
+
+        assert_file_link(
+            "beside/handlers.py: line 12: bad substitution",
+            2,
+            cwd,
+            &path,
+            Some(12),
+            None,
+        );
+        assert_file_link("beside/handlers.py lineage 12", 2, cwd, &path, None, None);
+    }
+
+    /// A directory has no line to land on, so nothing beside it is read as
+    /// one.
+    #[test]
+    fn nothing_beside_a_directory_is_read_as_a_line_number() {
+        let file = temp_file("nolines/inner/keep.txt");
+        let dir = file.parent().unwrap();
+        let cwd = dir.parent().and_then(Path::parent).unwrap();
+
+        assert_file_link("nolines/inner, line 12", 2, cwd, dir, None, None);
+    }
+
+    /// A trailing period ends a sentence, except where it is the directory.
+    #[test]
+    fn a_dot_that_names_a_directory_survives_the_trailing_trim() {
+        let file = temp_file("dotdir/inner/keep.txt");
+        let inner = file.parent().unwrap();
+        let cwd = inner.parent().unwrap();
+
+        let link = local_link_at("copied to inner/. now", 10, &one_root(cwd), true)
+            .expect("a dot directory is a directory");
+        match link.target {
+            LinkTarget::File { path, is_dir, .. } => {
+                assert_eq!(path, cwd.join("inner/."));
+                assert!(is_dir);
+            }
+            LinkTarget::Url(url) => panic!("expected directory link, got URL {url}"),
+        }
+    }
+
+    /// A label in front of a colon only peels off when what follows is
+    /// written like a path. Otherwise a prompt segment turns into a link the
+    /// moment the directory happens to hold a folder by that name.
+    #[test]
+    fn a_label_in_front_of_a_bare_word_is_not_a_path() {
+        let file = temp_file("labelled/main/keep.txt");
+        // `<tmp>/labelled`, the one directory that holds a `main/`.
+        let labelled = file.parent().and_then(Path::parent).unwrap();
+
+        assert!(
+            local_link_at("on main/keep.txt", 4, &one_root(labelled), true).is_some(),
+            "the directory itself is still reachable"
+        );
+        assert!(
+            local_link_at("branch:main", 8, &one_root(labelled), true).is_none(),
+            "but the branch a prompt is reporting is not a link"
+        );
+        assert!(
+            local_link_at("note:main/keep.txt", 6, &one_root(labelled), true).is_some(),
+            "a label in front of something written like a path still peels"
+        );
+    }
+
+    /// Every reading of one token is worth at most a handful of questions.
+    #[test]
+    fn the_candidate_ladder_stays_short() {
+        let dense = "a/b=note:d/e/f.rs:10:2";
+        let candidates = file_candidates_at(dense, 12);
+        assert!(
+            candidates.len() <= MAX_FILE_CANDIDATES,
+            "{} readings of {dense:?}",
+            candidates.len()
+        );
+        assert!(
+            candidates.iter().any(|c| c.path == "d/e/f.rs"),
+            "the reading behind the `note:` label is still on the ladder"
+        );
     }
 }

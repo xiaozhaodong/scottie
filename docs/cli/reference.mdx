@@ -130,21 +130,49 @@ raw-mode TUI reads a sequence as a sequence rather than as a paste.
 
 JSON: `{"pane","sent","enter","keys"}`.
 
-### `tty7 capture [%PANE] [--plain] [--scrollback]`
+### `tty7 capture [%PANE] [--plain] [--scrollback] [--tail N]`
 
-The pane's replay. Two independent choices:
+The pane's replay. Three independent choices:
 
 **How much** — the newest scrollback segment by default, the whole ring with
 `--scrollback`. The ring splits into segments on resize, so for a pane that was
 never resized the two are identical.
 
+<Warning>
+  The default form is bounded by the pane's last **resize**, which is an event in
+  the window rather than in the pane's output. A resize seals the segment holding
+  everything printed so far and opens a new one, and on Unix the shell answers
+  the SIGWINCH by repainting its prompt — so straight after a resize the newest
+  segment can hold that repaint and nothing else, while the command's output sits
+  in the segment behind it. Nothing in the byte stream tells a repaint apart from
+  real output, so `capture` cannot decide this for you. When you are reading a
+  pane whose window may have changed size — anything under the GUI — ask for
+  `--scrollback`, and reach for `--tail N` if you wanted the tail rather than the
+  ring.
+</Warning>
+
 **In what form** — without `--plain`, the stored bytes with ANSI escapes intact,
 decoded as UTF-8 (invalid bytes become U+FFFD). With `--plain`, those bytes
 replayed through a terminal grid and printed as the text they produced.
 
+**How many lines** — all of them by default, the last `N` with `--tail N`, which
+answers "how did the last command end?" without a pipe through `tail(1)` (a
+program Windows does not have). The trim happens last, after `--plain` has
+decided what a line is: a wrapped line is one line to the grid, so `--plain
+--tail 1` gives you the whole of the last line and not its final row. `N` must
+be at least 1 — a tail of nothing would read as a blank pane. The daemon still
+replays the ring in full; the saving is the pipe, not the wire.
+
 Either way it is a snapshot, not a stream: it collects the replay, settles for
 ~300 ms, and returns. Call it again for a newer one.
-JSON: `{"pane","text"}`.
+
+JSON: `{"pane","text","bytes"}` — `text` is what was printed, `--tail` included;
+`bytes` is how much the replay carried, counted before `--plain` rendered it or
+`--tail` trimmed it. It is what tells an empty `text` apart: `0` is a
+pane that has printed nothing, and a non-zero count with no text is a screen
+whose bytes produced nothing visible (a pane that was cleared, say). The same
+case also prints one line on stderr, so a script that never reads the JSON still
+sees it.
 
 ### `tty7 procs [%PANE]`
 
@@ -152,9 +180,17 @@ The process tree inside the pane, indented by depth, `*` on the foreground
 process — then a second table of ports those processes are listening on. Prints
 `nothing running in this pane` when both are empty.
 
-JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}]}` —
+JSON: `{"procs":[{"pid","name","depth","foreground"}],"ports":[{"port","pid","name","addr"}],"context":{...}}` —
 `addr` is the address the socket is bound to (`*`, `0.0.0.0`, `127.0.0.1`,
 `[::1]`, or a specific interface).
+
+`context` says how much of the pane the process list actually covers:
+`{"remote","local_pty","at_prompt","remote_prompt_seen"}`. The tree is always
+*this* machine's, so on a pane that is the near end of a connection it lists the
+tunnel rather than the work — `local_pty` is `false` for a pane routed to a
+remote daemon (nothing here to walk), and `remote` names the host otherwise.
+`at_prompt` is the pane's own shell integration talking, absent until it emits
+its first mark. Older servers omit `context` entirely.
 
 ### `tty7 agents`
 
@@ -182,8 +218,9 @@ by its [hooks](/agents/status); the last three are facts about the pane:
 |---|---|
 | `idle` `working` `waiting` `done` | The agent's status |
 | `no-agent` | Nothing is reporting status here — a plain shell, or an agent whose hooks are not installed |
-| `free` | The foreground command has exited; the pane is back to its bare shell |
+| `free` | Nothing is running in front of the pane's shell — it will take input now |
 | `exit` | The pane itself is gone. Ends every wait whether it was asked for or not |
+| `unknown` | Only ever reported, never awaited: freeness could not be determined at all. See below |
 
 `free` is how you wait for a **command** rather than an agent, and it is the
 one state that costs a second request per poll — so it is only checked when you
@@ -192,13 +229,32 @@ With `--changed` it means "something ran and then finished", which is what you
 want directly after a `send`; a command quick enough to finish inside one
 `--interval` is never seen running, and the timeout says so.
 
+Two things answer it. On a pane whose shell is on this machine it is the process
+tree: nothing deeper than the shell means free. On a **remote or SSH pane** that
+tree describes the near end of the connection — the `ssh` itself, busy for as
+long as you are logged in, or nothing at all for a pane routed to a remote
+daemon — so there it is the far shell's own
+[prompt marks](/reference/shell-integration) that decide. A prompt mark on such a
+pane can only have come from the far side, because the near shell cannot be at a
+prompt while the connection holds its pty. Marks outrank a deeper process on a
+local pane too, which is why `free` means "will take input" rather than strictly
+"back to the bare shell": a pane sitting at a nested shell's prompt is free.
+
+When the far host has no shell integration loaded there is nothing on this side
+that can tell an idle remote prompt from a running remote command. `wait` says
+so — `status: unknown`, exit `1`, and a `free_unknown` string naming the host —
+rather than polling to the end of `--timeout`. It gives one poll of grace first,
+for a handshake still in flight, and it only gives up when `free` was the only
+state that could still answer: `--until done,free` keeps waiting on `done`.
+
 The reply carries the agent's message and native session id. The JSON's `stale`
 flag says whether the answer might belong to the previous turn.
 
 JSON: `{"pane","status","matched","stale","activity","message","session_id"}`.
 A timeout exits `124` with the same object plus `"timed_out": true` —
 `matched` is `false` there, and `stale` still says whether the pane moved
-while you watched.
+while you watched, and `free_unknown` carries the reason when `free` was asked
+for and never resolved.
 [Orchestration →](/agents/orchestration)
 
 ### `tty7 events`
@@ -270,9 +326,21 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 |---|---|---|
 | `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…]}]}` |
 | `tab new [WORKSPACE] [--cwd DIR]` | Add a tab with a fresh shell | `{"tab","pane"}` |
+| `tab new [WORKSPACE] --pane %PANE` | Add a tab around a pane already running | `{"tab","pane"}` |
 | `tab close @TAB` | Close the tab and every pane in it | `{"closed"}` |
 | `tab rename @TAB NAME` | Name or rename | `{"tab","name"}` |
 | `tab move @TAB INDEX` | Reposition within its workspace | `{"tab","to"}` |
+
+`--pane` re-homes instead of spawning: it builds the tab around a pane the
+server is already running, which is how an orphan gets back on screen. Only a
+pane no tab holds is accepted — use `pane split` to add to a tab that exists.
+With no `WORKSPACE` and no `TTY7_WS`, the pane goes back to the workspace it was
+spawned for, which is the `owner` that `pane ls --all` prints. The seed is
+rebuilt from the pane registry, so the tab gets the pane's recorded cwd (unless
+`--cwd` overrides it) but not the shell or SSH spec the pane started with: the
+tree drops a pane's record when the tab holding it closes, and the registry is
+what is left. That only matters if the shell later dies, since a restore would
+then have nothing to restore from.
 
 `GROUP` is the heading the GUI's sidebar files the tab under, shown by its last
 segment. Read-only from here: with the default repo grouping the GUI recomputes
@@ -298,6 +366,11 @@ a stand-in.
 of the workspace that may attach to the pane (absent when none may), and
 `orphan: true` means no workspace holds it. An interrupted `run` leaves orphans
 here, as does a `ws rm` that reported panes it could not hang up.
+
+An orphan is not necessarily rubbish — its shell may still be doing real work —
+so there are two ways out of the list. `tab new --pane %<id>` puts one back into
+a tab, which is the recovery path when the panes came out from under a workspace
+rather than out of an interrupted `run`. `pane close` is the other.
 
 `--orphans` is the reaper for exactly those. It closes what `pane ls --all`
 lists as orphaned and nothing else — panes a workspace holds are untouched —

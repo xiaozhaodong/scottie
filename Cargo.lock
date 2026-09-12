@@ -377,6 +377,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "array-init"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
+
+[[package]]
 name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -682,6 +688,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "async_zip"
+version = "0.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb7f5f40e1eb30949a266fc900d37fd3267c7baf50c3705ac09c5d8ced5def63"
+dependencies = [
+ "async-compression",
+ "binrw",
+ "crc32fast",
+ "futures-lite 2.6.1",
+ "pin-project",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "atk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -899,6 +919,30 @@ dependencies = [
  "regex",
  "rustc-hash 2.1.3",
  "shlex 1.3.0",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "binrw"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ad120d555272286c1017d25165ab8bd74806f13fc85b258484ec7e4ce75458f"
+dependencies = [
+ "array-init",
+ "binrw_derive",
+ "bytemuck",
+]
+
+[[package]]
+name = "binrw_derive"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6df92e0e9baae4dc82c7bad7715ca40c0a5c71539057bf2ea04a5c29c980410b"
+dependencies = [
+ "either",
+ "owo-colors",
+ "proc-macro2",
+ "quote",
  "syn 2.0.119",
 ]
 
@@ -1483,7 +1527,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -2047,7 +2091,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3225,7 +3269,7 @@ dependencies = [
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3309,7 +3353,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#070d1a28cec5130bf7c4c7895683595d488155b8"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#51a6925955adda598c9363915a06eae6de5dd8df"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3392,7 +3436,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#070d1a28cec5130bf7c4c7895683595d488155b8"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#51a6925955adda598c9363915a06eae6de5dd8df"
 dependencies = [
  "anyhow",
  "gpui",
@@ -3406,7 +3450,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#070d1a28cec5130bf7c4c7895683595d488155b8"
+source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#51a6925955adda598c9363915a06eae6de5dd8df"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3416,7 +3460,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3467,7 +3511,7 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -3514,7 +3558,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3525,7 +3569,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "console_error_panic_hook",
  "gpui",
@@ -3538,7 +3582,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "schemars",
  "serde",
@@ -3548,7 +3592,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "log",
@@ -3557,7 +3601,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3581,7 +3625,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3610,7 +3654,7 @@ dependencies = [
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -3939,7 +3983,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -3964,7 +4008,7 @@ dependencies = [
 [[package]]
 name = "http_client_tls"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "rustls",
  "rustls-platform-verifier",
@@ -4581,9 +4625,9 @@ dependencies = [
 
 [[package]]
 name = "keyring"
-version = "4.1.6"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72585bb6cc9bc370d1d545b7e23fcce71dfd4461c5e15275e3cf51bdfd9a980a"
+checksum = "2270074a3d26bcac93c1dc5d2845eb4c089e8d761ccf6e0ea266a16004640627"
 dependencies = [
  "apple-native-keyring-store",
  "keyring-core",
@@ -4901,9 +4945,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.33"
+version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 dependencies = [
  "serde_core",
  "value-bag",
@@ -5092,7 +5136,7 @@ checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 [[package]]
 name = "media"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -6007,6 +6051,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "owo-colors"
+version = "4.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c45bb4a6ae1280ec0803b1ef9d3455eb50f01efbbe1447ab020f1d54fba9d8"
+
+[[package]]
 name = "p256"
 version = "0.14.0-rc.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6204,7 +6254,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "perf"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "collections",
  "serde",
@@ -7207,7 +7257,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "derive_refineable",
 ]
@@ -7250,7 +7300,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 [[package]]
 name = "reqwest_client"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7784,7 +7834,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8627,7 +8677,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "heapless",
  "log",
@@ -9779,7 +9829,7 @@ version = "26.9.4"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "async_zip",
+ "async_zip 0.0.19",
  "core-foundation 0.10.0",
  "core-foundation-sys",
  "gpui",
@@ -9792,13 +9842,13 @@ dependencies = [
  "ksni",
  "libc",
  "log",
- "mac-notification-sys",
  "memchr",
  "notify 8.2.0",
  "notify-rust",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "percent-encoding",
  "plist",
  "regex",
  "reqwest_client",
@@ -9813,6 +9863,7 @@ dependencies = [
  "tty7-core",
  "unicode-segmentation",
  "unicode-width",
+ "url",
  "uuid",
  "windows 0.58.0",
  "windows-sys 0.61.2",
@@ -10109,11 +10160,11 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "util"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "async-fs",
- "async_zip",
+ "async_zip 0.0.18",
  "collections",
  "command-fds",
  "dirs",
@@ -10148,7 +10199,7 @@ dependencies = [
 [[package]]
 name = "util_macros"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "perf",
  "quote",
@@ -10157,9 +10208,9 @@ dependencies = [
 
 [[package]]
 name = "uuid"
-version = "1.24.1"
+version = "1.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -12049,7 +12100,7 @@ dependencies = [
 [[package]]
 name = "zlog"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -12094,7 +12145,7 @@ dependencies = [
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -12105,7 +12156,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/l0ng-ai/zed?branch=tty7#d99a40a5f79a173465feec00363d480f75881a81"
+source = "git+https://github.com/l0ng-ai/zed?branch=tty7#ece710e365575bc08656c4a8d20488769b2de9a6"
 
 [[package]]
 name = "zune-core"

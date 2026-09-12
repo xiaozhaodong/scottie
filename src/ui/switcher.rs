@@ -313,6 +313,11 @@ pub(crate) struct Switcher {
     /// The modifiers held down when Ctrl+Tab opened the panel. Releasing them
     /// commits the highlighted tab, IDEA-style.
     hold: Option<gpui::Modifiers>,
+    /// Where the pointer is: inside the card at all, and inside the tab column
+    /// specifically. Both are set by hover listeners, so they only mean
+    /// anything once the mouse has moved since the panel came up.
+    hover_card: bool,
+    hover_tabs: bool,
     left_scroll: gpui::ScrollHandle,
     right_scroll: gpui::ScrollHandle,
     /// Anchors on the two scrolls, worn by whichever row is selected. Both
@@ -328,6 +333,14 @@ pub(crate) struct Switcher {
 impl Switcher {
     fn text(&self, cx: &App) -> String {
         self.query.read(cx).value().trim().to_lowercase()
+    }
+
+    /// The pointer is parked in the card but off the tab column — on a
+    /// workspace row, the search box, a banner. Letting go of Ctrl there is
+    /// not a commit: the user is reaching for the mouse, and closing the panel
+    /// out from under them makes the workspace list unreachable by hand.
+    fn hover_keeps_open(&self) -> bool {
+        self.hover_card && !self.hover_tabs
     }
 }
 
@@ -437,9 +450,17 @@ impl Tty7App {
         remote_connect::register(cx);
         remote_connect::sweep_wsl(cx);
         let query = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(crate::ui::i18n::t(
-                crate::ui::i18n::L10nKey::SearchWorkspacesAndMachines,
-            ))
+            InputState::new(window, cx)
+                .placeholder(crate::ui::i18n::t(
+                    crate::ui::i18n::L10nKey::SearchWorkspacesAndMachines,
+                ))
+                // On macOS a held Ctrl turns every click into a right click,
+                // and the input answers a right click with Cut/Copy/Paste —
+                // so reaching for this box mid-Ctrl+Tab popped a menu instead
+                // of placing a caret. The rows already dodge this by dropping
+                // their own menus while the gesture is on; this box has no
+                // menu worth keeping either, and Cmd+V still pastes.
+                .context_menu(false)
         });
         query.update(cx, |state, cx| state.focus(window, cx));
         let subs = vec![cx.subscribe_in(
@@ -469,6 +490,8 @@ impl Tty7App {
             right_sel: 0,
             mru,
             hold,
+            hover_card: false,
+            hover_tabs: false,
             left_scroll: left_scroll.clone(),
             right_scroll: right_scroll.clone(),
             left_anchor: gpui::ScrollAnchor::for_handle(left_scroll),
@@ -601,9 +624,21 @@ impl Tty7App {
         let Some(hold) = self.switcher.as_ref().and_then(|sw| sw.hold) else {
             return;
         };
-        if !now.modified() || !hold.is_subset_of(now) {
-            self.switcher_commit_hold(window, cx);
+        if now.modified() && hold.is_subset_of(now) {
+            return;
         }
+        // The pointer is already on the workspace list or the search box, so
+        // the release is the user's hand leaving the keyboard, not a pick.
+        // Drop the hold and leave the panel up for the mouse to finish in.
+        if self
+            .switcher
+            .as_ref()
+            .is_some_and(Switcher::hover_keeps_open)
+        {
+            self.switcher_release_hold(cx);
+            return;
+        }
+        self.switcher_commit_hold(window, cx);
     }
 
     /// Called when the modifier that raised the panel comes back up.
@@ -716,6 +751,11 @@ impl Tty7App {
             }
         }
 
+        // Listed once for the whole frame: the pending groups below name
+        // themselves from it, and so does the pass that settles every group's
+        // link state further down.
+        let configured = remote_connect::available_hosts(cx);
+
         for target in self.pending_machines() {
             let key = target.to_string();
             if index.contains_key(&key) {
@@ -723,7 +763,12 @@ impl Tty7App {
             }
             index.insert(key.clone(), groups.len());
             groups.push(Group {
-                label: key.clone(),
+                // Not `key`: a `Profile` target spells itself as its config
+                // UUID, so a machine whose profile has been deleted would
+                // announce itself to the banners below by a raw UUID (#485).
+                // The pass below overwrites this while the profile is still
+                // configured; this is what is left when it is not.
+                label: remote_connect::label_from_hosts(&configured, &target),
                 key,
                 endpoint: String::new(),
                 target: Some(target),
@@ -838,7 +883,6 @@ impl Tty7App {
         // trouble banners under the list come out in a stable order.
         groups.sort_by(|a, b| a.key.is_empty().cmp(&b.key.is_empty()).reverse());
 
-        let configured = remote_connect::available_hosts(cx);
         for group in &mut groups {
             let Some(target) = group.target.clone() else {
                 group.link = Link::Local;
@@ -967,7 +1011,7 @@ impl Tty7App {
             .enumerate()
             .map(|(i, v)| TabRow {
                 label: tab_view_label(&v, i, home.as_deref(), show_activity_prefix),
-                named: tab_view_names_more_than_its_place(&v, home.as_deref()),
+                named: crate::ui::tab_strip::names_more_than_its_place(&v, home.as_deref()),
                 path: v
                     .cwd
                     .as_deref()
@@ -1642,10 +1686,28 @@ impl Tty7App {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        // The scrim covers the whole window, the tile that
+                        // opens the switcher included. Without this the press
+                        // dismissed here and then carried on down to that
+                        // tile, whose click toggled the switcher straight back
+                        // open — so clicking it a second time looked like it
+                        // did nothing. A dismissing click is spent on the
+                        // dismissal and reaches nothing beneath it.
+                        cx.stop_propagation();
                         this.close_switcher(window, cx)
                     }),
                 )
-                .child(div().occlude().child(card))
+                .child(
+                    div()
+                        .id("switcher-card")
+                        .occlude()
+                        .on_hover(cx.listener(|this, hovered: &bool, _window, _cx| {
+                            if let Some(sw) = this.switcher.as_mut() {
+                                sw.hover_card = *hovered;
+                            }
+                        }))
+                        .child(card),
+                )
                 .into_any_element(),
         )
     }
@@ -1725,8 +1787,14 @@ impl Tty7App {
             )
             .child(
                 v_flex()
+                    .id("switcher-tab-column")
                     .flex_1()
                     .min_w_0()
+                    .on_hover(cx.listener(|this, hovered: &bool, _window, _cx| {
+                        if let Some(sw) = this.switcher.as_mut() {
+                            sw.hover_tabs = *hovered;
+                        }
+                    }))
                     .child(crate::ui::scrollbar::with_vertical_scrollbar(
                         "switcher-tabs-scrollbar",
                         div()
@@ -1779,11 +1847,7 @@ impl Tty7App {
 
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
-        let (muted, dim, border) = (
-            theme.muted_foreground,
-            theme.muted_foreground.opacity(0.7),
-            theme.border,
-        );
+        let (muted, border) = (theme.muted_foreground, theme.border);
         let hover = hover_fill(cx);
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
         // With a query in the box, ← and → belong to the caret and Tab becomes
@@ -1813,7 +1877,7 @@ impl Tty7App {
                     .text_color(muted)
                     .child(glyph_col(
                         GUTTER,
-                        Icon::new(IconName::Plus).size(px(ICON)).text_color(dim),
+                        Icon::new(IconName::Plus).size(px(ICON)).text_color(muted),
                     ))
                     .child(t(L10nKey::AppMenuNewWorkspace))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1826,7 +1890,7 @@ impl Tty7App {
                     .gap(px(6.))
                     .pr(px(ROW_PAD))
                     .text_xs()
-                    .text_color(dim)
+                    .text_color(muted)
                     .when(!holding && filtering, |hint| {
                         hint.child(t(L10nKey::SwitcherTabToCrossColumns))
                     })
@@ -2240,12 +2304,7 @@ impl Tty7App {
         }
 
         let theme = cx.theme();
-        let (fg, muted, dim, warn) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.muted_foreground.opacity(0.7),
-            theme.warning,
-        );
+        let (fg, muted, warn) = (theme.foreground, theme.muted_foreground, theme.warning);
         let sf = rungs(cx);
         let hover = gpui::rgb(sf.hover);
         let rref = RowRef::of(group, row);
@@ -2280,10 +2339,6 @@ impl Tty7App {
         // the trailing pieces straight out over the divider. The second line
         // leads with the machine the workspace lives on — the flat list's only
         // grouping — with its link state as the dot's color.
-        let when_path = match row.path.is_empty() {
-            true => row.when.clone(),
-            false => format!("{} · {}", row.path, row.when),
-        };
         let host_dot: Option<gpui::Hsla> = match group.link {
             Link::Local => None,
             Link::Connected if group.preempted => Some(warn),
@@ -2308,7 +2363,7 @@ impl Tty7App {
             .rounded(px(6.))
             .overflow_hidden()
             .cursor_pointer()
-            .when(picked, |r| r.bg(gpui::rgb(sf.pressed)))
+            .when(picked, |r| r.bg(gpui::rgb(sf.cursor)))
             .anchor_scroll(self.switcher_anchor(Column::Left, picked))
             .hover(move |r| r.bg(hover))
             .child(crate::ui::tab_strip::workspace_avatar(
@@ -2336,7 +2391,7 @@ impl Tty7App {
                             .gap(px(5.))
                             .min_w_0()
                             .text_xs()
-                            .text_color(dim)
+                            .text_color(muted)
                             .child(match host_dot {
                                 Some(color) => div()
                                     .flex_shrink_0()
@@ -2348,7 +2403,7 @@ impl Tty7App {
                                     .path("icons/machine-local.svg")
                                     .flex_shrink_0()
                                     .size(px(10.))
-                                    .text_color(dim)
+                                    .text_color(muted)
                                     .into_any_element(),
                             })
                             .child(
@@ -2359,24 +2414,30 @@ impl Tty7App {
                                     .text_color(muted)
                                     .child(host_label),
                             )
-                            .when(!when_path.is_empty(), |line| {
+                            // The path gives way first and the timestamp
+                            // never does: with both in one truncating string
+                            // the row ended in `~/repo/025/tty7 · …` every
+                            // time, a dangling dot where the time had been.
+                            .when(!row.path.is_empty(), |line| {
                                 line.child(div().flex_shrink_0().child("·"))
-                                    .child(div().min_w_0().truncate().child(when_path))
+                                    .child(div().min_w_0().truncate().child(row.path.clone()))
+                            })
+                            .when(!row.when.is_empty(), |line| {
+                                line.child(div().flex_shrink_0().child("·"))
+                                    .child(div().flex_shrink_0().child(row.when.clone()))
                             }),
                     ),
             )
-            .children(badge.map(|(label, here)| {
+            // A word, not a chip: a filled pill reads as a button, and these
+            // are states. Only "taken over" keeps a colour — it is the one
+            // that warns.
+            .children(badge.map(|(label, _here)| {
                 div()
                     .flex_shrink_0()
-                    .px(px(6.))
-                    .py(px(1.))
-                    .rounded(px(4.))
                     .text_xs()
-                    .bg(gpui::rgb(sf.selected))
-                    .text_color(match (row.preempted, here) {
-                        (true, _) => warn,
-                        (_, true) => fg.opacity(0.85),
-                        _ => muted,
+                    .text_color(match row.preempted {
+                        true => warn,
+                        false => muted,
                     })
                     .child(label)
             }))
@@ -2444,13 +2505,9 @@ impl Tty7App {
     ) -> AnyElement {
         let theme = cx.theme();
         let (border, card_bg) = (theme.border, theme.popover);
-        let (fg, muted, dim) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.muted_foreground.opacity(0.7),
-        );
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
         let sf = rungs(cx);
-        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.pressed));
+        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.cursor));
         let viewport = window.viewport_size();
         let card_w = FORM_W
             .min(viewport.width.as_f32() - 2. * CARD_MARGIN)
@@ -2563,7 +2620,7 @@ impl Tty7App {
                 .child(
                     Icon::new(IconName::ChevronDown)
                         .size(px(ICON))
-                        .text_color(dim),
+                        .text_color(muted),
                 )
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.switcher_form_open_hosts(window, cx);
@@ -2634,7 +2691,7 @@ impl Tty7App {
                                 .min_w_0()
                                 .truncate()
                                 .text_xs()
-                                .text_color(dim)
+                                .text_color(muted)
                                 .child(host.detail.clone()),
                         )
                         .into_any_element()
@@ -2643,7 +2700,7 @@ impl Tty7App {
                         .border_t_1()
                         .border_color(border)
                         .rounded_none()
-                        .child(Icon::new(IconName::Plus).size(px(14.)).text_color(dim))
+                        .child(Icon::new(IconName::Plus).size(px(14.)).text_color(muted))
                         .child(
                             div()
                                 .text_sm()
@@ -2683,7 +2740,7 @@ impl Tty7App {
             .border_t_1()
             .border_color(border)
             .text_xs()
-            .text_color(dim)
+            .text_color(muted)
             .child(match form.open {
                 true => t(L10nKey::SwitcherFormPickHint),
                 false => t(L10nKey::SwitcherFormCreateHint),
@@ -2719,11 +2776,11 @@ impl Tty7App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted, dim) = (
-            theme.foreground,
-            theme.muted_foreground,
-            theme.muted_foreground.opacity(0.7),
-        );
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let added_ink =
+            crate::ui::presets::resting_ink(theme.success, theme.muted_foreground, theme.popover);
+        let removed_ink =
+            crate::ui::presets::resting_ink(theme.danger, theme.muted_foreground, theme.popover);
         let note = |text: String| {
             div()
                 .px(px(ROW_PAD))
@@ -2758,7 +2815,7 @@ impl Tty7App {
         }
 
         let sf = rungs(cx);
-        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.pressed));
+        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.cursor));
         let right_sel = self.switcher.as_ref().map(|sw| sw.right_sel).unwrap_or(0);
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
         let ws = row.id;
@@ -2779,10 +2836,15 @@ impl Tty7App {
                         .text_color(muted)
                         .child(row.name.clone()),
                 )
-                .child(div().text_xs().text_color(dim).child(match row.tabs.len() {
-                    1 => t(L10nKey::SwitcherTabCountOne).to_string(),
-                    n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
-                })),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(match row.tabs.len() {
+                            1 => t(L10nKey::SwitcherTabCountOne).to_string(),
+                            n => t_fmt(L10nKey::SwitcherTabCount, &[("n", &n.to_string())]),
+                        }),
+                ),
         );
 
         for (nth, i) in hits.iter().enumerate() {
@@ -2796,20 +2858,20 @@ impl Tty7App {
                     .items_center()
                     .gap(px(5.))
                     .text_xs()
-                    .text_color(dim)
+                    .text_color(muted)
                     .child(
                         gpui::svg()
                             .path("icons/git-branch.svg")
                             .flex_shrink_0()
                             .size(px(11.))
-                            .text_color(dim),
+                            .text_color(muted),
                     )
                     .child(div().min_w_0().truncate().child(g.branch.clone()))
                     .when(g.added > 0, |c| {
                         c.child(
                             div()
                                 .flex_shrink_0()
-                                .text_color(theme.success)
+                                .text_color(added_ink)
                                 .child(format!("+{}", g.added)),
                         )
                     })
@@ -2817,7 +2879,7 @@ impl Tty7App {
                         c.child(
                             div()
                                 .flex_shrink_0()
-                                .text_color(theme.danger)
+                                .text_color(removed_ink)
                                 .child(format!("−{}", g.removed)),
                         )
                     })
@@ -2828,7 +2890,7 @@ impl Tty7App {
                     div()
                         .text_xs()
                         .truncate()
-                        .text_color(dim)
+                        .text_color(muted)
                         .child(tab.path.clone())
                         .into_any_element(),
                 ),
@@ -2877,11 +2939,7 @@ impl Tty7App {
                         r.child(
                             div()
                                 .flex_shrink_0()
-                                .px(px(6.))
-                                .py(px(1.))
-                                .rounded(px(4.))
                                 .text_xs()
-                                .bg(gpui::rgb(sf.selected))
                                 .text_color(muted)
                                 .child(t(L10nKey::SwitcherActiveTab)),
                         )
@@ -2955,90 +3013,21 @@ impl TabRow {
     }
 }
 
-/// Whether a mirrored row's label says anything a line of its path would not —
-/// [`Tab::names_more_than_its_place`](crate::ui::app::Tab) for the tabs this
-/// window does not own.
+/// Names a tab of a workspace this window does not own.
 ///
-/// Both sides have the same trap, because both rank a terminal's own title
-/// above the directory and a shell's title *is* the directory:
-/// `user@host:~/repo` arrives here as [`TabLabel::Osc`], is drawn as `~/repo`,
-/// and used to keep a `~/repo` subtitle under it. Excluding
-/// [`TabLabel::Cwd`](crate::ui::machine_mirror::TabLabel::Cwd) alone catches
-/// only the half of that where the title was missing altogether, so the title
-/// is put through the same
-/// [`same_place`](crate::ui::path_display::same_place) comparison the live
-/// panes use, against the same host's home.
-///
-/// The ranks that are never a place — a given name, an agent, a process name,
-/// a bare count — keep their subtitle without asking.
-fn tab_view_names_more_than_its_place(
-    view: &crate::ui::machine_mirror::TabView,
-    home: Option<&std::path::Path>,
-) -> bool {
-    use crate::ui::machine_mirror::TabLabel;
-
-    let title = match view.label() {
-        TabLabel::Cwd(_) => return false,
-        TabLabel::Osc(title) => title,
-        TabLabel::Named(_)
-        | TabLabel::Task(_)
-        | TabLabel::Agent(_)
-        | TabLabel::Process(_)
-        | TabLabel::Unknown => {
-            return true;
-        }
-    };
-    let Some(cwd) = view.cwd.as_deref() else {
-        return true;
-    };
-    !crate::ui::path_display::same_place(title, cwd, home)
-}
-
-/// Names a tab of a workspace this window does not own, matching what
-/// `Tty7App::tab_label` shows for local ones.
-///
-/// The two read different sources and have to be talked into agreeing. A local
-/// tab is named by its live terminal's OSC title, which shells set to the
-/// working directory and agents overwrite with what they are doing. The tree
-/// carries a copy of that title (`PaneRecord::osc_title`), which is what makes
-/// the two columns agree; `PaneRecord::title` is the *foreground process name*
-/// ("zsh") and only stands in when there is no title at all.
+/// The two surfaces used to read different sources and had to be talked into
+/// agreeing: a local tab was named by its live terminal's title, this one by
+/// the tree's copy of it (`PaneRecord::osc_title`). They now go through the one
+/// renderer, [`crate::ui::tab_strip::label_of`] — a local tab is turned into
+/// the same [`TabView`](crate::ui::machine_mirror::TabView) this one already
+/// is, so neither column can rank the evidence its own way.
 fn tab_view_label(
     view: &crate::ui::machine_mirror::TabView,
     index: usize,
     home: Option<&std::path::Path>,
     show_activity_prefix: bool,
 ) -> String {
-    let unnamed = || {
-        t_fmt(
-            L10nKey::TabUnnamedShell,
-            &[("n", &((index + 1).to_string()))],
-        )
-    };
-    // A path can shorten away to nothing (a bare "user@host:"), and the process
-    // name is still worth more than a number.
-    let shortened = |raw: &str| match crate::ui::path_display::short_title(raw, home) {
-        shortened if !shortened.trim().is_empty() => shortened,
-        _ => match view.title.trim() {
-            "" => unnamed(),
-            title => title.to_string(),
-        },
-    };
-    match view.label_with_activity(show_activity_prefix) {
-        crate::ui::machine_mirror::TabLabel::Named(name) => name.to_string(),
-        // OSC titles go through `short_title` because the local strip puts its
-        // own titles through it too: the shell integration writes
-        // `user@host:~/dir`, and a tab that spelled that out in full where the
-        // strip says "…/dir" would be the same disagreement in a new place.
-        crate::ui::machine_mirror::TabLabel::Osc(title) => shortened(title),
-        crate::ui::machine_mirror::TabLabel::Task(title) => {
-            crate::ui::path_display::clamp_text(title.as_ref(), crate::core::tab_view::LABEL_MAX)
-        }
-        crate::ui::machine_mirror::TabLabel::Agent(agent) => agent.display_name().to_string(),
-        crate::ui::machine_mirror::TabLabel::Cwd(cwd) => shortened(cwd),
-        crate::ui::machine_mirror::TabLabel::Process(title) => title.to_string(),
-        crate::ui::machine_mirror::TabLabel::Unknown => unnamed(),
-    }
+    crate::ui::tab_strip::label_of_with_activity(view, index, home, show_activity_prefix)
 }
 
 impl Group {
@@ -3108,10 +3097,14 @@ impl RowRef {
     }
 }
 
-/// What the machine menu's host row says, or `None` for a machine that has no
+/// What a host row offering the form says, or `None` for a machine that has no
 /// SSH host behind it at all — WSL and the local stdio server are configured
 /// nowhere this form could edit.
-fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
+///
+/// Shared with the tab menu, which offers the same row for the connection a tab
+/// is on (#438), so the two surfaces cannot drift on which machines are
+/// editable or on what the row is called.
+pub(crate) fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
     match target {
         RemoteTarget::Profile { .. } => Some(t(L10nKey::SwitcherEditHost)),
         RemoteTarget::Alias { .. } | RemoteTarget::Direct { .. } => {
@@ -3327,6 +3320,53 @@ fn glyph_col(w: f32, child: impl IntoElement) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #485 on the path #645 did not cover. A machine the switcher knows only
+    /// from a listing snapshot has no store entry to name it, so its group
+    /// used to be labelled by the target's own spelling — and a `Profile`
+    /// target spells itself as its config UUID. Delete the profile and every
+    /// banner under the list announced a raw UUID.
+    #[gpui::test]
+    fn a_pending_machine_whose_profile_is_gone_is_not_named_by_its_uuid(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+
+        // A profile id that is in no config: the state left behind when the
+        // profile a machine was reached through is deleted.
+        let id = uuid::Uuid::new_v4();
+        let target = RemoteTarget::Profile { id };
+
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+        });
+
+        app.update(cx, |app, cx| {
+            let groups = app.switcher_groups(cx);
+            let group = groups
+                .iter()
+                .find(|g| g.target.as_ref() == Some(&target))
+                .expect("the snapshot puts its machine in the list");
+            assert!(
+                !group.label.contains(&id.to_string()),
+                "the switcher named a machine by its raw profile UUID: {}",
+                group.label
+            );
+            assert_eq!(
+                group.label,
+                t(L10nKey::RemoteProfileGone),
+                "a gone profile is named here the way a pane's route names it"
+            );
+        });
+    }
 
     /// A wrong hostname or a stale password used to be fixable only by
     /// finding the same machine again in Settings (#438). The machine is on
@@ -3767,38 +3807,38 @@ mod tests {
             panes: 1,
         };
         assert!(
-            !tab_view_names_more_than_its_place(&view, Some(home)),
+            !crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)),
             "the shell titled the pane with the very directory the row is about to print"
         );
         // The same title against a home that cannot place it. Nothing here can
         // prove the two are one place, and the honest answer keeps the line.
-        assert!(tab_view_names_more_than_its_place(&view, None));
+        assert!(crate::ui::tab_strip::names_more_than_its_place(&view, None));
 
         view.osc_title = Some("✳ fixing the switcher".to_string());
         assert!(
-            tab_view_names_more_than_its_place(&view, Some(home)),
+            crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)),
             "an agent's title says something the directory does not"
         );
 
         // No title at all: the label falls to the cwd, which is the case the
         // gate always caught.
         view.osc_title = None;
-        assert!(!tab_view_names_more_than_its_place(&view, Some(home)));
+        assert!(!crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)));
 
         // ...unless an agent claims the label first, and then the directory is
         // new information again.
         view.agent = Some(crate::core::cli_agent::CLIAgent::Claude);
-        assert!(tab_view_names_more_than_its_place(&view, Some(home)));
+        assert!(crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)));
 
         // A tab someone named says what they called it; where it sits is still
         // worth a line.
         view.agent = None;
         view.name = Some("deploy".to_string());
-        assert!(tab_view_names_more_than_its_place(&view, Some(home)));
+        assert!(crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)));
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod gpui_tests {
     use gpui::{Modifiers, TestAppContext};
 
@@ -4121,6 +4161,127 @@ mod gpui_tests {
                 .as_ref()
                 .expect("still up — Esc backs out one step");
             assert!(matches!(sw.page, super::Page::List));
+        });
+    }
+
+    /// One of the three places on the card a test wants to put the pointer.
+    #[derive(Clone, Copy)]
+    enum Spot {
+        Workspaces,
+        Tabs,
+        Search,
+    }
+
+    /// Where that part of the card lands on screen. The card is centred and
+    /// its columns are laid out from `CARD_W` / `LEFT_W`, so the geometry is
+    /// worth recomputing here rather than hard-coding pixels that move with
+    /// the window size.
+    fn card_point(vcx: &mut gpui::VisualTestContext, spot: Spot) -> gpui::Point<gpui::Pixels> {
+        use gpui::{point, px};
+
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        let card_w = super::CARD_W
+            .min(viewport.width.as_f32() - 2. * super::CARD_MARGIN)
+            .max(320.);
+        let left_w = super::LEFT_W.min(card_w * 0.5);
+        let card_left = (viewport.width.as_f32() - card_w) / 2.;
+        let (dx, dy) = match spot {
+            // The search row is the first thing in the card; both columns
+            // start below it.
+            Spot::Search => (100., 20.),
+            Spot::Workspaces => (20., 60.),
+            // Past the tab column's own header row, onto its first tab.
+            Spot::Tabs => (left_w + 40., 42. + 6. + super::HOST_H + super::ROW_H / 2.),
+        };
+        point(px(card_left + dx), px(super::CARD_TOP + dy))
+    }
+
+    /// Ctrl+Tab, then reach for the mouse: the pointer leaves the tab column
+    /// for the workspace list, and letting go of Ctrl there must not slam the
+    /// panel shut — switching workspaces by hand is exactly what the user is
+    /// in the middle of doing.
+    #[gpui::test]
+    fn releasing_ctrl_over_the_workspace_list_keeps_the_panel_up(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.simulate_modifiers_change(Modifiers::control());
+        app.update_in(&mut vcx, |app, window, cx| app.tab_switch(true, window, cx));
+        vcx.run_until_parked();
+
+        let at = card_point(&mut vcx, Spot::Workspaces);
+        vcx.simulate_mouse_move(at, None, Modifiers::control());
+        vcx.simulate_modifiers_change(Modifiers::none());
+
+        app.update(cx, |app, _| {
+            let sw = app
+                .switcher
+                .as_ref()
+                .expect("the panel stays up for the mouse to finish in");
+            assert!(sw.hold.is_none(), "the hold is spent, not re-armed");
+            assert_eq!(app.active, 0, "the release picked nothing");
+        });
+    }
+
+    /// The pointer over the tab column is the ordinary gesture: release still
+    /// commits.
+    #[gpui::test]
+    fn releasing_ctrl_over_the_tab_column_still_commits(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.simulate_modifiers_change(Modifiers::control());
+        app.update_in(&mut vcx, |app, window, cx| app.tab_switch(true, window, cx));
+        vcx.run_until_parked();
+
+        let at = card_point(&mut vcx, Spot::Tabs);
+        vcx.simulate_mouse_move(at, None, Modifiers::control());
+        vcx.simulate_modifiers_change(Modifiers::none());
+
+        app.update(cx, |app, _| {
+            assert!(app.switcher.is_none(), "the panel comes down on release");
+            assert_eq!(app.active, 1, "the highlighted tab is now the active one");
+        });
+    }
+
+    /// macOS reports Ctrl+click as a right click, so a tab row picked with
+    /// the mouse mid-gesture arrives on the right button. The row takes that
+    /// press as the pick; nothing between it and the window may swallow it
+    /// first.
+    #[gpui::test]
+    fn ctrl_clicking_a_tab_row_mid_gesture_picks_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.simulate_modifiers_change(Modifiers::control());
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.tab_switch(true, window, cx);
+            // Two steps down, so the row the pointer lands on below is not
+            // the one the keyboard had already reached.
+            app.tab_switch(true, window, cx);
+        });
+        vcx.run_until_parked();
+        app.update(cx, |app, _| {
+            assert_eq!(app.switcher.as_ref().expect("up").right_sel, 2);
+        });
+
+        let at = card_point(&mut vcx, Spot::Tabs);
+        vcx.simulate_mouse_move(at, None, Modifiers::control());
+        vcx.simulate_mouse_down(at, gpui::MouseButton::Right, Modifiers::control());
+
+        app.update(cx, |app, _| {
+            let sw = app.switcher.as_ref().expect("the panel stays up");
+            assert_eq!(
+                sw.right_sel, 0,
+                "the row under the pointer took the press, not the keyboard's row 2"
+            );
+            assert!(
+                sw.hold.is_some(),
+                "the gesture is still on until Ctrl is up"
+            );
+        });
+
+        vcx.simulate_modifiers_change(Modifiers::none());
+        app.update(cx, |app, _| {
+            assert!(app.switcher.is_none(), "release commits and closes");
+            assert_eq!(
+                app.active, 0,
+                "the first row of a most-recently-used column is this very tab"
+            );
         });
     }
 

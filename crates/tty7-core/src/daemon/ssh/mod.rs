@@ -14,6 +14,7 @@ pub(crate) mod test_support;
 
 pub use connect::ProcessStream;
 
+pub use auth::{AUTH_DECLINED, is_auth_declined};
 pub use broker::PromptBroker;
 pub use forward::SshForwardRegistry;
 pub use session::{ChannelCmd, SharedConnection, SshConnection, SshSessionHandle};
@@ -246,6 +247,12 @@ impl SshManager {
                 );
                 conn.mark_dead();
                 self.evict_connection(conn.key());
+                // Back through `open_connection`, which takes this key's slot
+                // again. Every other pane that was riding the same dead link
+                // is arriving here at the same moment — one dropped TCP
+                // connection kills all of them together — and the slot is the
+                // only thing that stops each of them dialling, and prompting,
+                // on its own.
                 let (fresh, _) = self
                     .open_connection(spec, broker)
                     .await
@@ -407,8 +414,36 @@ impl SshManager {
             .block_on(self.open_remote_link(spec, setup, server_command))
     }
 
+    /// Forget the connection this key was serving, keeping the slot that
+    /// serves it.
+    ///
+    /// The slot is not bookkeeping: it is the mutual exclusion every dial to
+    /// this host queues on, and it is what makes one reconnect ask for a
+    /// password once instead of once per pane. Removing the entry threw that
+    /// away. A dropped link takes every pane on it down together, so all of
+    /// them reach the dead-reuse branch in `run_session` at the same moment;
+    /// the first to evict left the map empty, the next `open_connection`
+    /// inserted a brand-new mutex, and the pane behind it evicted *that* one —
+    /// the one a dial was already holding — and inserted another. Each pane
+    /// ended up queueing on a mutex of its own, so each ran its own handshake
+    /// and raised its own password prompt: answer one, the connection comes up,
+    /// and the next prompt is still on screen with more behind it (#820).
+    ///
+    /// So the entry stays for the life of the process and only what it points
+    /// at is dropped. That is what the map already looks like in the ordinary
+    /// case — nothing else has ever removed an entry, and `routes()` reports a
+    /// slot whose connection is gone as disconnected rather than omitting it.
+    ///
+    /// A slot somebody is dialling on is left completely alone: that dial is
+    /// about to overwrite the connection anyway, and the point of this function
+    /// is to not disturb it.
     fn evict_connection(&self, key: &ConnectionKey) {
-        self.conns.lock().unwrap().remove(key);
+        let slot = self.conns.lock().unwrap().get(key).cloned();
+        if let Some(slot) = slot
+            && let Ok(mut held) = slot.try_lock()
+        {
+            *held = Weak::new();
+        }
     }
 
     pub fn routes(&self) -> Vec<crate::daemon::control::RouteInfo> {
@@ -755,28 +790,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn evict_connection_clears_the_registry_slot() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("build test runtime");
-        let mgr = SshManager {
-            runtime,
+    fn bare_manager() -> SshManager {
+        SshManager {
+            runtime: tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("build test runtime"),
             conns: Mutex::new(HashMap::new()),
             forwards: SshForwardRegistry::default(),
             probes: Mutex::new(HashMap::new()),
-        };
+        }
+    }
+
+    /// #820. Eviction drops the connection and keeps the slot, because the
+    /// slot is what every dial to this host queues on. Handing the next dial a
+    /// mutex of its own is what turned one reconnect into one password prompt
+    /// per pane.
+    #[test]
+    fn evict_connection_empties_the_slot_without_replacing_it() {
+        let mgr = bare_manager();
         let key = ConnectionKey::from_spec(&base_spec());
-        mgr.conns
-            .lock()
-            .unwrap()
-            .insert(key.clone(), Arc::new(tokio::sync::Mutex::new(Weak::new())));
-        assert!(mgr.conns.lock().unwrap().contains_key(&key));
+        let slot: ConnSlot = Arc::new(tokio::sync::Mutex::new(Weak::new()));
+        mgr.conns.lock().unwrap().insert(key.clone(), slot.clone());
 
         mgr.evict_connection(&key);
+
+        let held = mgr.conns.lock().unwrap().get(&key).cloned();
+        let held = held.expect("the slot every dial queues on must survive an eviction");
         assert!(
-            !mgr.conns.lock().unwrap().contains_key(&key),
-            "evicted key must be gone so the next open creates a new entry"
+            Arc::ptr_eq(&held, &slot),
+            "the next dial has to wait on the same mutex the last one used, \
+             or two panes coming back from one dropped link each raise their \
+             own password prompt"
+        );
+        assert!(
+            held.try_lock()
+                .expect("nobody holds it here")
+                .upgrade()
+                .is_none(),
+            "what the slot pointed at is gone, so the next dial does not reuse it"
+        );
+    }
+
+    /// A slot somebody is dialling on is not eviction's business: that dial is
+    /// about to store its own connection there, and reaching into it is
+    /// exactly the interference this function exists to avoid.
+    #[test]
+    fn evict_connection_leaves_a_slot_that_is_being_dialled_on_alone() {
+        let mgr = bare_manager();
+        let key = ConnectionKey::from_spec(&base_spec());
+        let slot: ConnSlot = Arc::new(tokio::sync::Mutex::new(Weak::new()));
+        mgr.conns.lock().unwrap().insert(key.clone(), slot.clone());
+
+        let _dialling = slot.try_lock().expect("nobody else holds it in this test");
+        mgr.evict_connection(&key);
+
+        let held = mgr.conns.lock().unwrap().get(&key).cloned();
+        assert!(
+            held.is_some_and(|h| Arc::ptr_eq(&h, &slot)),
+            "a dial in flight keeps its slot"
         );
     }
 

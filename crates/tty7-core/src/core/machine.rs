@@ -26,6 +26,28 @@ pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(test)]
 pub const FACT_FLUSH_INTERVAL: Duration = Duration::from_secs(600);
 
+/// How many earlier generations of the machine tree are kept beside it.
+///
+/// Bounded on purpose: the tree is rewritten whole on every mutation, so an
+/// unbounded history would be a new file every few seconds forever. Three is
+/// what the spacing below has to work with.
+const BACKUP_GENERATIONS: usize = 3;
+
+/// How far apart those generations are taken.
+///
+/// The point of the spacing is that "the previous write" is worthless as a
+/// backup here. The tree is written whole on every mutation, and the failure
+/// worth recovering from arrives as a burst — #716 emptied a workspace with
+/// nineteen `TabClose`s in a row, each of them a persist. A backup taken on
+/// every write would have rolled the damage through all three generations
+/// before anyone looked. Spaced out, the oldest generation is a quarter of an
+/// hour of history, which is longer than any burst.
+///
+/// Note that "previous good" cannot mean "the last document that parsed":
+/// an emptied tree parses perfectly and is exactly what you want to recover
+/// *from*. Age is the only signal available here, so age is what is used.
+const BACKUP_SPACING: Duration = Duration::from_secs(300);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TabId(uuid::Uuid);
@@ -1124,6 +1146,15 @@ impl MachineStore {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        // Before the overwrite, never after: the backup is the document about
+        // to be replaced. A failure here is not a reason to stop writing the
+        // new one — a machine with no backup still has to keep working.
+        if let Err(e) = keep_a_generation(&self.path, BACKUP_SPACING) {
+            log::warn!(
+                "could not keep an earlier generation of {}: {e}",
+                self.path.display()
+            );
+        }
         crate::core::config::write_atomic_private(&self.path, &bytes)
     }
 
@@ -1218,22 +1249,97 @@ fn load_machine(path: &Path) -> Machine {
         Err(e) => {
             log::warn!("could not read {}; quarantining it: {e}", path.display());
             crate::core::config::quarantine_by_rename(path);
-            return Machine::default();
+            return load_a_backup(path).unwrap_or_default();
         }
     };
-    match serde_json::from_str::<Machine>(crate::core::config::strip_bom(&text)) {
-        Ok(mut machine) => {
-            for pane in &mut machine.panes {
-                pane.live = false;
-            }
-            machine
-        }
+    match parse_machine(&text) {
+        Ok(machine) => machine,
         Err(e) => {
             log::warn!("{} does not parse ({e}); quarantining it", path.display());
             crate::core::config::quarantine(path);
-            Machine::default()
+            load_a_backup(path).unwrap_or_default()
         }
     }
+}
+
+fn parse_machine(text: &str) -> serde_json::Result<Machine> {
+    let mut machine = serde_json::from_str::<Machine>(crate::core::config::strip_bom(text))?;
+    for pane in &mut machine.panes {
+        pane.live = false;
+    }
+    Ok(machine)
+}
+
+/// The newest kept generation that still parses.
+///
+/// Only reached when the live document is gone or unreadable — a tree that
+/// parses is always preferred to a backup, however empty it turns out to be.
+/// This is the automatic half of [`keep_a_generation`]; the manual half is a
+/// human copying a `.bak` over `machine.json`, which is why the files are
+/// plain JSON under obvious names.
+fn load_a_backup(path: &Path) -> Option<Machine> {
+    (0..BACKUP_GENERATIONS).find_map(|generation| {
+        let kept = backup_path(path, generation);
+        let machine = parse_machine(&std::fs::read_to_string(&kept).ok()?).ok()?;
+        log::warn!("recovered the machine tree from {}", kept.display());
+        Some(machine)
+    })
+}
+
+/// Where generation `n` of `path` is kept — `machine.json.bak` for the newest,
+/// `machine.json.bak.1` and `.bak.2` behind it.
+fn backup_path(path: &Path, generation: usize) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(MACHINE_FILE);
+    match generation {
+        0 => path.with_file_name(format!("{name}.bak")),
+        n => path.with_file_name(format!("{name}.bak.{n}")),
+    }
+}
+
+/// Rotates the document currently at `path` into the backup ring, if the ring's
+/// newest entry is at least `spacing` old.
+///
+/// The live file is never renamed, only read: at every point in this function
+/// `path` still holds a complete document, so a crash part-way through costs at
+/// most one *backup* generation and never the tree itself. The new generation
+/// lands through `write_atomic_private`, which writes a sibling temporary and
+/// renames it into place — so a reader never sees a half-written `.bak` either,
+/// and the 0600 the live tree is written under is the mode the copies get.
+///
+/// Returns `Ok(())` when there was nothing to do: no tree yet, or the newest
+/// generation is younger than `spacing`.
+fn keep_a_generation(path: &Path, spacing: Duration) -> io::Result<()> {
+    // Asked before the tree is read: this runs on every persist and answers
+    // "nothing to do" on almost all of them, so reading the whole document
+    // first would be a full read per write for one copy every five minutes.
+    let newest = backup_path(path, 0);
+    let too_soon = std::fs::metadata(&newest)
+        .and_then(|meta| meta.modified())
+        .map(|at| at.elapsed().unwrap_or_default() < spacing)
+        .unwrap_or(false);
+    if too_soon {
+        return Ok(());
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        // Nothing has been written yet, so there is no previous generation.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    // Oldest first, so nothing is overwritten before it has been moved down.
+    // A generation that is not there yet simply has nothing to move.
+    for generation in (1..BACKUP_GENERATIONS).rev() {
+        let from = backup_path(path, generation - 1);
+        match std::fs::rename(&from, backup_path(path, generation)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    crate::core::config::write_atomic_private(&newest, &bytes)
 }
 
 static OBSERVED: Mutex<Option<Arc<MachineStore>>> = Mutex::new(None);
@@ -2574,6 +2680,123 @@ mod tests {
             std::fs::read_to_string(&aside).unwrap(),
             "{\"workspaces\":[]}",
             "moved aside byte-for-byte, ready for a hand repair"
+        );
+    }
+
+    /// One tree with `tabs` tabs in it, written out the way `persist` writes.
+    fn document(tabs: u64) -> Vec<u8> {
+        let machine = Machine {
+            workspaces: vec![Workspace {
+                tabs: (0..tabs).map(Tab::leaf).collect(),
+                ..Workspace::default()
+            }],
+            panes: Vec::new(),
+        };
+        serde_json::to_vec_pretty(&machine).unwrap()
+    }
+
+    fn tabs_in(path: &Path) -> usize {
+        let text = std::fs::read_to_string(path).expect("a generation must be there to read");
+        parse_machine(&text).expect("and it must parse").workspaces[0]
+            .tabs
+            .len()
+    }
+
+    /// A machine tree is written whole on every mutation, so the write that
+    /// loses the layout also erases the only copy of it (#716). One generation
+    /// back is the least that makes a bad write survivable by hand.
+    #[test]
+    fn the_document_being_replaced_is_kept_beside_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+        let store = MachineStore::open(&path);
+
+        let ws = store.workspace_create(None, None, None).unwrap();
+        store
+            .tab_create(ws.id, None, seed(1, "/work"), None, None)
+            .unwrap();
+        store
+            .tab_create(ws.id, None, seed(2, "/work"), None, None)
+            .unwrap();
+
+        let kept = backup_path(&path, 0);
+        assert!(
+            kept.exists(),
+            "the second write has a first write to keep: {}",
+            kept.display()
+        );
+        assert_eq!(
+            tabs_in(&kept),
+            0,
+            "and what it kept is the document that write replaced"
+        );
+    }
+
+    /// The whole reason the generations are spaced. The failure this came from
+    /// arrived as a burst — nineteen `TabClose`s, nineteen persists, seconds
+    /// apart — and a ring that rotated on every write would have held three
+    /// copies of the damage by the time anyone looked at it.
+    #[test]
+    fn a_burst_of_writes_cannot_roll_the_history_away() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+        std::fs::write(&path, document(19)).unwrap();
+        keep_a_generation(&path, Duration::ZERO).unwrap();
+
+        for remaining in (0..19).rev() {
+            std::fs::write(&path, document(remaining)).unwrap();
+            keep_a_generation(&path, BACKUP_SPACING).unwrap();
+        }
+
+        assert_eq!(tabs_in(&path), 0, "the burst emptied the live tree");
+        assert_eq!(
+            tabs_in(&backup_path(&path, 0)),
+            19,
+            "and the kept generation is from before it, not from one write ago"
+        );
+    }
+
+    #[test]
+    fn the_ring_keeps_three_generations_and_no_more() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+
+        for tabs in 1..=6 {
+            std::fs::write(&path, document(tabs)).unwrap();
+            keep_a_generation(&path, Duration::ZERO).unwrap();
+        }
+
+        assert_eq!(tabs_in(&backup_path(&path, 0)), 6);
+        assert_eq!(tabs_in(&backup_path(&path, 1)), 5);
+        assert_eq!(tabs_in(&backup_path(&path, 2)), 4);
+        assert!(
+            !backup_path(&path, 3).exists(),
+            "the ring is bounded; a tree rewritten every few seconds must not \
+             grow a file per write forever"
+        );
+    }
+
+    /// The automatic half of the recovery. A tree that parses always wins —
+    /// including an empty one, which is why the manual `.bak` copy still
+    /// matters — but a tree that does not parse used to mean starting over.
+    #[test]
+    fn a_tree_that_does_not_parse_is_loaded_from_the_newest_backup() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(MACHINE_FILE);
+        std::fs::write(&path, document(3)).unwrap();
+        keep_a_generation(&path, Duration::ZERO).unwrap();
+        std::fs::write(&path, b"{ not json").unwrap();
+
+        let store = MachineStore::open(&path);
+
+        assert_eq!(
+            store.machine().workspaces[0].tabs.len(),
+            3,
+            "the layout comes back from the kept generation"
+        );
+        assert!(
+            path.with_extension("json.corrupt").exists(),
+            "and the unparseable document is still kept for inspection"
         );
     }
 

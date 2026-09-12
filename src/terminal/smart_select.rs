@@ -586,6 +586,101 @@ mod tests {
         );
     }
 
+    /// A path the terminal itself wrapped is one path, from either side of
+    /// the seam and however many rows it takes.
+    #[test]
+    fn a_soft_wrapped_file_path_is_one_link() {
+        let dir = std::env::temp_dir().join(format!("tty7-wrap-{}", std::process::id()));
+        let make = |rel: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("create dirs");
+            std::fs::write(&path, b"x").expect("create file");
+            path
+        };
+        let ascii = make("a/bb/ccc/dddd/notes.md");
+        let cjk = make("文档/子目录/笔记.md");
+        let deep = make("aaaa/bbbb/cccc/dddd/eeee/ffff/notes.md");
+        let roots = crate::terminal::search::LinkRoots::local(vec![dir.clone()]);
+
+        let resolved = |input: &str, line: i32, col: usize| {
+            let term = term_with(20, 5, input);
+            let click = Point::new(Line(line), Column(col));
+            let (text, _points, idx) = logical_line_at(&term, click, true)?;
+            let link = crate::terminal::search::link_at(
+                &text,
+                idx,
+                &roots,
+                true,
+                &mut crate::terminal::search::local_probe,
+            )?;
+            match link.target {
+                crate::terminal::search::LinkTarget::File { path, .. } => Some(path),
+                crate::terminal::search::LinkTarget::Url(_) => None,
+            }
+        };
+
+        // 20 columns, so each of these runs past the right edge.
+        let line = "see a/bb/ccc/dddd/notes.md here";
+        for (row, col, where_) in [
+            (0, 6, "before the seam"),
+            (0, 19, "the last cell of the first row"),
+            (1, 0, "the first cell of the second row"),
+            (1, 2, "after the seam"),
+        ] {
+            assert_eq!(
+                resolved(line, row, col).as_deref(),
+                Some(ascii.as_path()),
+                "{where_} is the same link"
+            );
+        }
+
+        assert_eq!(
+            resolved("see 文档/子目录/笔记.md here", 1, 1).as_deref(),
+            Some(cjk.as_path()),
+            "a wide-character path wraps like any other"
+        );
+        assert_eq!(
+            resolved("at aaaa/bbbb/cccc/dddd/eeee/ffff/notes.md end", 1, 10).as_deref(),
+            Some(deep.as_path()),
+            "and one that takes three rows is still one path"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newline is only read as a wrap when the text ran into the right
+    /// edge. Anything else is two lines that happen to sit next to each
+    /// other, and gluing those together would invent paths out of unrelated
+    /// output.
+    #[test]
+    fn a_newline_short_of_the_right_edge_is_not_a_wrap() {
+        let dir = std::env::temp_dir().join(format!("tty7-nowrap-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("a/bb/ccc/dddd")).expect("create dirs");
+        std::fs::write(dir.join("a/bb/ccc/dddd/notes.md"), b"x").expect("create file");
+        let roots = crate::terminal::search::LinkRoots::local(vec![dir.clone()]);
+
+        let term = term_with(20, 5, "see a/bb/ccc/dddd/\r\nnotes.md here");
+        let click = Point::new(Line(0), Column(6));
+        let (text, _points, idx) = logical_line_at(&term, click, true).expect("logical line");
+        let link = crate::terminal::search::link_at(
+            &text,
+            idx,
+            &roots,
+            true,
+            &mut crate::terminal::search::local_probe,
+        )
+        .expect("the directory on the first row still resolves");
+        match link.target {
+            crate::terminal::search::LinkTarget::File { path, is_dir, .. } => {
+                assert_eq!(path, dir.join("a/bb/ccc/dddd"));
+                assert!(is_dir, "the first row on its own names a directory");
+            }
+            crate::terminal::search::LinkTarget::Url(url) => panic!("expected a file, got {url}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hard_wrapped_url_is_bridged_only_for_links() {
         let term = term_with(20, 4, "https://example.com/\r\ndeep/path/seg rest");

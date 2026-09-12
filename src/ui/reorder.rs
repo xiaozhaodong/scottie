@@ -1,7 +1,7 @@
 use gpui::{Axis, Bounds, Pixels, Point, Styled, px};
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
 use std::rc::Rc;
+use tty7_core::core::group_key::GroupKey;
 use tty7_core::core::machine::TabId;
 
 pub(crate) type ReorderState = Rc<RefCell<Option<Reorder>>>;
@@ -62,11 +62,44 @@ pub(crate) fn set_pending(state: &ReorderState, surface: &Surface, order: Vec<us
 pub(crate) fn clear_pending(state: &ReorderState) {
     if let Some(r) = state.borrow().as_ref() {
         r.pending.borrow_mut().take();
+        r.regroup.borrow_mut().take();
     }
 }
 
-pub(crate) fn take_pending(state: &ReorderState) -> Option<Vec<usize>> {
-    state.borrow_mut().take()?.pending.into_inner()
+/// Offer the custom group the pointer is currently over.
+///
+/// Reordering answers "where in this group", and this answers "which group" —
+/// two questions one drag can ask, so they are recorded side by side and
+/// resolved together when it lands. A drag held over a group it did not come
+/// from stops reordering (the surface it belongs to no longer sees the
+/// pointer) and starts offering this instead.
+pub(crate) fn set_regroup(state: &ReorderState, key: GroupKey) {
+    if let Some(r) = state.borrow().as_ref().filter(|r| !r.suspended.get()) {
+        *r.regroup.borrow_mut() = Some(key);
+    }
+}
+
+/// What a finished drag asks for.
+pub(crate) struct Landed {
+    /// A new order for the tabs, from the surface the drag ran over.
+    pub(crate) order: Option<Vec<usize>>,
+    /// A tab to put in another group, from the group it was held over.
+    pub(crate) regroup: Option<(TabId, GroupKey)>,
+}
+
+/// Ends the drag and answers what it was asking for when it ended.
+pub(crate) fn take_landed(state: &ReorderState) -> Landed {
+    let Some(r) = state.borrow_mut().take() else {
+        return Landed {
+            order: None,
+            regroup: None,
+        };
+    };
+    let regroup = r.regroup.into_inner();
+    Landed {
+        order: r.pending.into_inner(),
+        regroup: r.tab.zip(regroup),
+    }
 }
 
 /// The tab a drag in flight picked up, when it picked one up.
@@ -76,6 +109,19 @@ pub(crate) fn take_pending(state: &ReorderState) -> Option<Vec<usize>> {
 /// the reorder is where the answer to "which tab is in the air" lives.
 pub(crate) fn dragged_tab(state: &ReorderState) -> Option<TabId> {
     state.borrow().as_ref()?.tab
+}
+
+/// The tab a *sidebar row* drag picked up.
+///
+/// `None` for a drag that started anywhere else. The strip drags tabs too,
+/// and a tab lifted off the strip must not light the sidebar's groups up as
+/// though it were about to land in one.
+pub(crate) fn dragged_sidebar_tab(state: &ReorderState) -> Option<TabId> {
+    let state = state.borrow();
+    let r = state.as_ref().filter(|r| !r.suspended.get())?;
+    matches!(r.surface, Surface::SidebarRows(_))
+        .then_some(r.tab)
+        .flatten()
 }
 
 /// Holds the reorder off while the drag is asking for something else.
@@ -95,7 +141,7 @@ pub(crate) fn suspend(state: &ReorderState, yes: bool) {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) enum Surface {
     Strip,
-    SidebarRows(Option<PathBuf>),
+    SidebarRows(Option<GroupKey>),
     SidebarGroups,
 }
 
@@ -109,6 +155,9 @@ pub(crate) struct Reorder {
     prev: Cell<usize>,
     generation: Cell<usize>,
     pending: RefCell<Option<Vec<usize>>>,
+    /// The custom group this drag is being held over, when the pointer has
+    /// left the group the tab came from.
+    regroup: RefCell<Option<GroupKey>>,
     /// The tab this drag picked up, for the surfaces that drag tabs. `None` on
     /// a surface that drags something else — a sidebar group, say, which is
     /// several tabs and cannot be merged into one.
@@ -135,6 +184,7 @@ impl Reorder {
             prev: Cell::new(from),
             generation: Cell::new(0),
             pending: RefCell::new(None),
+            regroup: RefCell::new(None),
             tab: None,
             suspended: Cell::new(false),
         }
@@ -383,13 +433,44 @@ mod tests {
         set_pending(&state, &Surface::SidebarGroups, vec![2, 1, 0]);
 
         clear_pending(&state);
-        assert_eq!(take_pending(&state), None);
+        assert_eq!(take_landed(&state).order, None);
         assert!(state.borrow().is_none());
 
         *state.borrow_mut() = Some(column(3, 30., 2., 0));
         clear_pending(&state);
         set_pending(&state, &mine, vec![1, 0, 2]);
-        assert_eq!(take_pending(&state), Some(vec![1, 0, 2]));
+        assert_eq!(take_landed(&state).order, Some(vec![1, 0, 2]));
+    }
+
+    /// A group offered on one frame and not the next must not still be there
+    /// when the drag ends — letting go away from every group has to drop on
+    /// nothing, the same way an un-recorded order does.
+    #[test]
+    fn a_regroup_lasts_only_as_long_as_the_pointer_is_over_the_group() {
+        let tab = TabId::new();
+        let work = GroupKey::custom("work").expect("non-blank");
+        let fresh = || Some(column(3, 30., 2., 0).of_tab(tab));
+
+        let state: ReorderState = Rc::new(RefCell::new(fresh()));
+        clear_pending(&state);
+        set_regroup(&state, work.clone());
+        clear_pending(&state);
+        assert_eq!(take_landed(&state).regroup, None, "the frame moved on");
+
+        *state.borrow_mut() = fresh();
+        clear_pending(&state);
+        set_regroup(&state, work.clone());
+        assert_eq!(take_landed(&state).regroup, Some((tab, work)));
+    }
+
+    /// A drag that is not carrying a tab — a sidebar group being reordered —
+    /// has nothing to put in a group, so it must not answer with one.
+    #[test]
+    fn a_drag_with_no_tab_never_lands_in_a_group() {
+        let state: ReorderState = Rc::new(RefCell::new(Some(column(3, 30., 2., 0))));
+        clear_pending(&state);
+        set_regroup(&state, GroupKey::custom("work").expect("non-blank"));
+        assert_eq!(take_landed(&state).regroup, None);
     }
 
     #[test]

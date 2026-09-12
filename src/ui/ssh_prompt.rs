@@ -968,10 +968,19 @@ impl Tty7App {
                         // Abort stays the emphasized one and now also sits
                         // where the eye lands last: a changed host key is the
                         // one prompt where the safe answer wants both.
+                        //
+                        // Override is the app's one `danger` button, and it is
+                        // the site that earns it: the sheet is what a
+                        // man-in-the-middle looks like, and this was the only
+                        // control in the product that could act on that with
+                        // no colour on it at all. It is disabled until the word
+                        // is typed, so it greys until armed and then goes red —
+                        // the emphasis arrives exactly when the button does.
                         .child(
                             Button::new("ssh-hkc-override")
                                 .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Override))
                                 .small()
+                                .danger()
                                 .disabled(!can_override)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.submit_ssh_prompt(window, cx)

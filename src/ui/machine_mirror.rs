@@ -5,6 +5,7 @@ use tty7_core::core::machine::{LayoutDelta, Machine, PaneRecord, Tab, TabId, Wor
 use tty7_core::daemon::control::{ControlRequest, ReplyOk};
 use tty7_core::host::HostId;
 
+use crate::core::group_key::GroupKey;
 use crate::core::session::WorkspaceId;
 use crate::ui::i18n::{L10nKey, t};
 
@@ -374,8 +375,17 @@ pub fn display_name_of(ws: &Workspace, panes: &[PaneRecord]) -> String {
 }
 
 pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for group in ws.tabs.iter().filter_map(|t| t.sidebar_group.as_deref()) {
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    // Repo groups only. This answers with a *path*, and its callers treat it
+    // as one — `display_name_of` names the window after its last component.
+    // A custom group is a name the user typed, so putting one here would
+    // title a window `custom:work`, or chop `work/urgent` down to `urgent`.
+    // A workspace grouped entirely by hand falls through to a pane's cwd,
+    // which is a real path and is what the window showed before any of this.
+    for group in ws.tabs.iter().filter_map(|t| {
+        let key = GroupKey::decode(t.sidebar_group.as_deref()?)?;
+        Some(key.repo_root()?.to_string_lossy().into_owned())
+    }) {
         match counts.iter_mut().find(|(g, _)| *g == group) {
             Some((_, n)) => *n += 1,
             None => counts.push((group, 1)),
@@ -392,7 +402,7 @@ pub fn subject_path_of(ws: &Workspace, panes: &[PaneRecord]) -> Option<String> {
                 .find(|p| p.id == id)
                 .and_then(|p| p.cwd.as_deref())
         });
-    dominant.or(first_cwd).map(str::to_string)
+    dominant.or_else(|| first_cwd.map(str::to_string))
 }
 
 pub fn display_name_for(cx: &App, client_ws: WorkspaceId) -> Option<String> {
@@ -1034,5 +1044,33 @@ mod tests {
         assert_eq!(display_name_of(&ws, &panes), "Release prep");
 
         assert_eq!(display_name_of(&Workspace::default(), &[]), "Untitled");
+    }
+
+    /// A custom group is a name, not a path, and this answers with a path —
+    /// its caller names the window after the last component. Left in, a
+    /// workspace grouped by hand would be titled `custom:work`, and one
+    /// grouped as `work/urgent` would be titled `urgent`.
+    #[test]
+    fn a_custom_group_is_not_a_subject_path() {
+        let mut ws = Workspace::default();
+        let panes = vec![PaneRecord {
+            cwd: Some("/home/me/scratch".into()),
+            ..PaneRecord::new(1)
+        }];
+        ws.tabs = vec![leaf_tab(1)];
+
+        ws.tabs[0].sidebar_group = Some("custom:work/urgent".into());
+        assert_eq!(
+            display_name_of(&ws, &panes),
+            "scratch",
+            "the cwd answers instead, the way it did before groups existed"
+        );
+
+        ws.tabs[0].sidebar_group = Some("/repo/tty7".into());
+        assert_eq!(
+            display_name_of(&ws, &panes),
+            "tty7",
+            "and a repo group still outranks the cwd"
+        );
     }
 }

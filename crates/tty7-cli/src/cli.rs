@@ -247,6 +247,16 @@ pub enum WaitState {
     /// Costs one extra request per poll, so it is only checked when asked for.
     Free,
     Exit,
+    /// Freeness could not be determined for this pane at all — the usual cause
+    /// is a remote or SSH pane whose far shell sends no prompt marks, where
+    /// the local process tree only describes this end of the connection.
+    ///
+    /// Reported, never awaited: `#[value(skip)]` keeps it out of `--until`,
+    /// because "wait until I cannot tell" is not a thing to wait for. It
+    /// exists so `--json` has a `status` to name the one outcome that is
+    /// neither an answer nor a timeout.
+    #[value(skip)]
+    Unknown,
 }
 
 impl WaitState {
@@ -262,6 +272,7 @@ impl WaitState {
             WaitState::NoAgent => "no-agent",
             WaitState::Free => "free",
             WaitState::Exit => "exit",
+            WaitState::Unknown => "unknown",
         }
     }
 }
@@ -347,6 +358,21 @@ pub struct CaptureArgs {
                 escapes, wrapped lines rejoined, overwrites and cursor moves applied"
     )]
     pub plain: bool,
+
+    // "How did the last command end?" is the common question, and answering it
+    // meant `| tail -n 5` — a pipe that only exists to throw most of the answer
+    // away, and one more thing a script has to have on PATH (Windows does not).
+    // The trim is the last thing that happens, after `--plain` has decided what
+    // a line even is: a wrapped line is one line to the grid and three to a
+    // byte counter, so trimming earlier would answer a different question than
+    // the one the flag composes with.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Keep only the last N lines of the answer, the way `tail -n N` would"
+    )]
+    pub tail: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -407,7 +433,7 @@ pub enum TabCmd {
         ws: Option<String>,
     },
 
-    #[command(about = "Add a tab with a fresh shell")]
+    #[command(about = "Add a tab with a fresh shell, or around a pane already running")]
     New {
         #[arg(value_name = "WORKSPACE")]
         ws: Option<String>,
@@ -417,6 +443,20 @@ pub enum TabCmd {
             help = "Working directory for the tab's shell"
         )]
         cwd: Option<String>,
+
+        // The recovery half of `pane ls --all`. Until this existed, a pane that
+        // came out from under its tab — an interrupted `run`, or a client that
+        // closed tabs whose shells were still alive (#716) — could only be
+        // listed and killed. The shell is fine; it just has no tab, and
+        // `TabCreate` has always been able to take an existing pane id.
+        #[arg(
+            long,
+            value_name = "%PANE",
+            help = "Re-home a pane that is already running instead of spawning a shell — \
+                    for the orphans `tty7 pane ls --all` lists. Defaults the workspace to \
+                    the one the pane was spawned for"
+        )]
+        pane: Option<String>,
     },
 
     #[command(about = "Close a tab and every pane in it")]
@@ -742,7 +782,12 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["tty7", "tab", "new", "api", "--cwd", "C:\\proj"]).command,
-            Some(Command::Tab(TabCmd::New { ws: Some(w), cwd: Some(c) })) if w == "api" && c == "C:\\proj"
+            Some(Command::Tab(TabCmd::New { ws: Some(w), cwd: Some(c), pane: None }))
+                if w == "api" && c == "C:\\proj"
+        ));
+        assert!(matches!(
+            parse(&["tty7", "tab", "new", "--pane", "%37"]).command,
+            Some(Command::Tab(TabCmd::New { ws: None, cwd: None, pane: Some(p) })) if p == "%37"
         ));
         assert!(matches!(
             parse(&["tty7", "tab", "close", "@7"]).command,
@@ -861,6 +906,32 @@ mod tests {
             panic!("capture did not parse");
         };
         assert!(args.plain && args.scrollback);
+    }
+
+    #[test]
+    fn capture_tail_takes_a_count_and_refuses_zero() {
+        let Some(Command::Capture(args)) = parse(&["tty7", "capture", "%3", "--tail", "5"]).command
+        else {
+            panic!("capture did not parse");
+        };
+        assert_eq!(args.tail, Some(5));
+
+        let Some(Command::Capture(args)) = parse(&["tty7", "capture", "%3"]).command else {
+            panic!("capture did not parse");
+        };
+        assert_eq!(args.tail, None, "the whole answer stays the default");
+
+        // A tail of nothing is a mistake, not a request for an empty string —
+        // and it would read as a blank pane, which is the very ambiguity #841
+        // is about.
+        for bad in [
+            vec!["tty7", "capture", "%3", "--tail", "0"],
+            vec!["tty7", "capture", "%3", "--tail", "-1"],
+            vec!["tty7", "capture", "%3", "--tail", "lots"],
+        ] {
+            let err = Cli::try_parse_from(&bad).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{bad:?} should be a usage error");
+        }
     }
 
     #[test]

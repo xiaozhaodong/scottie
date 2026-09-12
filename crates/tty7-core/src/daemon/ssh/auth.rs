@@ -49,6 +49,13 @@ pub async fn authenticate(
         };
         match outcome {
             Outcome::Authenticated => return Ok(()),
+            // The user turned the question down. `password` and
+            // `keyboard-interactive` are one question asked two ways — a
+            // server offering both wants the same secret either way — so
+            // walking on to the next of them put the sheet the user had just
+            // closed straight back on screen, and on a link that reconnects by
+            // itself it kept coming back (#820). Nobody declined a *method*.
+            Outcome::Declined => return Err(AUTH_DECLINED.to_string()),
             Outcome::Failed {
                 remaining_methods,
                 reason,
@@ -121,8 +128,28 @@ fn method_order(mode: SshAuthMode) -> Vec<MethodKind> {
     }
 }
 
+/// What the whole attempt failed with when the person at the keyboard closed
+/// the prompt. Distinct wording on purpose: a caller that retries — the
+/// workspace supervisor reconnects on a clock — can tell a refusal it should
+/// stop repeating from a credential that was merely wrong.
+pub const AUTH_DECLINED: &str = "authentication cancelled";
+
+/// Whether a failure is the one above, seen from wherever it ended up.
+///
+/// The reason travels a long way — route ack, `io::Error`, and a localised
+/// "could not reach {machine}: {error}" around the outside — so this asks
+/// whether the message *carries* the refusal rather than whether it is one,
+/// exactly as `control::is_dialect_refusal` does with its own marker.
+pub fn is_auth_declined(message: &str) -> bool {
+    message.contains(AUTH_DECLINED)
+}
+
 enum Outcome {
     Authenticated,
+    /// Nobody answered the prompt this method raised: the user closed it, or
+    /// no window was there to show it. Either way the attempt is over — see
+    /// the arm in [`authenticate`].
+    Declined,
     Failed {
         remaining_methods: Option<MethodSet>,
         reason: Option<String>,
@@ -456,6 +483,7 @@ async fn try_publickeys(
         };
         match outcome {
             Outcome::Authenticated => return Outcome::Authenticated,
+            Outcome::Declined => return Outcome::Declined,
             Outcome::Failed {
                 remaining_methods, ..
             } => {
@@ -716,6 +744,7 @@ async fn try_identity_files(
     for (path, source) in files {
         match try_identity_file(handle, spec, broker, path, *source, round).await {
             Outcome::Authenticated => return Outcome::Authenticated,
+            Outcome::Declined => return Outcome::Declined,
             Outcome::Failed {
                 remaining_methods, ..
             } => {
@@ -788,6 +817,12 @@ async fn try_identity_file(
                     rejected,
                 })
                 .await;
+            // Skipped, not `Declined`, and on purpose. Closing this sheet
+            // declines *this key*, and the methods still to come ask a
+            // different question — "your password" is not "the passphrase for
+            // id_rsa", and someone who cannot remember the passphrase is
+            // usually closing it precisely to be asked the other one. What
+            // #820 is about is the two prompts that ask the same thing.
             let AuthResponse::Secret(passphrase) = resp else {
                 return Outcome::Skipped;
             };
@@ -938,7 +973,7 @@ async fn try_password(
         .await;
     let pw = match resp {
         AuthResponse::Secret(p) => p,
-        _ => return failed("password entry cancelled"),
+        _ => return Outcome::Declined,
     };
     match handle.authenticate_password(&spec.user, pw).await {
         Ok(AuthResult::Success) => Outcome::Authenticated,
@@ -1037,7 +1072,7 @@ async fn try_keyboard_interactive(
                 .await
                 {
                     Some(a) => a,
-                    None => return failed("keyboard-interactive cancelled"),
+                    None => return Outcome::Declined,
                 };
                 // Only a round that actually sent the stored password spends
                 // it. Marking it spent for every round refused it to an
@@ -1167,6 +1202,126 @@ fn rsa_hash_alg(algorithm: &Algorithm) -> Option<HashAlg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::ssh::test_support::PasswordFake;
+    use std::sync::{Mutex, OnceLock};
+
+    /// A broker standing in for the window: it records the kind of every
+    /// prompt that reaches it and answers each from a script, at once.
+    ///
+    /// Answering from inside the emit closure works for the same reason
+    /// `declining_broker` does — `PromptBroker::prompt` files the waiting
+    /// sender before it emits — and it keeps these tests off the two-minute
+    /// prompt timeout.
+    fn scripted_broker(script: Vec<AuthResponse>) -> (Arc<Mutex<Vec<String>>>, Arc<PromptBroker>) {
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let script = Arc::new(Mutex::new(std::collections::VecDeque::from(script)));
+        let back: Arc<OnceLock<std::sync::Weak<PromptBroker>>> = Arc::new(OnceLock::new());
+
+        let asked = Arc::clone(&seen);
+        let emit_back = Arc::clone(&back);
+        let broker = PromptBroker::new(Box::new(move |msg| {
+            let crate::daemon::protocol::DaemonMsg::AuthPrompt { request_id, prompt } = msg else {
+                return true;
+            };
+            let label = match prompt {
+                AuthPromptKind::Password { .. } => "password",
+                AuthPromptKind::KeyboardInteractive { .. } => "keyboard-interactive",
+                AuthPromptKind::KeyPassphrase { .. } => "key-passphrase",
+                AuthPromptKind::Banner { .. } => return true,
+                _ => "host-key",
+            };
+            asked.lock().unwrap().push(label.to_string());
+            let answer = script
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(AuthResponse::Cancelled);
+            if let Some(broker) = emit_back.get().and_then(std::sync::Weak::upgrade) {
+                broker.deliver(request_id, answer);
+            }
+            true
+        }));
+        let _ = back.set(Arc::downgrade(&broker));
+        (seen, broker)
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime")
+    }
+
+    /// #820. A server that offers `password` *and* `keyboard-interactive` is
+    /// offering two ways to hand over one secret. Closing the sheet used to
+    /// fail only the method that raised it, so the very next thing the user
+    /// saw was the other method asking for the same password — which, on a
+    /// link that redials by itself, is a window that cannot be closed.
+    #[test]
+    fn closing_the_password_sheet_ends_the_attempt_rather_than_asking_again() {
+        runtime().block_on(async {
+            let mut fake = PasswordFake::connect("hunter2").await;
+            let (seen, broker) = scripted_broker(vec![AuthResponse::Cancelled]);
+
+            let err = authenticate(&mut fake.handle, &fake.spec, &broker)
+                .await
+                .expect_err("a declined prompt cannot authenticate");
+
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                ["password"],
+                "one question was declined, so no second question is asked"
+            );
+            assert!(err.contains(AUTH_DECLINED), "{err}");
+            assert_eq!(
+                fake.kbdint_attempts(),
+                0,
+                "keyboard-interactive must not even reach the wire"
+            );
+        });
+    }
+
+    /// The other half of the rule: it is the *decline* that ends the attempt,
+    /// not a prompt having happened. A password the server turns down is a
+    /// wrong answer, and the method behind it is still worth trying.
+    #[test]
+    fn a_password_the_server_rejects_still_falls_through_to_the_next_method() {
+        runtime().block_on(async {
+            let mut fake = PasswordFake::connect("hunter2").await;
+            let (seen, broker) = scripted_broker(vec![
+                AuthResponse::Secret("wrong".into()),
+                AuthResponse::Cancelled,
+            ]);
+
+            let err = authenticate(&mut fake.handle, &fake.spec, &broker)
+                .await
+                .expect_err("neither answer was the password");
+
+            assert_eq!(
+                seen.lock().unwrap().as_slice(),
+                ["password", "keyboard-interactive"],
+                "a rejected answer is not a refusal to answer"
+            );
+            assert!(err.contains(AUTH_DECLINED), "{err}");
+            assert_eq!(fake.password_attempts(), 1);
+        });
+    }
+
+    #[test]
+    fn the_password_the_user_types_is_asked_for_once_and_authenticates() {
+        runtime().block_on(async {
+            let mut fake = PasswordFake::connect("hunter2").await;
+            let (seen, broker) = scripted_broker(vec![AuthResponse::Secret("hunter2".into())]);
+
+            authenticate(&mut fake.handle, &fake.spec, &broker)
+                .await
+                .expect("the right password authenticates");
+
+            assert_eq!(seen.lock().unwrap().as_slice(), ["password"]);
+            assert_eq!(fake.password_attempts(), 1);
+            assert_eq!(fake.kbdint_attempts(), 0);
+        });
+    }
 
     #[test]
     fn a_round_with_no_attempt_says_so_instead_of_saying_it_failed() {

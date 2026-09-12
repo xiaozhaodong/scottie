@@ -1,17 +1,23 @@
 //! Semantic titles reported by coding agents.
 //!
 //! Agent terminals mix two different things into OSC 0/2: the task's name and
-//! a small activity glyph (`✳`, `◐`, `◑`).  The machine tree needs the former
-//! to survive a later `claude`/UUID reset, while the latter is presentation
-//! state that a viewer may choose to draw.  Keep that split here so the live
-//! window, mirrored workspaces and the CLI all agree on what counts as a task.
+//! a small activity glyph (`✳`, the quadrant circles, a braille spinner
+//! frame).  The machine tree needs the former to survive a later
+//! `claude`/UUID reset, while the latter is presentation state that a viewer
+//! may choose to draw.  Keep that split here so the live window, mirrored
+//! workspaces and the CLI all agree on what counts as a task.
+//!
+//! Which glyphs count is decided once, in
+//! [`strip_status_mark`](crate::core::tab_view::strip_status_mark): the same
+//! alphabet a non-agent title is cleaned with, so a mark an agent invents is
+//! added in one table and both paths learn it together.
 
 use std::borrow::Cow;
 
 use crate::core::cli_agent::CLIAgent;
+use crate::core::tab_view::{is_status_mark, strip_status_mark};
 
 const TASK_TITLE_MAX: usize = 120;
-const ACTIVITY_PREFIXES: &[char] = &['✳', '◐', '◑'];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentTitle {
@@ -42,12 +48,19 @@ pub fn parse_agent_title(
 ) -> Option<AgentTitle> {
     let folded = fold_one_line(raw);
     let mut title = folded.as_str();
-    let activity_prefix = title
-        .chars()
-        .next()
-        .filter(|c| ACTIVITY_PREFIXES.contains(c));
-    if let Some(prefix) = activity_prefix {
-        title = title[prefix.len_utf8()..].trim_start();
+    // The marks come off by the shared alphabet. The first one is kept as the
+    // activity glyph a viewer may put back; a second (`✳ ⠋ task`) is noise.
+    let stripped = strip_status_mark(title);
+    let activity_prefix = (stripped.len() != title.len())
+        .then(|| title.chars().next())
+        .flatten();
+    title = stripped;
+    // A mark with nothing behind it is not a task: `strip_status_mark` leaves
+    // it standing so a *tab* keeps something to show, but as a task title it
+    // would be cached and outlive the turn it animated.
+    let mut chars = title.chars();
+    if chars.next().is_some_and(is_status_mark) && chars.as_str().trim().is_empty() {
+        return None;
     }
     let after_host = crate::core::tab_view::strip_host_prefix(title);
     if title.is_empty()
@@ -142,7 +155,9 @@ mod tests {
 
     #[test]
     fn activity_is_metadata_not_part_of_the_cached_title() {
-        for prefix in ACTIVITY_PREFIXES {
+        // One of each alphabet `strip_status_mark` knows: Claude's asterisk
+        // and quadrant circles, and a braille spinner frame.
+        for prefix in ['✳', '◐', '◑', '\u{280B}'] {
             let parsed = parse_agent_title(
                 CLIAgent::Claude,
                 Some("session-1"),
@@ -150,10 +165,21 @@ mod tests {
             )
             .unwrap();
             assert_eq!(parsed.title, "武汉明天天气查询");
-            assert_eq!(parsed.activity_prefix, Some(*prefix));
+            assert_eq!(parsed.activity_prefix, Some(prefix));
             assert_eq!(parsed.display(false), "武汉明天天气查询");
             assert_eq!(parsed.display(true), format!("{prefix} 武汉明天天气查询"));
         }
+        // An emoji selector rides along with the mark, and two marks both go
+        // while the first is the one remembered.
+        for raw in ["✳\u{FE0F} 武汉明天天气查询", "✳ ⠋ 武汉明天天气查询"] {
+            let parsed = parse_agent_title(CLIAgent::Claude, None, raw).unwrap();
+            assert_eq!(parsed.title, "武汉明天天气查询", "on {raw:?}");
+            assert_eq!(parsed.activity_prefix, Some('✳'));
+        }
+        // A title that merely starts with a glyph nobody uses as a mark keeps it.
+        let parsed = parse_agent_title(CLIAgent::Claude, None, "🔥 build the docs").unwrap();
+        assert_eq!(parsed.title, "🔥 build the docs");
+        assert_eq!(parsed.activity_prefix, None);
     }
 
     #[test]

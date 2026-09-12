@@ -2,17 +2,18 @@ use gpui::{AnyElement, Context, Window, div, prelude::*, px, rems};
 use gpui_component::button::Button;
 use gpui_component::input::Input;
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, WindowExt as _,
+    h_flex, v_flex,
 };
 use std::path::PathBuf;
 
 use crate::core::config::{Config, RightPanelTab};
-use crate::daemon::protocol::PaneProcs;
+use crate::daemon::protocol::{ManagedForward, PaneProcs, PortProbe};
 use crate::ui::app::{
-    CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty7App, tile_trailing_inset,
-    tile_trailing_inset_sm,
+    CONTENT_INSET, TILE_GLYPH_SM, TILE_GLYPH_XS, TILE_SIZE_SM, TILE_SIZE_XS, Tty7App,
+    tile_trailing_inset, tile_trailing_inset_sm,
 };
-use crate::ui::i18n::{L10nKey, t};
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 
 pub(crate) const MIN_WIDTH: f32 = 216.;
@@ -90,6 +91,17 @@ pub(crate) const ROW_GLYPH: f32 = crate::ui::app::TILE_GLYPH;
 /// 6px under Info is a panel whose rows visibly do not belong to each other.
 pub(crate) const ROW_INSET: f32 = 4.;
 
+/// Whether this forward is the one that reaches `port` on the far side.
+///
+/// Local forwards only, and only those aimed at the far host's own loopback:
+/// a forward to some third machine happens to carry the same number, and
+/// pairing it with the port row would claim it leads somewhere it does not.
+pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
+    m.kind == crate::daemon::protocol::SshForwardKind::Local
+        && m.target_port == port
+        && crate::daemon::protocol::PortEntry::reaches_loopback(&m.target_host)
+}
+
 /// The strip the row and group action buttons live in, revealed by hovering
 /// `row`.
 ///
@@ -147,6 +159,41 @@ pub(crate) struct RightPanelState {
     pub(crate) procs_loading: bool,
     pub(crate) procs_gen: u64,
     pub(crate) procs_forwards: Option<crate::ui::app::ForwardRoute>,
+    /// Who to ask about `procs_pane` — `None` means this machine's daemon.
+    pub(crate) procs_host: Option<crate::ui::host_ops::SharedHost>,
+    /// Whether the host that owns this pane cannot describe its processes at
+    /// all: an older `tty7-server` on the far end, which does not know the
+    /// request. Kept apart from an empty list, because "nothing is listening"
+    /// and "nobody could tell us" are different sentences and the panel has to
+    /// say which one it means.
+    pub(crate) procs_unsupported: bool,
+    /// The last round trip measured to the machine `procs_pane` lives on.
+    /// `None` before the first ping comes back.
+    pub(crate) link_rtt: Option<std::time::Duration>,
+    /// Which host `link_rtt` was measured against, and — since only a remote
+    /// pane has one — whether the latency row is drawn at all. Held per host
+    /// rather than per pane so that moving between two panes of the same
+    /// machine keeps the number on screen: it belongs to the link the two
+    /// panes share, and blanking it per pane would empty the row for as long
+    /// as the next poll takes to cross the network.
+    pub(crate) link_host: Option<crate::ui::host_ops::HostId>,
+    /// How `procs_pane`'s loopback ports can be reached from this machine.
+    /// Read by the Ports list to decide what a click on a port does, and by
+    /// the watch to decide whether it has to keep looking with the panel shut.
+    pub(crate) port_route: crate::terminal::view::PortRoute,
+    /// The remote ports already forwarded unasked, per set of forwards.
+    ///
+    /// Kept so that a forward the user then deletes is not immediately rebuilt
+    /// by the next poll — the automatic offer is made once per port, and after
+    /// that the port is theirs to forward or not.
+    ///
+    /// Keyed by owner rather than held for the pane in front, because a
+    /// workspace's forwards are shared by all of its panes: switching tabs
+    /// would otherwise re-announce every port the workspace had already
+    /// forwarded, and switching back would re-offer what was just dismissed.
+    /// A few `u16` per connection is not worth reclaiming.
+    pub(crate) auto_forwarded:
+        std::collections::HashMap<crate::ui::app::ForwardOwnerKey, std::collections::HashSet<u16>>,
     pub(crate) scroll: gpui::ScrollHandle,
     pub(crate) tree_scroll: gpui::ScrollHandle,
     /// A path the tree should scroll onto, and how many more renders it may
@@ -163,7 +210,34 @@ pub(crate) struct RightPanelState {
 /// a moment.
 pub(crate) const TREE_REVEAL_RENDERS: u8 = 60;
 
+/// How often the process and port list is re-read while it is on screen —
+/// close enough that a process appearing feels immediate.
 const PROCS_POLL: std::time::Duration = std::time::Duration::from_millis(2000);
+
+/// How often it is re-read with the panel shut, where nobody is watching the
+/// list and the only question is whether a new port has appeared. A couple of
+/// extra seconds nobody can feel, against a query that crosses the network on
+/// every remote pane.
+const PORT_WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(5000);
+
+/// How many newly-seen ports one poll may forward. A dev server brings up one
+/// or two; a number this side of a dozen is a process opening listeners in a
+/// loop, and forwarding all of them helps nobody.
+const AUTO_FORWARD_BURST: usize = 4;
+
+/// What the Ports and Forwards sections are describing.
+#[derive(Clone)]
+pub(crate) struct PaneForwardCtx {
+    pub(crate) pane_id: u64,
+    /// `Some` when the pane has somewhere to hold managed forwards.
+    pub(crate) route: Option<crate::ui::app::ForwardRoute>,
+    pub(crate) port_route: crate::terminal::view::PortRoute,
+    /// The host that owns this pane's processes, when that is not this
+    /// machine. A remote workspace's panes live in the peer's registry, so the
+    /// local daemon — which is what `query_procs` asks — has never heard of
+    /// them and answers with an empty list.
+    pub(crate) host: Option<crate::ui::host_ops::SharedHost>,
+}
 
 /// What a session row draws in its value column.
 ///
@@ -185,6 +259,32 @@ enum InfoValue {
         removed: u32,
         open: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     },
+}
+
+/// The table convention for a cell with nothing in it. Needs no translating,
+/// and is shorter to read than any of the sentences it stands in for.
+const EMPTY: &str = "—";
+
+/// A round trip, at the precision the number is worth reading to.
+///
+/// Whole milliseconds up to a second: tenths of a millisecond on a link that
+/// varies by whole ones is noise dressed as measurement. Past a second the
+/// millisecond stops mattering and the second is the unit anyone would say it
+/// in.
+fn format_rtt(rtt: std::time::Duration) -> String {
+    let ms = rtt.as_secs_f64() * 1000.;
+    if ms < 1. {
+        // Loopback and a peer on the same LAN both land here. Rounding to
+        // "0 ms" would read as a failed measurement rather than a fast one.
+        return "<1 ms".to_string();
+    }
+    // Rounded before the comparison, so 999.6 ms is not shown as "1000 ms" —
+    // a millisecond reading that has run past the unit's own range.
+    let rounded = ms.round() as u64;
+    if rounded < 1000 {
+        return format!("{rounded} ms");
+    }
+    format!("{:.1} s", rtt.as_secs_f64())
 }
 
 /// One label/value line of the Session section.
@@ -365,8 +465,14 @@ impl Tty7App {
                         .id("right-panel-titlebar-drag")
                         .flex_none()
                         .h(px(crate::ui::app::TITLE_BAR_HEIGHT))
+                        // `sidebar_border`, the lighter of the two hairline
+                        // tiers and the one the panel's own left edge is drawn
+                        // in. It rules the tiles off from the content below,
+                        // which on macOS starts directly under them: the title
+                        // row that carries this line on other platforms is not
+                        // drawn here.
                         .border_b_1()
-                        .border_color(cx.theme().transparent);
+                        .border_color(cx.theme().sidebar_border);
                     crate::ui::app::window_move_gesture(
                         row,
                         "right-panel-titlebar-drag",
@@ -377,10 +483,21 @@ impl Tty7App {
                     .items_center()
                     .gap(px(2.))
                     .pl(px(tile_trailing_inset()))
+                    .relative()
                     .children(self.right_panel_tabs(cx))
                     .child(div().flex_1())
-                    .child(self.window_chrome(window, cx))
+                    // Always painted, unlike the sidebar's and the strip's:
+                    // the tab tiles beside them are already there whenever the
+                    // panel is open, so hiding just these two left a row that
+                    // grew two buttons on hover and read as a glitch.
+                    .child(self.window_chrome(true, window, cx))
                 }))
+                // Air under the rule, so the first row of content is not
+                // sitting on the line. On the other platforms the title row
+                // holds this line and its own text keeps that distance; here
+                // the tiles are in the window's title bar and the content
+                // would start against the hairline.
+                .children(cfg!(target_os = "macos").then(|| div().flex_none().h(px(8.))))
                 .child(body)
                 .children(self.sftp_transfers_footer(cx))
                 .child(handle)
@@ -519,8 +636,11 @@ impl Tty7App {
                 (None, true) => tile_trailing_inset_sm(),
                 (None, false) => CONTENT_INSET,
             }))
+            // `border`, not `sidebar_border`: this rules the tab row off from
+            // the content below it, with the same fill on both sides, so the
+            // line is the only thing saying where one ends.
             .when(tabs.is_some(), |this| {
-                this.border_b_1().border_color(cx.theme().sidebar_border)
+                this.border_b_1().border_color(cx.theme().border)
             })
             .child(
                 h_flex()
@@ -555,6 +675,12 @@ impl Tty7App {
                 this.child(
                     h_flex()
                         .flex_shrink_0()
+                        // Full height, so the current tile's underline — pinned
+                        // to the bottom of its own box — lands on the rule that
+                        // closes this row, the way it does on macOS. Without it
+                        // the tiles are only as tall as a glyph and the bar
+                        // floats a few pixels above the line.
+                        .h_full()
                         .items_center()
                         .gap(px(2.))
                         .when(has_trailing, |this| this.ml(px(6.)))
@@ -642,14 +768,10 @@ impl Tty7App {
     fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let title = self.panel_title(t(L10nKey::PanelInfoTitle), None, None, window, cx);
         let mut rows: Vec<InfoRow> = Vec::new();
+        // Which pane the sections below describe, and what can be done with
+        // its ports. Worked out once, by the same call the watch uses.
+        let ctx = self.pane_forward_ctx(window, cx);
         let mut pane_id: Option<u64> = None;
-        let mut forwards_pane: Option<u64> = None;
-        // Whether the ports below are this machine's. They are listed by the
-        // daemon that owns the pane, so what decides it is which machine that
-        // daemon runs on — not whether the shell has since ssh'd somewhere,
-        // which would hide the browser tile on a `ssh -L` pane whose forwarded
-        // listener is on this machine and reachable.
-        let mut local_pane = false;
         // Where the `changes` row's counts lead. Same source as the sidebar's,
         // and gated on the same setting, so turning the preview off turns it
         // off in both places rather than in one of them.
@@ -663,7 +785,6 @@ impl Tty7App {
             if let Some(leaf) = tab.detail_pane(window, cx) {
                 let view = leaf.read(cx);
                 pane_id = Some(view.pane_id);
-                local_pane = view.host_id().is_local();
                 diff_target = crate::ui::tab_sidebar::diff_click_cwd(
                     cx.global::<Config>(),
                     view.git_status_cwd()
@@ -699,15 +820,22 @@ impl Tty7App {
                 if let Some(ssh) = view.ssh_spec() {
                     rows.push(InfoRow::text(t(L10nKey::PanelSsh), ssh.host.clone()).copyable());
                 }
-                let connected_ssh = view
-                    .remote_context()
-                    .is_some_and(|c| c.kind == crate::daemon::protocol::RemoteKind::NativeSsh)
-                    && matches!(
-                        view.ssh_phase(),
-                        Some(crate::daemon::protocol::SshPhase::Connected)
-                    );
-                if connected_ssh || view.workspace().is_some() {
-                    forwards_pane = Some(view.pane_id);
+                // Only where there is a network between here and the shell. On
+                // a pane of this machine's own the row would be reporting the
+                // round trip to a Unix socket, which is a number with nothing
+                // to compare it against.
+                if self.right_panel.link_host.is_some() {
+                    rows.push(InfoRow::text(
+                        t(L10nKey::PanelLatency),
+                        // A link whose first ping has not come back yet,
+                        // rather than one measured at zero. The dash is the
+                        // table's empty cell, the same one a clean working
+                        // tree gets.
+                        self.right_panel
+                            .link_rtt
+                            .map(format_rtt)
+                            .unwrap_or_else(|| EMPTY.to_string()),
+                    ));
                 }
                 git = view.git_status(cx);
                 detail_pane = Some(leaf);
@@ -748,9 +876,6 @@ impl Tty7App {
             );
         }
 
-        let route = forwards_pane.map(|id| self.forward_route(id, cx));
-        self.sync_procs(pane_id, route, cx);
-
         let label_w = info_label_column(&rows, window, cx);
         // Rows pad themselves back out to `CONTENT_INSET`, so their hover fill
         // bleeds past the text on both sides — the geometry the Source Control
@@ -765,8 +890,7 @@ impl Tty7App {
             .child(list)
             .children(self.turns_section(detail_pane.as_ref(), cx))
             .children(self.procs_section(pane_id, cx))
-            .children(self.ports_section(pane_id, local_pane, cx))
-            .children(self.forwards_section(forwards_pane, cx))
+            .children(self.ports_section(ctx.as_ref(), cx))
             .into_any_element();
         self.panel_scroll(inner, title)
     }
@@ -805,7 +929,7 @@ impl Tty7App {
             // absorb the shrinking so the leaf survives, the way a file
             // manager shows a path.
             InfoValue::Path(v) => {
-                let (head, leaf) = split_path_leaf(&v);
+                let (head, leaf) = crate::ui::path_display::split_path_leaf(&v);
                 h_flex()
                     .flex_1()
                     .min_w_0()
@@ -850,7 +974,7 @@ impl Tty7App {
                         this.child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("—".to_string()),
+                                .child(EMPTY.to_string()),
                         )
                     })
                     .when(added > 0, |this| {
@@ -1132,6 +1256,7 @@ impl Tty7App {
         )
     }
 
+
     fn procs_section(&self, pane_id: Option<u64>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let procs = &self.procs(pane_id)?.procs;
         if procs.len() < 2 {
@@ -1180,34 +1305,68 @@ impl Tty7App {
         )
     }
 
-    /// The listening ports of the pane's processes.
+    /// The ports this pane is serving, and what it takes to reach them.
     ///
-    /// `local` is whether the daemon that listed these ports is this machine's,
-    /// and it is what decides whether the browser tile appears: a port on a
-    /// remote host is not this machine's port, and opening it here is not a
-    /// near miss, it is a different service. It is deliberately about the
-    /// *host* and not about whether the shell has ssh'd somewhere — the ports
-    /// come from the pane's own process tree either way, so a `ssh -L` pane's
-    /// forwarded listener really is on this machine and really does open.
+    /// One list, not two. Ports and forwards used to be separate sections, so
+    /// a remote :3000 and the forward that reaches :3000 sat under different
+    /// headings with nothing saying they were the same thing — and the ports
+    /// half offered no way to build the forward the other half was for. A row
+    /// is a port here, and the forward, when there is one, is where that row
+    /// says it comes out.
     fn ports_section(
         &self,
-        pane_id: Option<u64>,
-        local: bool,
+        ctx: Option<&PaneForwardCtx>,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let ports = &self.procs(pane_id)?.ports;
-        if ports.is_empty() {
+        let ctx = ctx?;
+        let pane_id = ctx.pane_id;
+        // No answer yet for this pane defaults to a probe that is fine, not a
+        // broken one: the panel has nothing to doubt until it has been told
+        // something.
+        let (ports, probe) = self
+            .procs(Some(pane_id))
+            .map(|p| (p.ports.clone(), p.probe.clone()))
+            .unwrap_or_default();
+        let forwards: Vec<ManagedForward> = self
+            .loopback_panel
+            .managed
+            .iter()
+            .filter(|m| m.pane_id == pane_id)
+            .cloned()
+            .collect();
+        let form_open = self.loopback_panel.form_pane_id == Some(pane_id);
+        // A pane that cannot hold a forward and is serving nothing has no
+        // section: the heading alone would be an empty promise.
+        //
+        // Unless the reason it is serving nothing is that nobody managed to
+        // look. Then the heading and one muted line under it are the only
+        // place the panel can admit it does not know, and a silently absent
+        // section is the bug (#731): someone whose server is plainly up reads
+        // the missing section as tty7 saying there is no server.
+        if ports.is_empty() && forwards.is_empty() && ctx.route.is_none() && probe.is_ok() {
             return None;
         }
+
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let mono = cx.theme().mono_font_family.clone();
+        let openable = ctx.port_route != crate::terminal::view::PortRoute::Blocked;
         let mut list = v_flex().px(px(CONTENT_INSET - ROW_INSET)).py(px(1.));
+        // Which forwards a port row has already accounted for; whatever is
+        // left over gets a row of its own below.
+        let mut paired: Vec<u64> = Vec::new();
+
         for (i, p) in ports.iter().enumerate() {
-            // "What is this pane serving, and where" is the question the
-            // section answers, and the next thing anyone does with the answer
-            // is go there — so the row hands over an address instead of making
-            // it something to read off the screen and retype.
-            let authority = p.authority();
+            let forward = forwards.iter().find(|m| forwards_port(m, p.port));
+            if let Some(f) = forward {
+                paired.push(f.id);
+            }
+            // What a click and a copy are about: the address that works from
+            // here. Once a forward exists that is the local end of it, not the
+            // far side's own spelling of the port.
+            let here = forward.map(|f| f.bind_port);
+            let authority = here
+                .map(|local| format!("127.0.0.1:{local}"))
+                .unwrap_or_else(|| p.authority());
             // Keyed by the row, not by the port: `listening_ports` drops a
             // duplicate only when the port *and* the pid match, so a
             // pre-forking server — nginx, gunicorn, a node cluster — puts one
@@ -1218,9 +1377,10 @@ impl Tty7App {
             let id = gpui::SharedString::from(format!("panel-port-{}-{}", p.port, p.pid));
             let mut tiles_wide = 1;
             let mut actions = action_strip(&id, sf.hover);
-            if local {
+            if openable {
                 tiles_wide += 1;
-                let url = format!("http://{authority}");
+                let port = p.port;
+                let direct = p.authority();
                 actions = actions.child(
                     self.info_tile(
                         ("panel-port-open", i),
@@ -1228,7 +1388,9 @@ impl Tty7App {
                         t(L10nKey::PanelOpenInBrowser),
                         cx,
                     )
-                    .on_click(move |_, _window, cx| cx.open_url(&url)),
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.open_pane_port(port, direct.clone(), cx)
+                    })),
                 );
             }
             actions = actions.child(
@@ -1245,6 +1407,21 @@ impl Tty7App {
                     }
                 }),
             );
+            if let Some(f) = forward {
+                tiles_wide += 1;
+                let forward_id = f.id;
+                actions = actions.child(
+                    self.info_tile(
+                        ("panel-port-unforward", i),
+                        IconName::Close,
+                        t(L10nKey::ForwardTooltipRemove),
+                        cx,
+                    )
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.remove_managed_forward(pane_id, forward_id, cx)
+                    })),
+                );
+            }
             list = list.child(
                 h_flex()
                     .id(id.clone())
@@ -1276,15 +1453,147 @@ impl Tty7App {
                             .text_color(cx.theme().muted_foreground)
                             .child(p.name.clone()),
                     )
+                    // Where the port comes out on this machine. Just the
+                    // number: the host is always this machine's loopback, and
+                    // spelling it out on every row would bury the one part
+                    // that differs.
+                    .children(here.map(|local| {
+                        div()
+                            .flex_none()
+                            .text_size(rems(META_MONO))
+                            .font_family(mono.clone())
+                            .text_color(cx.theme().muted_foreground.opacity(0.8))
+                            .child(format!("→ :{local}"))
+                    }))
                     .child(actions),
             );
         }
+
+        // Forwards no port row spoke for: the remote and dynamic ones, and any
+        // local forward pointed somewhere this pane is not itself serving.
+        for forward in forwards.iter().filter(|m| !paired.contains(&m.id)) {
+            list = list.child(self.forward_row(forward, &mono, cx));
+        }
+
+        let add = ctx.route.is_some().then(|| {
+            crate::ui::tab_strip::chrome_tile_sized(
+                Button::new(("ssh-forward-add-toggle", pane_id))
+                    .icon(Icon::empty().path("icons/plus.svg")),
+                TILE_SIZE_SM,
+                TILE_GLYPH_SM,
+                form_open,
+                cx,
+            )
+            .rounded_md()
+            .tooltip(if form_open {
+                t(L10nKey::Cancel)
+            } else {
+                t(L10nKey::ForwardTooltipAdd)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_managed_forward_form(pane_id, window, cx)
+            }))
+            .into_any_element()
+        });
+
         Some(
             v_flex()
-                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), true, None, cx))
+                .child(self.panel_subtitle(t(L10nKey::PanelPortsSubtitle), true, add, cx))
+                .when(
+                    ports.is_empty() && forwards.is_empty() && !form_open,
+                    |this| {
+                        // "Nothing is listening" and "nobody could tell us"
+                        // look identical on screen unless the panel says which
+                        // one it means — and every one of the second kind is a
+                        // fixable thing: a far end running a server too old to
+                        // answer, a probe that could not be run at all, a
+                        // server started under `sudo` whose sockets this user
+                        // is not allowed to see. Still one muted line in the
+                        // place the word "None" would have gone; the panel is
+                        // reporting what it knows, not raising an alarm.
+                        let key = match (self.right_panel.procs_unsupported, &probe) {
+                            (true, _) => L10nKey::PanelPortsUnsupported,
+                            (false, PortProbe::Unavailable(_)) => L10nKey::PanelPortsProbeFailed,
+                            (false, PortProbe::Restricted) => L10nKey::PanelPortsRestricted,
+                            (false, PortProbe::Ok) => L10nKey::None,
+                        };
+                        this.child(
+                            div()
+                                .px(px(CONTENT_INSET))
+                                .py(px(2.))
+                                .text_size(rems(TEXT))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t(key)),
+                        )
+                    },
+                )
                 .child(list)
+                .when(form_open, |this| this.child(self.forward_form(pane_id, cx)))
                 .into_any_element(),
         )
+    }
+
+    /// Open one of this pane's ports in a browser, building the forward it
+    /// needs first when it needs one.
+    ///
+    /// The forward is the part the user should not have to think about: they
+    /// asked to see :3000, and where :3000 has to be tunnelled to be seen,
+    /// that is this function's problem and not theirs.
+    pub(crate) fn open_pane_port(
+        &mut self,
+        port: u16,
+        direct_authority: String,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::terminal::view::PortRoute;
+        match self.right_panel.port_route {
+            PortRoute::Blocked => {}
+            PortRoute::Direct => cx.open_url(&format!("http://{direct_authority}")),
+            PortRoute::Forward => {
+                if let Some(f) = self
+                    .loopback_panel
+                    .managed
+                    .iter()
+                    .find(|m| forwards_port(m, port))
+                {
+                    cx.open_url(&format!("http://127.0.0.1:{}", f.bind_port));
+                    return;
+                }
+                let Some(route) = self.right_panel.procs_forwards.clone() else {
+                    return;
+                };
+                let owner = route.owner_key();
+                cx.spawn(async move |this, cx| {
+                    let built = cx
+                        .background_executor()
+                        .spawn(async move { route.ensure_loopback("127.0.0.1", port) })
+                        .await;
+                    let _ = this.update_in(cx, |app, window, cx| match built {
+                        Ok(f) => {
+                            // Claimed, so the watch does not offer this port a
+                            // second time after the user has just opened it.
+                            app.right_panel
+                                .auto_forwarded
+                                .entry(owner)
+                                .or_default()
+                                .insert(port);
+                            cx.open_url(&format!("http://127.0.0.1:{}", f.local_port));
+                            if let Some(pane_id) = app.right_panel.procs_pane {
+                                app.refresh_managed_forwards(pane_id, cx);
+                            }
+                        }
+                        Err(e) => window.push_notification(
+                            t_fmt(
+                                L10nKey::LoopbackForwardFailed,
+                                &[("port", &port.to_string()), ("error", &e.to_string())],
+                            ),
+                            cx,
+                        ),
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     fn procs(&self, pane_id: Option<u64>) -> Option<&PaneProcs> {
@@ -1292,25 +1601,191 @@ impl Tty7App {
             .then_some(self.right_panel.procs.as_ref())?
     }
 
+    /// What the Ports and Forwards sections are describing: which pane, how
+    /// forward requests about it reach a daemon, and whether the loopback
+    /// ports it is serving can be opened from this machine.
+    ///
+    /// One answer for both readers. The panel draws from it and the watch polls
+    /// from it, and when they were each working it out for themselves the panel
+    /// could offer to open a port the watch had already given up on.
+    pub(crate) fn pane_forward_ctx(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Option<PaneForwardCtx> {
+        let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
+        let view = leaf.read(cx);
+        // A pane holds managed forwards once it has somewhere to hold them:
+        // a live native-ssh connection, or the workspace's shared one.
+        let connected_ssh = view
+            .remote_context()
+            .is_some_and(|c| c.kind == crate::daemon::protocol::RemoteKind::NativeSsh)
+            && matches!(
+                view.ssh_phase(),
+                Some(crate::daemon::protocol::SshPhase::Connected)
+            );
+        Some(PaneForwardCtx {
+            pane_id: view.pane_id,
+            route: (connected_ssh || view.workspace().is_some()).then(|| view.forward_route()),
+            port_route: view.port_route(cx),
+            host: (!view.host_id().is_local())
+                .then(|| view.host(cx))
+                .flatten(),
+        })
+    }
+
+    /// Point the port watch at whatever pane is in front, once a frame.
+    ///
+    /// Driven from the app's own render rather than the panel's: the watch has
+    /// to run with the panel shut, which is exactly when a new port appearing
+    /// is worth saying something about.
+    pub(crate) fn sync_port_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ctx = self.pane_forward_ctx(window, cx);
+        self.right_panel.port_route = ctx
+            .as_ref()
+            .map_or(crate::terminal::view::PortRoute::Blocked, |c| c.port_route);
+        let pane_id = ctx.as_ref().map(|c| c.pane_id);
+        let host = ctx.as_ref().and_then(|c| c.host.clone());
+        let route = ctx.and_then(|c| c.route);
+        self.sync_procs(pane_id, route, host, cx);
+    }
+
+    /// Whether the process/port poll should run at all this round.
+    fn procs_wanted(&self) -> bool {
+        (self.right_panel_visible && self.right_panel_tab == RightPanelTab::Info)
+            || self.watching_ports()
+    }
+
+    /// Whether the poll has to keep going with the panel closed: on a pane
+    /// whose ports need forwarding, noticing a new listener *is* the feature,
+    /// and a shut panel is not a reason to stop looking.
+    fn watching_ports(&self) -> bool {
+        self.right_panel.port_route == crate::terminal::view::PortRoute::Forward
+            && self.right_panel.procs_forwards.is_some()
+    }
+
+    /// Forward the loopback ports this poll saw for the first time, and say so.
+    ///
+    /// Once per port, not once per poll: a forward the user then deletes stays
+    /// deleted. Only ports bound somewhere this machine could reach through the
+    /// tunnel — a listener pinned to one of the far host's own interfaces is a
+    /// different service, and guessing at it would build a forward to nothing.
+    fn auto_forward_ports(&mut self, cx: &mut Context<Self>) {
+        if !self.watching_ports() {
+            return;
+        }
+        let Some(route) = self.right_panel.procs_forwards.clone() else {
+            return;
+        };
+        // Read out before the ledger is touched: the ports are behind the same
+        // borrow the `seen` entry needs.
+        let listening: Vec<u16> = match self.right_panel.procs.as_ref() {
+            Some(procs) => procs
+                .ports
+                .iter()
+                .filter(|p| crate::daemon::protocol::PortEntry::reaches_loopback(&p.addr))
+                .map(|p| p.port)
+                .collect(),
+            None => return,
+        };
+        let owner = route.owner_key();
+        let seen = self.right_panel.auto_forwarded.entry(owner).or_default();
+        let mut fresh: Vec<u16> = Vec::new();
+        for port in listening {
+            if fresh.len() >= AUTO_FORWARD_BURST {
+                break;
+            }
+            // Two rows may name one port — a pre-forking server puts one per
+            // worker on screen — and they want one forward between them.
+            if seen.contains(&port) || fresh.contains(&port) {
+                continue;
+            }
+            fresh.push(port);
+        }
+        if fresh.is_empty() {
+            return;
+        }
+        // Claimed before the request goes out, so the next poll — two seconds
+        // away, and this round trip crosses a network — does not ask again.
+        seen.extend(fresh.iter().copied());
+        cx.spawn(async move |this, cx| {
+            let built = cx
+                .background_executor()
+                .spawn(async move {
+                    fresh
+                        .into_iter()
+                        .map(|port| {
+                            let local = route
+                                .ensure_loopback("127.0.0.1", port)
+                                .map(|f| f.local_port);
+                            (port, local)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update_in(cx, |app, window, cx| {
+                for (port, local) in built {
+                    match local {
+                        Ok(local) => window.push_notification(
+                            t_fmt(
+                                L10nKey::PortAutoForwarded,
+                                &[("port", &port.to_string()), ("local", &local.to_string())],
+                            ),
+                            cx,
+                        ),
+                        Err(e) => {
+                            // Usually a connection that is not up yet. Let the
+                            // next poll try again rather than writing the port
+                            // off for the life of the pane.
+                            log::debug!("could not auto-forward :{port}: {e}");
+                            if let Some(seen) = app.right_panel.auto_forwarded.get_mut(&owner) {
+                                seen.remove(&port);
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn sync_procs(
         &mut self,
         pane_id: Option<u64>,
         forwards: Option<crate::ui::app::ForwardRoute>,
+        host: Option<crate::ui::host_ops::SharedHost>,
         cx: &mut Context<Self>,
     ) {
         let Some(pane_id) = pane_id else { return };
         self.right_panel.procs_forwards = forwards.clone();
+        self.right_panel.procs_host = host.clone();
+        // Per host, not per pane — see `link_host`. A pane of this machine's
+        // own has no host at all, which is what clears the section rather than
+        // leaving the last remote pane's numbers under a local one.
+        let link_host = host.as_ref().map(|h| h.id());
+        if self.right_panel.link_host != link_host {
+            self.right_panel.link_host = link_host;
+            self.right_panel.link_rtt = None;
+        }
         if self.right_panel.procs_pane != Some(pane_id) {
             self.right_panel.procs_pane = Some(pane_id);
             self.right_panel.procs = None;
             self.loopback_panel.managed.clear();
             self.right_panel.procs_gen += 1;
             self.right_panel.procs_loading = false;
+            self.right_panel.procs_unsupported = false;
         }
-        if !self.right_panel.procs_loading {
+        // Asked before the first query as well as before every later one. This
+        // used to be reached only from the Info panel's own render, where the
+        // panel being open was implied; driven from the app's render it is not,
+        // and starting a round trip per frame for a pane nobody is watching is
+        // both wasted IPC and, under a test executor, a queue that never
+        // empties.
+        if !self.right_panel.procs_loading && self.procs_wanted() {
             self.right_panel.procs_loading = true;
             let generation = self.right_panel.procs_gen;
-            self.spawn_procs_query(pane_id, generation, forwards, cx);
+            self.spawn_procs_query(pane_id, generation, forwards, host, cx);
         }
     }
 
@@ -1319,16 +1794,41 @@ impl Tty7App {
         pane_id: u64,
         generation: u64,
         forwards: Option<crate::ui::app::ForwardRoute>,
+        host: Option<crate::ui::host_ops::SharedHost>,
         cx: &mut Context<Self>,
     ) {
         cx.spawn(async move |this, cx| {
             let route = forwards.clone();
-            let (procs, managed) = cx
+            // Only while someone is looking. This poll also runs with the panel
+            // shut, watching for ports to forward, and a round trip per round
+            // for a row nobody can see is the far end's time spent on nothing.
+            let want_link = this
+                .read_with(cx, |app, _| {
+                    app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info
+                })
+                .unwrap_or(false);
+            let (procs, managed, link) = cx
                 .background_executor()
                 .spawn(async move {
-                    let procs = crate::terminal::RemoteTerminal::query_procs(pane_id);
+                    // A remote workspace's pane runs on the peer, so the peer
+                    // is the only one that can walk its process tree; the local
+                    // daemon does not have the pane at all and would answer
+                    // with an empty list. `None` back from the host means it
+                    // could not be asked, which is not the same as an empty
+                    // answer — see `Host::pane_procs`.
+                    let procs = match &host {
+                        Some(host) => {
+                            use crate::ui::host_ops::Host as _;
+                            host.pane_procs(pane_id)
+                        }
+                        None => Some(crate::terminal::RemoteTerminal::query_procs(pane_id)),
+                    };
                     let managed = route.map(|r| r.list()).unwrap_or_default();
-                    (procs, managed)
+                    let link = match (want_link, &host) {
+                        (true, Some(host)) => host.link_rtt(),
+                        _ => None,
+                    };
+                    (procs, managed, link)
                 })
                 .await;
             let keep_polling = this
@@ -1336,31 +1836,54 @@ impl Tty7App {
                     if app.right_panel.procs_gen != generation {
                         return false;
                     }
-                    app.right_panel.procs = Some(procs);
+                    app.right_panel.procs_unsupported = procs.is_none();
+                    // A host that could not answer leaves the last list it did
+                    // answer with in place: blanking it on one failed poll
+                    // would make the panel flicker on a link that hiccups.
+                    if let Some(procs) = procs {
+                        app.right_panel.procs = Some(procs);
+                    }
                     if forwards.is_some() {
                         app.loopback_panel.managed = managed;
                     }
+                    // Only when this round actually asked. A round that did not
+                    // leaves the last answer in place, so reopening the panel
+                    // shows the number it was closed on rather than a dash
+                    // until the next poll lands.
+                    if want_link {
+                        app.right_panel.link_rtt = link;
+                    }
                     cx.notify();
-                    let wanted =
-                        app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info;
+                    let wanted = app.procs_wanted();
                     if !wanted {
                         app.right_panel.procs_loading = false;
                     }
                     wanted
                 })
                 .unwrap_or(false);
+            // After the list has landed, so the ports it forwards are the ones
+            // this poll actually saw.
+            let _ = this.update(cx, |app, cx| app.auto_forward_ports(cx));
             if !keep_polling {
                 return;
             }
-            cx.background_executor().timer(PROCS_POLL).await;
+            let gap = this
+                .read_with(cx, |app, _| {
+                    match app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info {
+                        true => PROCS_POLL,
+                        false => PORT_WATCH_POLL,
+                    }
+                })
+                .unwrap_or(PORT_WATCH_POLL);
+            cx.background_executor().timer(gap).await;
             let _ = this.update(cx, |app, cx| {
                 if app.right_panel.procs_gen != generation {
                     return;
                 }
-                let wanted = app.right_panel_visible && app.right_panel_tab == RightPanelTab::Info;
-                if wanted {
+                if app.procs_wanted() {
                     let forwards = app.right_panel.procs_forwards.clone();
-                    app.spawn_procs_query(pane_id, generation, forwards, cx);
+                    let host = app.right_panel.procs_host.clone();
+                    app.spawn_procs_query(pane_id, generation, forwards, host, cx);
                 } else {
                     app.right_panel.procs_loading = false;
                 }
@@ -1479,23 +2002,6 @@ pub fn reveal_label() -> &'static str {
     }
 }
 
-/// Splits a path into everything-but-the-last-segment and the last segment,
-/// so a row can shrink the first and keep the second.
-fn split_path_leaf(s: &str) -> (String, String) {
-    // The larger of the two separator positions, not cfg-gated by platform:
-    // the Info panel shows remote paths too, so a Windows build describes
-    // Unix paths and vice versa — and a mixed-spelling path (`C:\Users\dev/
-    // project`, which agent-reported cwds arrive as) still cuts at its true
-    // leaf (#544). A Unix filename containing a literal `\` loses a shorter
-    // leaf; head + leaf still rejoins exactly, so the cost is decorative.
-    let leaf_at = s.rfind('/').max(s.rfind('\\'));
-    match leaf_at {
-        // Keep the separator with the head: "~/a/b/" + "c" rejoins exactly.
-        Some(i) if i + 1 < s.len() => (s[..=i].to_string(), s[i + 1..].to_string()),
-        _ => (String::new(), s.to_string()),
-    }
-}
-
 /// `home` is the home directory of the machine `path` lives on. A remote
 /// pane's cwd is measured against *its* host's home, never this machine's
 /// (#580) — and against nothing at all while the host has not said.
@@ -1513,9 +2019,53 @@ fn turn_is_jumpable(row: Option<i64>, alt_now: bool) -> bool {
     row.is_some() && !alt_now
 }
 
+
 #[cfg(test)]
 mod tests {
-    use super::{InfoRow, InfoValue, split_path_leaf, turn_is_jumpable};
+    use super::{InfoRow, InfoValue, format_rtt, forwards_port, turn_is_jumpable};
+    use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
+
+    fn forward(kind: SshForwardKind, target_host: &str, target_port: u16) -> ManagedForward {
+        ManagedForward {
+            id: 1,
+            pane_id: 7,
+            kind,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 51000,
+            target_host: target_host.to_string(),
+            target_port,
+            description: None,
+            status: ForwardStatus::Listening,
+        }
+    }
+
+    /// A port row and the forward that reaches it are one line, so this is
+    /// what decides whether a forward is *that* row's or a line of its own.
+    #[test]
+    fn a_port_row_claims_only_the_forward_that_reaches_it() {
+        assert!(forwards_port(
+            &forward(SshForwardKind::Local, "localhost", 3000),
+            3000
+        ));
+        assert!(
+            forwards_port(&forward(SshForwardKind::Local, "127.0.0.1", 3000), 3000),
+            "the far side's loopback spells itself several ways"
+        );
+        assert!(
+            !forwards_port(&forward(SshForwardKind::Local, "localhost", 3000), 8080),
+            "a different port is a different row"
+        );
+        assert!(
+            !forwards_port(&forward(SshForwardKind::Local, "10.0.0.5", 3000), 3000),
+            "same number, another machine — pairing them would claim it leads \
+             somewhere it does not"
+        );
+        assert!(
+            !forwards_port(&forward(SshForwardKind::Remote, "localhost", 3000), 3000),
+            "a remote forward listens on the far side, so it is not how this \
+             port is reached from here"
+        );
+    }
 
     fn diff(added: u32, removed: u32, open: bool) -> InfoRow {
         InfoRow {
@@ -1578,6 +2128,7 @@ mod tests {
         );
     }
 
+
     #[test]
     fn counts_are_a_button_only_when_there_is_a_diff_to_open() {
         assert!(
@@ -1598,6 +2149,25 @@ mod tests {
     }
 
     #[test]
+    fn a_round_trip_is_read_at_the_precision_it_is_worth() {
+        use std::time::Duration;
+        // A peer on the same machine or the same LAN. "0 ms" would read as a
+        // measurement that failed rather than one that was fast.
+        assert_eq!(format_rtt(Duration::from_micros(120)), "<1 ms");
+        assert_eq!(format_rtt(Duration::from_micros(999)), "<1 ms");
+        assert_eq!(format_rtt(Duration::from_millis(1)), "1 ms");
+        assert_eq!(format_rtt(Duration::from_micros(23_400)), "23 ms");
+        assert_eq!(format_rtt(Duration::from_millis(999)), "999 ms");
+        // Rounding up out of the millisecond's own range hands the number to
+        // the unit above rather than printing a four-digit millisecond.
+        assert_eq!(format_rtt(Duration::from_micros(999_600)), "1.0 s");
+        // Past a second the millisecond has stopped carrying information, and
+        // the second is the unit anyone would say the number in.
+        assert_eq!(format_rtt(Duration::from_millis(1_450)), "1.4 s");
+        assert_eq!(format_rtt(Duration::from_secs(4)), "4.0 s");
+    }
+
+    #[test]
     fn copyable_takes_the_text_the_row_shows_and_nothing_else() {
         // `copyable()` reads the value it was given; rows built with an
         // explicit clipboard string (the cwd, which copies the real path
@@ -1613,65 +2183,6 @@ mod tests {
             diff(3, 1, true).copyable().copy,
             None,
             "there is no sensible clipboard form of two coloured numbers"
-        );
-    }
-
-    #[test]
-    fn the_head_and_leaf_rejoin_into_the_path_they_came_from() {
-        for p in [
-            "~/repo/tty7",
-            "/private/tmp/claude-501/a-very-long-directory/and-another-level",
-            "/",
-            "relative",
-            "",
-            "C:\\Users\\dev\\project",
-            "C:\\Users\\dev/project",
-            "\\\\server\\share\\dir",
-        ] {
-            let (head, leaf) = split_path_leaf(p);
-            assert_eq!(format!("{head}{leaf}"), p, "rejoining {p:?}");
-        }
-    }
-
-    #[test]
-    fn the_leaf_is_the_segment_that_names_the_directory() {
-        let (head, leaf) = split_path_leaf("/a/b/c");
-        assert_eq!((head.as_str(), leaf.as_str()), ("/a/b/", "c"));
-        // A trailing slash has no leaf to keep, so the whole thing is head.
-        let (head, leaf) = split_path_leaf("/a/b/");
-        assert_eq!((head.as_str(), leaf.as_str()), ("", "/a/b/"));
-        // Root is one segment with nothing before it.
-        let (head, leaf) = split_path_leaf("/");
-        assert_eq!((head.as_str(), leaf.as_str()), ("", "/"));
-    }
-
-    #[test]
-    fn the_leaf_survives_windows_and_mixed_spellings() {
-        // Backslash-native, the shape an agent-reported cwd arrives in.
-        let (head, leaf) = split_path_leaf("C:\\Users\\dev\\project");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("C:\\Users\\dev\\", "project")
-        );
-        // Mixed separators cut at the *last* one of either kind.
-        let (head, leaf) = split_path_leaf("C:\\Users\\dev/project");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("C:\\Users\\dev/", "project")
-        );
-        let (head, leaf) = split_path_leaf("C:/Users/dev\\project");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("C:/Users/dev\\", "project")
-        );
-        // A drive root has no leaf to keep.
-        let (head, leaf) = split_path_leaf("C:\\");
-        assert_eq!((head.as_str(), leaf.as_str()), ("", "C:\\"));
-        // A UNC path splits at its last component, head keeping the share.
-        let (head, leaf) = split_path_leaf("\\\\server\\share\\dir");
-        assert_eq!(
-            (head.as_str(), leaf.as_str()),
-            ("\\\\server\\share\\", "dir")
         );
     }
 }

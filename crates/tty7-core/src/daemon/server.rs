@@ -101,6 +101,10 @@ impl crate::host::server::PaneDirectory for Registry {
         self.list()
     }
 
+    fn pane_procs(&self, pane_id: u64) -> crate::daemon::protocol::PaneProcs {
+        self.get(pane_id).map(|p| p.procs()).unwrap_or_default()
+    }
+
     fn agent_states(&self) -> Vec<crate::daemon::control::PaneAgentState> {
         let panes: Vec<Arc<DaemonPane>> = self.panes.lock().unwrap().values().cloned().collect();
         let mut states: Vec<_> = panes.iter().filter_map(|p| p.agent_state()).collect();
@@ -339,13 +343,37 @@ pub fn run_daemon() -> anyhow::Result<()> {
             services,
         ) {
             Ok(path) => startup_note!("tty7-server: control socket at {}", path.display()),
-            Err(e) => startup_note!("tty7-server: control listener unavailable: {e}"),
+            // Someone else already answers there. That is the ordinary local
+            // shape: the GUI hosts the control listener and this process was
+            // started only to own the panes. Carry on.
+            //
+            // Ask rather than read the errno. `bind_control_socket` clears an
+            // ordinary leftover socket itself, but a path it cannot clear — a
+            // directory in the way, a file owned by someone else — comes back
+            // `AddrInUse` in the same words a live server does.
+            Err(e) if crate::host::server::control_endpoint_answers() => {
+                startup_note!(
+                    "tty7-server: control listener unavailable ({e}); \
+                     another server is answering there, so serving panes only"
+                );
+            }
+            // Nothing is answering, and this process cannot answer either. Do
+            // not stay alive: a running daemon holds the single-server lock, so
+            // every later `--daemon` stands down at once and every client probe
+            // of the control socket fails, forever. That pair is exactly the
+            // "started but nothing was answering after 15s" a remote install
+            // reports — with the reason, right here, thrown away. Exiting
+            // releases the lock and hands the reason to whoever launched us.
+            Err(e) => {
+                startup_note!("tty7-server: control listener unavailable: {e}");
+                return Err(e.into());
+            }
         }
     }
     #[cfg(not(any(unix, windows)))]
     log::info!("no control listener on this platform; serving panes only");
 
-    run_with(registry)
+    run_with(registry, _seat.is_some())
 }
 
 /// Come up as the far side of a handoff: the panes are already running, and
@@ -413,7 +441,7 @@ fn run_adopting(inheritance: crate::daemon::handoff::Inheritance) -> anyhow::Res
         }
     }
 
-    run_with(registry)
+    run_with(registry, _seat.is_some())
 }
 
 /// Become `exe` in place, keeping every pane that can survive the crossing.
@@ -525,27 +553,13 @@ fn report_conpty_host() {
     }
 }
 
-fn run_with(registry: Arc<Registry>) -> anyhow::Result<()> {
+/// `alone` says this process holds the single-server seat. It decides how the
+/// endpoint left by whoever was here before may be dealt with — see
+/// [`transport::clear_endpoint_before_bind`].
+fn run_with(registry: Arc<Registry>, alone: bool) -> anyhow::Result<()> {
     crate::daemon::control::server_started();
 
-    // A stale daemon.port whose recorded daemon is gone cannot belong to a
-    // live server: skip the probe (which would pay the OS's refusal delay on
-    // the dead port) and let the bind below overwrite the file. A live
-    // recorded daemon still gets the connect — the singleton seat is held by
-    // this process, so it can only be a foreign server worth refusing.
-    if transport::endpoint_exists() && !crate::daemon::spawn::recorded_daemon_is_dead() {
-        match transport::connect() {
-            Ok(_) => {
-                anyhow::bail!(
-                    "daemon already running at {}",
-                    transport::endpoint_display()
-                );
-            }
-            Err(_) => {
-                transport::remove_stale_endpoint();
-            }
-        }
-    }
+    transport::clear_endpoint_before_bind(alone)?;
 
     let listener = transport::bind()?;
     log::info!("daemon listening on {}", transport::endpoint_display());

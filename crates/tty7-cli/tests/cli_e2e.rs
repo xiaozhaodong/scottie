@@ -75,6 +75,18 @@ fn main() {
             "capture_plain_returns_text_not_escapes",
             capture_plain_returns_text_not_escapes,
         ),
+        (
+            "capture_still_answers_after_a_resize",
+            capture_still_answers_after_a_resize,
+        ),
+        (
+            "capture_tail_trims_a_real_panes_answer",
+            capture_tail_trims_a_real_panes_answer,
+        ),
+        (
+            "procs_says_where_the_panes_session_lives",
+            procs_says_where_the_panes_session_lives,
+        ),
     ];
 
     let mut failed = 0;
@@ -216,6 +228,14 @@ impl Daemon {
             .env(DAEMON_ENV, "1")
             .env("TTY7_CONFIG_DIR", dir.path())
             .env("TTY7_DATA_DIR", dir.path())
+            // The shell integration's re-entrancy guard. A test run started
+            // from inside a tty7 pane would otherwise hand it to every pane
+            // this daemon spawns, and each of them would skip its own setup —
+            // no prompt marks anywhere, and any assertion about them green for
+            // the wrong reason. The injection blanks it per pane too; this is
+            // the belt to that's braces, and it also covers the panes the
+            // injection declines to touch.
+            .env_remove("TTY7_SHELL_INTEGRATION")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -396,6 +416,31 @@ fn new_builds_a_workspace_with_a_live_pane(daemon: &Daemon) {
 
     let panes = daemon.run_ok(&["pane", "ls"]);
     assert!(panes.contains(&format!("%{pane}")), "{panes}");
+}
+
+/// `wait --until free` reads freeness off this object, and its whole point is
+/// that a process list alone cannot say whether it covers the pane. A real
+/// daemon, a real pty: the context has to come back filled, and say this
+/// machine holds the pane (#840).
+fn procs_says_where_the_panes_session_lives(daemon: &Daemon) {
+    let created = daemon.run_json(&["new", &workdir()]);
+    let pane = created["pane"].as_u64().expect("new prints the pane id");
+
+    let procs = daemon.run_json(&["procs", &format!("%{pane}")]);
+    let context = &procs["context"];
+    assert!(
+        context.is_object(),
+        "a current server always answers with a context: {procs}"
+    );
+    assert_eq!(
+        context["local_pty"].as_bool(),
+        Some(true),
+        "a pane this daemon spawned itself is backed by a pty here: {procs}"
+    );
+    assert!(
+        context.get("remote").is_none(),
+        "and it is not the near end of anything: {procs}"
+    );
 }
 
 fn tab_close_terminates_every_pane_in_the_tab(daemon: &Daemon) {
@@ -822,6 +867,187 @@ fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
             Instant::now() < deadline,
             "the captures never settled (marker rendered, CRLF in the raw \
              bytes); last plain was:\n{plain}\nlast raw was:\n{raw:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A resize must not empty `capture`.
+///
+/// The daemon's replay ring seals its segment on every resize and opens a new
+/// one at the new geometry, and it replays every segment it holds. The default
+/// form keeps "the newest segment", which on a pane that has printed nothing
+/// since the resize is the empty placeholder — so `capture` answered a live
+/// pane with zero bytes and exit `0`, indistinguishable from a blank one
+/// (#841). Dropping byte-less segments is what fixes that.
+///
+/// What is asserted here is shaped by how much of that is portable. On Unix a
+/// resize raises SIGWINCH and the shell repaints its prompt, so the segment the
+/// resize opened is *not* empty — it holds the repaint, and the newest
+/// non-empty segment is that prompt rather than the one holding the pane's
+/// output. On Windows nothing answers the resize, the segment stays empty, and
+/// the fix reaches back to the output. So "the default form still carries the
+/// marker" is true on one platform and false on the other for reasons that have
+/// nothing to do with the fix, and asserting it would be asserting an accident.
+///
+/// What holds everywhere is the pair the fix actually guarantees: the default
+/// form comes back with bytes rather than with the resize's placeholder, and it
+/// is the end of what `--scrollback` returns — that second one is what would
+/// catch a fix reaching for the wrong segment. The marker itself is pinned
+/// against `--scrollback`, the form that promises to hold it. The segment
+/// picking is pinned exactly, on every platform, by the `what_was_asked_for`
+/// tests in `backend/real.rs`.
+fn capture_still_answers_after_a_resize(daemon: &Daemon) {
+    let mut pane = PaneClient::at(daemon.pane_endpoint())
+        .spawn(
+            None,
+            WinSize {
+                cols: 100,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            None,
+            Some("resize-capture-e2e".into()),
+            None,
+        )
+        .expect("spawn a pane to resize");
+    let address = format!("%{}", pane.pane_id());
+
+    daemon.run_ok(&["send", &address, "echo tty7_e2e_resize_marker", "--enter"]);
+    let deadline = Instant::now() + SETTLE_WITHIN;
+    loop {
+        if daemon
+            .run_ok(&["capture", &address, "--scrollback"])
+            .contains("tty7_e2e_resize_marker")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the marker never reached the pane's replay"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    pane.resize(WinSize {
+        cols: 80,
+        rows: 24,
+        cell_w: 8,
+        cell_h: 16,
+    })
+    .expect("resize the pane");
+
+    // Each capture below is its own call, so a pane still moving would have
+    // them disagree for reasons that are not the fix. Reading the whole ring on
+    // either side of the others and requiring the two readings to match is what
+    // says the pane held still while they were taken.
+    loop {
+        let before = daemon.run_json(&["capture", &address, "--scrollback"]);
+        let newest = daemon.run_json(&["capture", &address]);
+        let plain = daemon.run_ok(&["capture", &address, "--plain", "--scrollback"]);
+        let after = daemon.run_json(&["capture", &address, "--scrollback"]);
+
+        let whole = before["text"].as_str().unwrap_or_default();
+        let newest_text = newest["text"].as_str().unwrap_or_default();
+        let held_still = before["text"] == after["text"]
+            && whole.contains("tty7_e2e_resize_marker")
+            && plain.contains("tty7_e2e_resize_marker");
+        if held_still {
+            assert!(
+                !newest_text.is_empty(),
+                "the default form answered with the empty segment the resize \
+                 opened instead of the newest one holding output: {newest}"
+            );
+            assert!(
+                newest["bytes"].as_u64().is_some_and(|n| n > 0),
+                "a capture that carried text has to report the bytes it \
+                 carried: {newest}"
+            );
+            assert!(
+                whole.ends_with(newest_text),
+                "the newest segment has to be the end of the ring it came from, \
+                 or the default form is answering with some other segment:\n\
+                 newest: {newest_text:?}\nwhole: {whole:?}"
+            );
+            let _ = pane.detach();
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the pane never held still after the resize; last ring was:\n{whole}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// `--tail` against a real pane, whose replay carries a shell prompt, escapes
+/// and CRLF rather than the tidy fixtures the unit tests craft.
+///
+/// The contract is only "the last N lines of what the command would have
+/// printed", so what is pinned is that the tail is the end of the whole answer,
+/// that it holds the marker the pane printed last, and that it dropped the one
+/// the pane printed first — not the exact line count, which depends on how the
+/// test machine's shell decorates its prompt, and on macOS on the zsh banner
+/// the runner's bash prints at startup.
+///
+/// The tail and the whole are separate calls, so they have to be taken while
+/// the pane is holding still or they describe different moments — which is what
+/// made the first version of this test flake on CI, with a tail carrying a
+/// prompt line the whole capture had not caught up to yet. Reading the whole
+/// answer on either side of the tail and requiring the two to match is what
+/// makes the comparison a statement about `--tail`.
+fn capture_tail_trims_a_real_panes_answer(daemon: &Daemon) {
+    let created = daemon.run_json(&["new", &workdir()]);
+    let pane = created["pane"].as_u64().expect("new prints the pane id");
+    let address = format!("%{pane}");
+
+    for n in 1..=6 {
+        let line = format!("echo tty7_e2e_tail_line_{n}");
+        daemon.run_ok(&["send", &address, &line, "--enter"]);
+    }
+
+    let deadline = Instant::now() + SETTLE_WITHIN;
+    loop {
+        let before = daemon.run_ok(&["capture", &address, "--plain", "--scrollback"]);
+        let tail = daemon.run_json(&[
+            "capture",
+            &address,
+            "--plain",
+            "--scrollback",
+            "--tail",
+            "2",
+        ]);
+        let after = daemon.run_ok(&["capture", &address, "--plain", "--scrollback"]);
+
+        let tail_text = tail["text"].as_str().unwrap_or_default();
+        let settled = before == after
+            && before.contains("tty7_e2e_tail_line_1")
+            && before.contains("tty7_e2e_tail_line_6")
+            && tail_text.contains("tty7_e2e_tail_line_6");
+        if settled {
+            assert!(
+                before.trim_end().ends_with(tail_text.trim_end()),
+                "a tail has to be the end of the answer it was cut from:\n\
+                 tail: {tail_text:?}\nwhole: {before:?}"
+            );
+            assert!(
+                !tail_text.contains("tty7_e2e_tail_line_1"),
+                "two lines cannot still hold the first of six:\n{tail_text:?}"
+            );
+            // The byte count stays the size of the replay, not of the tail —
+            // that is what says a tail was taken rather than a short capture.
+            assert!(
+                tail["bytes"]
+                    .as_u64()
+                    .is_some_and(|n| n as usize > tail_text.len()),
+                "--tail must not shrink the reported replay size: {tail}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the six echoes never settled; last capture was:\n{before}"
         );
         std::thread::sleep(Duration::from_millis(200));
     }

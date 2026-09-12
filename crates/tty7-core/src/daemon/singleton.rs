@@ -205,6 +205,19 @@ pub fn holder_pid() -> Option<u32> {
 /// colliding with it is told `Taken` — accepted for the same reason: every
 /// caller is a reap that has just confirmed the seat's holder dead, and a
 /// spawn follows on each of those paths.
+///
+/// It waits [`SEAT_RELEASE_GRACE`] for the seat rather than reading one
+/// `EWOULDBLOCK` as "still held", because a seat whose holder has just died is
+/// not free the same instant the reap sees the death. The kernel releases the
+/// lock while tearing the process down, and any descriptor a `fork` in that
+/// process left behind — every `Command::spawn` duplicates them, and BSD
+/// `flock` counts an inherited descriptor as another reference to the one lock
+/// rather than a second lock — keeps it referenced until that child execs.
+/// Giving up on the first refusal left the dead holder's pid in the file for
+/// good: nothing revisits it, and the next pre-recording build to hold the
+/// seat would make that number — by then possibly reused — read as the holder.
+/// The same patience `a_reference_a_forking_neighbour_left_behind_does_not_lose_the_seat`
+/// records for the claim side.
 #[cfg(unix)]
 pub fn clear_record_if_free() {
     use std::os::unix::io::AsRawFd as _;
@@ -213,6 +226,7 @@ pub fn clear_record_if_free() {
     let Ok(file) = File::options().write(true).open(&path) else {
         return;
     };
+    let deadline = std::time::Instant::now() + SEAT_RELEASE_GRACE;
     loop {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
             let _ = file.set_len(0);
@@ -221,10 +235,24 @@ pub fn clear_record_if_free() {
         }
         match std::io::Error::last_os_error().raw_os_error() {
             Some(libc::EINTR) => continue,
+            // A live holder that outlasts the grace keeps its record, which is
+            // the whole point of asking the kernel rather than the caller.
+            Some(libc::EWOULDBLOCK) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(RETRY_INTERVAL);
+            }
             _ => return,
         }
     }
 }
+
+/// How long the seat gets to come back after its holder was confirmed dead.
+/// Long enough for a teardown and a neighbour's `fork`/`exec` window, short
+/// enough to sit on a reap path that runs before the first window exists.
+#[cfg(unix)]
+const SEAT_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(unix)]
+const RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 #[cfg(not(unix))]
 pub fn clear_record_if_free() {}
@@ -468,6 +496,40 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// The reap's half of the patience the claim side already has: a seat
+    /// whose holder has just been killed is not free the same instant the
+    /// reap sees the death, and one refusal used to end the attempt for good
+    /// — nothing revisits the file, so the dead holder's pid stayed in it.
+    ///
+    /// The 50ms reference here is what a `Command::spawn` on another thread
+    /// does between `fork` and `exec`, done deterministically; a real teardown
+    /// spends the same kind of moment releasing the descriptor.
+    #[cfg(unix)]
+    #[test]
+    fn clearing_the_record_waits_out_a_seat_that_is_about_to_come_back() {
+        let (dir, _guard) = pin_dir("clear-waits");
+        let path = dir.join("daemon.lock");
+        let seat = match claim_within(PATIENCE) {
+            Claim::Held(s) => s,
+            other => panic!("the claim must be granted, got {other:?}"),
+        };
+        let inherited = unsafe { libc::dup(held_fd().expect("the seat records its descriptor")) };
+        assert!(inherited >= 0, "dup the seat descriptor");
+        drop(seat);
+        let released = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            unsafe { libc::close(inherited) };
+        });
+        // One call, no retry loop of its own: waiting is the function's job.
+        clear_record_if_free();
+        let cleared = std::fs::read_to_string(&path).unwrap();
+        released.join().expect("the reference is let go");
+        assert_eq!(
+            cleared, "",
+            "a record whose seat comes back within the grace must be cleared"
+        );
     }
 
     #[test]

@@ -780,6 +780,16 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // give primary buttons, and the thumb to `primary_foreground`, which on a
     // dark theme is a black disc on a dark page. Side by side on one settings
     // page the two controls disagreed about what a set value looks like.
+    //
+    // Both were tried on `primary` — the neutral ramp the segmented controls
+    // and the sidebar's selected page are drawn from — to settle a complaint
+    // that the accent pills were the only saturated things on a screen of
+    // greys. Reverted on sight: a dark-grey "on" against a light-grey "off" is
+    // not a large enough step to read at a glance down a column of rows, and a
+    // switch whose state you have to look twice at has lost the one job it has.
+    // If the mismatch with the segmented controls is worth closing, it has to
+    // close from the other end — by giving *them* some accent — not by taking
+    // it away from here.
     t.tokens.slider_bar = Hsla::from(rgb(m.accent)).into();
     t.tokens.slider_thumb = Hsla::from(rgb(knob)).into();
 
@@ -806,6 +816,18 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 
     t.radius = px(8.);
 
+    // Flat controls, floating panels. `Theme::shadow` gates exactly one thing —
+    // the `shadow_xs` an inline control (button, input, select trigger,
+    // checkbox, radio, slider knob) paints under itself — and never the drop
+    // shadow on a menu, tooltip or popover, which every one of those draws
+    // unconditionally. Left on, every field and button in the window carried a
+    // faint lift that nothing else here has: this chrome separates surfaces with
+    // low-contrast fills and hairlines, so a control sitting a millimetre above
+    // the panel was the one place claiming depth, and it read as a rendering
+    // artefact rather than as a material. Panels that really do float keep
+    // their shadow.
+    t.shadow = false;
+
     let sidebar_bg = Hsla::from(rgb(m.sidebar));
     let sidebar_sel = rgb(surfaces.sidebar.selected);
     // `t.sidebar` stays the opaque theme token: the settings theme picker
@@ -815,7 +837,9 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // see `workspace_surface_color`.
     t.sidebar = sidebar_bg.into();
     t.tokens.sidebar = sidebar_bg.into();
-    t.sidebar_border = rgb(m.border).into();
+    // The lighter tier: every `sidebar_border` site is a pane meeting another
+    // pane, and both already carry their own fill. See `Neutrals`.
+    t.sidebar_border = rgb(m.divider).into();
     t.sidebar_foreground = rgb(surfaces.sidebar.text_resting).into();
     t.sidebar_accent = sidebar_sel.into();
     t.tokens.sidebar_accent = Hsla::from(sidebar_sel).into();
@@ -879,6 +903,14 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
+/// Every switch in the window, built here so the on-state has one definition.
+///
+/// The accent is load-bearing, not decoration. Without `.color()` a switch's
+/// on-state falls to `tokens.primary`, a dark neutral, and against the light
+/// neutral of the off-state that is too small a step to read while scanning a
+/// column of rows — you end up checking the thumb's position on each one. It
+/// was tried that way and reverted; see the slider-bar note in `apply_theme`
+/// for the other half of the pair.
 pub(crate) fn switch(id: impl Into<gpui::ElementId>, cx: &App) -> gpui_component::switch::Switch {
     let accent = cx.global::<presets::ActiveAccent>().0;
     gpui_component::switch::Switch::new(id).color(Hsla::from(rgb(accent)))

@@ -394,7 +394,10 @@ impl Tty7App {
         self.sftp_panel.open_pane_id = None;
         self.sftp_panel.entries.clear();
         self.sftp_panel.error = None;
-        self.sftp_close_edit();
+        // No `Window` here, and none needed: the browser itself is going away
+        // or being re-pointed at another pane, so focus is settled by whoever
+        // did that, not by the form.
+        let _ = self.sftp_close_edit();
         self.sftp_panel.editing_path = None;
         self.sftp_panel.editing_path_sub.clear();
         self.sftp_panel.jobs.clear();
@@ -431,7 +434,10 @@ impl Tty7App {
         self.sftp_panel.open_workspace = self.pane_workspace(pane_id, window, cx);
         self.sftp_panel.entries.clear();
         self.sftp_panel.error = None;
-        self.sftp_close_edit();
+        // No `Window` here, and none needed: the browser itself is going away
+        // or being re-pointed at another pane, so focus is settled by whoever
+        // did that, not by the form.
+        let _ = self.sftp_close_edit();
         self.sftp_panel.editing_path = None;
         self.sftp_panel.editing_path_sub.clear();
         self.sftp_panel.show_history = false;
@@ -705,7 +711,7 @@ impl Tty7App {
         );
         cx.spawn_in(window, async move |this, cx| {
             let Ok(0) = answer.await else { return };
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.sftp_panel.open_pane_id != Some(pane_id) {
                     return;
                 }
@@ -713,7 +719,7 @@ impl Tty7App {
                     true => SftpOp::RemoveDir { path },
                     false => SftpOp::RemoveFile { path },
                 };
-                this.sftp_run_op(pane_id, op, cx);
+                this.sftp_run_op(pane_id, op, window, cx);
             });
         })
         .detach();
@@ -759,11 +765,19 @@ impl Tty7App {
         .detach();
     }
 
-    fn sftp_run_op(&mut self, pane_id: u64, op: SftpOp, cx: &mut Context<Self>) {
+    /// Takes a `Window` only so the success arm can hand the focus back: the
+    /// form is still up, still holding the caret, while the far side works.
+    fn sftp_run_op(
+        &mut self,
+        pane_id: u64,
+        op: SftpOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let route = self.sftp_route();
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_spawn(async move { route.op(op) }).await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 if this.sftp_panel.open_pane_id != Some(pane_id) {
                     return;
                 }
@@ -773,7 +787,7 @@ impl Tty7App {
                         cx.notify();
                     }
                     _ => {
-                        this.sftp_close_edit();
+                        this.sftp_close_edit_in(window, cx);
                         this.sftp_refresh(cx);
                     }
                 }
@@ -798,8 +812,8 @@ impl Tty7App {
         let sub = cx.subscribe_in(
             &input,
             window,
-            |this, _input, ev: &InputEvent, _window, cx| match ev {
-                InputEvent::PressEnter { .. } => this.sftp_commit_edit(cx),
+            |this, _input, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.sftp_commit_edit(window, cx),
                 // OK is disabled while the box is empty, so the form has to
                 // redraw as the name is typed.
                 InputEvent::Change => cx.notify(),
@@ -862,17 +876,36 @@ impl Tty7App {
     /// Takes the form down and drops the subscription that was listening to
     /// its box. The two travel together — a live subscription on a box nothing
     /// is showing would answer Return for a form that is gone.
-    fn sftp_close_edit(&mut self) {
+    ///
+    /// Reports whether a form was actually up, because the box owned the focus
+    /// and whoever tore it down has to hand the focus back. It did not, so
+    /// naming a folder and then pressing Escape left the focus on an element
+    /// that no longer existed and the next keystroke went nowhere until you
+    /// clicked. `ssh_prompt` asserts in a comment *and* a test that every
+    /// overlay in the app hands focus back on the way out; these four forms
+    /// were the counterexample.
+    #[must_use]
+    fn sftp_close_edit(&mut self) -> bool {
+        let was_open = self.sftp_panel.editing.is_some();
         self.sftp_panel.editing = None;
         self.sftp_panel.editing_sub.clear();
+        was_open
     }
 
-    pub(crate) fn sftp_cancel_edit(&mut self, cx: &mut Context<Self>) {
-        self.sftp_close_edit();
+    /// `sftp_close_edit` plus the focus hand-back, for the callers that have a
+    /// `Window` to hand it back with.
+    fn sftp_close_edit_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sftp_close_edit() {
+            self.focus_active(window, cx);
+        }
+    }
+
+    pub(crate) fn sftp_cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sftp_close_edit_in(window, cx);
         cx.notify();
     }
 
-    pub(crate) fn sftp_commit_edit(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sftp_commit_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pane_id) = self.sftp_panel.open_pane_id else {
             return;
         };
@@ -898,7 +931,7 @@ impl Tty7App {
             Some(SftpEdit::Rename { original, input }) => {
                 let name = input.read(cx).value().trim().to_string();
                 if name.is_empty() || name == *original {
-                    self.sftp_close_edit();
+                    self.sftp_close_edit_in(window, cx);
                     cx.notify();
                     return;
                 }
@@ -924,7 +957,7 @@ impl Tty7App {
             None => None,
         };
         if let Some(op) = op {
-            self.sftp_run_op(pane_id, op, cx);
+            self.sftp_run_op(pane_id, op, window, cx);
         }
     }
 
@@ -1386,9 +1419,9 @@ impl Tty7App {
                 .rounded_md()
                 // Escape backs out of the form, the way it backs out of the
                 // path editor above it and every sheet the app puts up.
-                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                     if ev.keystroke.key == "escape" {
-                        this.sftp_cancel_edit(cx);
+                        this.sftp_cancel_edit(window, cx);
                     }
                 }))
                 .child(
@@ -1408,7 +1441,9 @@ impl Tty7App {
                                 .label(t(L10nKey::Cancel))
                                 .ghost()
                                 .xsmall()
-                                .on_click(cx.listener(|this, _, _w, cx| this.sftp_cancel_edit(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, w, cx| this.sftp_cancel_edit(w, cx)),
+                                ),
                         )
                         .child(
                             Button::new("sftp-edit-ok")
@@ -1416,7 +1451,9 @@ impl Tty7App {
                                 .xsmall()
                                 .primary()
                                 .disabled(!can_commit)
-                                .on_click(cx.listener(|this, _, _w, cx| this.sftp_commit_edit(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, w, cx| this.sftp_commit_edit(w, cx)),
+                                ),
                         ),
                 ),
         )
@@ -2198,10 +2235,12 @@ mod tests {
 
 #[cfg(test)]
 mod gpui_tests {
+    use super::SftpEdit;
     use crate::core::config::{Config, RightPanelTab};
     use crate::core::session::Session;
     use crate::ui::app::Tty7App;
-    use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
+    use gpui::{AppContext, Entity, Focusable as _, TestAppContext, VisualTestContext};
+    use gpui_component::input::InputState;
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty7App>, VisualTestContext) {
         cx.executor().allow_parking();
@@ -2233,6 +2272,47 @@ mod gpui_tests {
             let app = app.read(cx);
             (app.right_panel_visible, app.right_panel_tab)
         })
+    }
+
+    /// The edit box owns the focus while the form is up, so taking the form
+    /// down has to hand the focus back.
+    ///
+    /// It did not. Naming a new folder and then pressing Escape left the caret
+    /// on an element that had stopped rendering, and the next keystroke went
+    /// nowhere until you clicked. `ssh_prompt` asserts in a comment *and* a
+    /// test that every overlay in the app hands focus back on the way out;
+    /// these four forms were the counterexample, and `sftp_cancel_edit` could
+    /// not have done it anyway — it took no `Window` at all.
+    #[gpui::test]
+    fn cancelling_the_edit_form_hands_focus_back(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+
+        let box_focus = app.update_in(&mut vcx, |app, window, cx| {
+            let input = cx.new(|cx| InputState::new(window, cx));
+            input.update(cx, |s, cx| s.focus(window, cx));
+            let handle = input.read(cx).focus_handle(cx);
+            app.sftp_panel.editing = Some(SftpEdit::NewFolder(input));
+            handle
+        });
+        vcx.run_until_parked();
+
+        // Sanity: the box holds focus while the form is up.
+        assert!(
+            app.update_in(&mut vcx, |_, window, _| box_focus.is_focused(window)),
+            "the box should hold focus while the form is up"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| app.sftp_cancel_edit(window, cx));
+        vcx.run_until_parked();
+
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.sftp_panel.editing.is_none()),
+            "the form is down"
+        );
+        assert!(
+            !app.update_in(&mut vcx, |_, window, _| box_focus.is_focused(window)),
+            "the focus the box held must have gone somewhere still on screen"
+        );
     }
 
     #[gpui::test]

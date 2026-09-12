@@ -622,6 +622,33 @@ async fn drive(local: Stream, header: &RouteHeader) -> io::Result<()> {
         log::info!("wsl:{distro}: the bridge closed without answering; proving it again next time");
         crate::daemon::install::wsl::forget_wsl_server(distro);
     }
+    // The same reasoning over SSH, where the note is the one this connection's
+    // probe left behind. `exec` on a session channel succeeds whatever the
+    // command turns out to be, so a server binary that has been deleted or
+    // moved since the probe proved it is discovered exactly here, by a link
+    // that opened and then said nothing. Forget it and the next pane on this
+    // connection pays for a fresh probe once; leave it and every pane on the
+    // connection repeats the same silent failure.
+    if let (RouteTarget::Ssh(_), Some(conn)) = (&header.target, conn.as_ref())
+        && header.server_command.is_none()
+        && !copied
+            .as_ref()
+            .is_ok_and(|(_, from_remote)| *from_remote > 0)
+    {
+        log::info!(
+            "ssh {}: the routed link closed without answering; proving the server again next time",
+            conn.key().as_str(),
+        );
+        // Off this thread, which is the one polling the route: the note's lock
+        // is also the connection's install gate, so a pane that is mid-probe or
+        // a replace that is mid-upload holds it for as long as that takes, and
+        // waiting here would keep the client's half of a link that is already
+        // gone open for the same span. Landing after whatever holds it is right
+        // either way — a note written by a probe that started before this link
+        // failed is exactly as suspect as the one it replaced.
+        let conn = conn.clone();
+        tokio::task::spawn_blocking(move || crate::daemon::install::forget_remote_server(&conn));
+    }
 
     let (to_remote, to_local) = copied?;
     log::debug!("routed connection closed after {to_remote} up / {to_local} down bytes");

@@ -7,6 +7,364 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Synced with upstream tty7 through v26.9.2 (`l0ng-ai/tty7@66c42e4`). Scottie keeps the Info panel's CONVERSATION outline, which upstream removed in that range. Upstream's own notes follow, grouped by their release._
+
+### Upstream 26.9.2 (2026-09-10)
+
+#### Added
+
+- **A path is read out of the prose glued around it.** File detection used to
+  take the whitespace-delimited token under the cursor, peel a bracket off each
+  end and hope, which everything a build tool writes onto a path defeated:
+  `--file=src/main.rs`, `note:src/x.rs`, a diff's `a/`, `ls -F`'s `src@`, a tree
+  glyph with no space behind it. It is now a short ordered ladder of readings —
+  left cuts name the prefixes that actually occur and stack against each other,
+  right cuts trim sentence punctuation balanced-aware so `report(1).pdf`
+  survives, and at most eight readings are tried per token. Location parsing
+  grows `app.ts(10,2)` and `main.rs#L10` beside `:10:2`, and a path carrying no
+  line number of its own takes one from beside it, so `File "handlers.py", line
+  214` lands on the line rather than the top of the file. Hovering no longer
+  needs the modifier: a resolved link underlines at 45% as soon as the pointer
+  reaches it and only turns solid with a hand cursor once the modifier is down.
+  Right-clicking a path opens a menu about that path — open, show in the file
+  manager, copy path — and a file the built-in editor cannot read is handed to
+  the desktop instead of refused.
+
+- **A tab can be put in a sidebar group by hand.** Groups were derived and
+  nothing else: the sidebar read a tab's cwd and filed it under the repo it
+  found, so tabs that belong together for a reason the cwd cannot see — a few
+  ssh sessions, three forks of one project, the two panes an investigation is
+  spread across — had no way to sit together. A tab now moves into a named group
+  from its context menu, and a stated group is never recomputed, so the probe no
+  longer drags a hand-placed tab home on the next frame. Dragging a tab onto a
+  custom group moves it there as well; a lifted tab fades every block that
+  cannot take it, since a repo group's membership is decided by its tabs' cwds
+  and "put this tab in tty7" is not a request the sidebar can honour honestly.
+  Custom headers carry an asterisk, renaming rewrites every tab in the group in
+  one pass, and "Group Automatically" gives a tab back to the probe.
+
+- **Sidebar groups fold** (#804). A group folds shut when its header is clicked
+  and stays shut across launches. A live search outranks the fold — a row a
+  query matches shows whatever its group says. Folded rows register no
+  rectangle, so a pane cannot be dropped into a group that is shut, and the
+  header still counts every row the group has.
+
+- **A remote pane's listening ports are detected and forwarded** (#787 for
+  Windows). A remote workspace's ports were never listed: the pane lives in the
+  peer's registry and the query went to this machine's daemon, which has never
+  heard of it, so the answer was an empty list — indistinguishable on screen
+  from a pane serving nothing. The peer answers now, gated on a feature so an
+  older server says "I cannot tell you" rather than "nothing is listening". With
+  the ports visible the forward stops being something to think about: a port
+  opens on a click and a new one is forwarded unasked, at the same number where
+  that number is free here. Ports and Forwards were two sections that never
+  mentioned each other; a row is now a port, and the forward is where that row
+  says it comes out.
+
+- **tty7 can be the system's default terminal on macOS** (by @ayamir in #818).
+  LaunchServices hands `ssh:`, `x-man-page:` and script opens to tty7. The URL's
+  authority is read off the parsed URL rather than through Quick Connect's
+  `user@host:port` reader, so a port, a path and percent escapes all survive;
+  `x-man-page://3/printf` carries its section; and an external open that arrives
+  while a window is still pulling its layout is parked rather than inserted,
+  which is what used to turn a single tab into the whole workspace.
+
+- **A bindable Close Window action** (by @bytehello in #778, reported by
+  @rrpolanco in #773). 26.9.0's tray-retire model made closing the last window
+  the "keep the daemon, drop the UI process weight" gesture, but that path was
+  reachable only from the OS red close button. `CloseWindow` is that action, with
+  no default key. The decision behind a window close — detach the workspace, and
+  on the last window retire to the tray if an icon is actually up, otherwise quit
+  — moves out of the close handler so the button and the action share it. In the
+  palette it sits beside Quit, because that pair is the point: both end the
+  window in front of you and only one takes your shells with it.
+
+- **Opening a new window is a bindable action** (#793, from @jerryokk's #710).
+  Registered globally as well as on the render root, since with the tray icon on
+  — the default — closing the last window retires to the tray and leaves no
+  window to dispatch it.
+
+- **The pointer can take a range of diff lines and copy it** (#794, requested by
+  @LittleSource in #721). The selection is keyed on the row's file and id rather
+  than a flat list index, so collapsing a file above the selection does not
+  re-point it.
+
+- **A titleless tab is named after its working directory** (#792, requested by
+  @rrpolanco in #740).
+
+- **The tab whose pane is zoomed says so** (#782, reported by @rrpolanco in
+  #752).
+
+- **The host behind a connected tab can be edited from it** (#801, from
+  @junyi-deep's #438).
+
+- **TraeCode CLI support** (by @ayamir in #807).
+
+#### Changed
+
+- **The sidebar has a text hierarchy, and colour is on state.** Every line sat
+  at the same 4.5:1 grey — tab title, branch line, group header, search
+  placeholder — so the only things that stood out were twelve identical agent
+  discs and twelve copies of the same `+94 −26`, neither of which says which tab
+  matters. Titles rise to a 7:1 floor with a cap that keeps the selected label
+  its step above the rest; captions stay resting. The rail gets its own
+  selection ladder, leaving the window's signed-off rung untouched. Diff counts
+  render in a resting ink — same hue, blended toward the caption, walked back to
+  the 4.5 floor where needed. A group whose rows all share one branch and diff
+  says so once on its header, and rows with no status yet do not vote, so ⌘T no
+  longer flips the group twice while the poll comes back. The workspace switcher
+  card takes the same treatment: badges become words in the caption ink, only
+  "taken over" keeps its warning colour, and the keyboard cursor takes the rung
+  the ladder set aside for it instead of sitting one step under a hovered row.
+
+- **The window's buttons show only under the pointer.** The new-tab, sidebar,
+  right-panel and app-menu tiles were on screen at all times, so a window
+  resting at the edge of the eye carried four buttons nobody was reaching for.
+  Each group now paints only while the pointer is over the bar it belongs to.
+  The window mark beside them stays put — it identifies the window rather than
+  doing anything. The tiles keep their place in the layout and only lose their
+  paint, so revealing a group never shifts what is beside it. With the detail
+  panel open the strip's two tiles stay drawn, because they then stand over the
+  panel's own header, whose tab tiles are painted whenever the panel is.
+
+- **The inline controls are flat, and a tooltip's chord looks like a chord**
+  (#803). Every field and button carried a faint lift that nothing else here
+  has; this chrome separates surfaces with low-contrast fills and hairlines, so
+  a control sitting a millimetre above the panel was the one place claiming
+  depth. Panels that really do float keep their shadow. A chrome tile's shortcut
+  now goes in the tooltip's own key-binding slot — set apart on the right, a
+  size down, in the caption ink — instead of being pasted into the label to read
+  as one odd sentence. Settings gets one field width at 260px rather than three
+  picked where they were written, and the Program row's shell picker stops
+  drawing a fill that met the field's border top and bottom and looked like a
+  patch stuck over its right end.
+
+- **The right panel's title row keeps its tiles and underlines the current
+  tab.** The row hid its two trailing tiles until the pointer entered it while
+  the three tab tiles beside them were always drawn — a row that grew two
+  buttons on hover. The current tab is said with a bar under the glyph rather
+  than a fill, because the fill was the same grey the hover state paints, so the
+  lit tab and the tile under the pointer read as the same thing.
+
+- **A pane's frame is never queued behind the grid lock.** One UI thread paints
+  every pane in every window, and the thread holding the grid lock is the pane's
+  own reader part-way through feeding a batch of output into the emulator, so
+  waiting for it wired one pane's write speed to the frame rate of the whole
+  window. A frame that cannot have the lock paints the one before it instead —
+  unfair rather than queued on purpose, since a painter that queued would make
+  the reader wait for a frame it is not going to get anyway. Each pane therefore
+  owns its own cell buffer rather than sharing one scratch buffer, and the
+  keyboard context and selection flag read frame-cached copies rather than
+  locking once per caller.
+
+- **The diff overlay draws its patch as a virtualised row list** (#799). The
+  overlay built its whole patch as a nested element tree on every frame — a card
+  per file, a header per hunk, six elements per line — so a few hundred lines of
+  diff rebuilt tens of thousands of elements tens of times a second and the
+  window stalled. It is one row per line now, built only for the rows on screen,
+  and a change to one file splices just the rows it touched rather than resetting
+  the list and losing the scroll position. The rows below the fold are counted at
+  the 19px both views already give a line of a patch, so the scrollbar stops
+  reading an 800-line patch as one viewport. The cards cannot survive that
+  flattening, so the rows take the source control panel's own measurements
+  instead of gpui-component's default container language.
+
+- **A frame's header and payload go on the wire in one write** (#797, from
+  @ivydt08's #713).
+
+- **A directional pane move remembers where it came from per pane, not per
+  direction** (#781, reported by @rrpolanco in #738). The per-direction array
+  meant a two-step walk clobbered the first step, so Left, Left, Right, Right
+  ended in the wrong pane.
+
+#### Fixed
+
+- **A line the shell is still holding is submitted as itself** (#800, from
+  @junyi-deep's #433). The held seed is adopted at the editor's own doors rather
+  than at submit time, so a recalled history entry, a ctrl-U, a ghost suggestion
+  or a completion is no longer glued to the front of the gap text. It also
+  closes a paste-provenance hole: releasing a hold pushed its contents into the
+  typeahead record as plain text, dropping the paste mark, so a paste made
+  during a gap that outlived the hold window came back looking typed and was
+  submitted raw through the shell's binding table.
+
+- **A plain single line is submitted as typed, not as a paste** (#790, reported
+  by @failable in #660).
+
+- **A pane notices it came home from ssh without waiting for output.** The probe
+  that clears a pane's remote context only runs when the reader has bytes in
+  hand, and the prompt a shell draws after a command is the last output a pane
+  produces until the user types again — so an `ssh` that exited inside the poll
+  interval left the pane reporting itself as remote indefinitely. Most visibly ↑
+  read the remote history list, which for a host with no history of its own is
+  empty, so ↑ appeared dead until some unrelated output arrived. A prompt mark
+  that survives the foreground suppression is the shell saying the command is
+  over, so the probe runs right then. Switching history scopes also dropped the
+  list it was leaving; each scope's list is parked now, capped at four.
+
+- **macOS notifications stop polling Notification Center from the UI thread.**
+  The crate behind them noticed a click by parking the sending thread and adding,
+  per outstanding notification, a repeating half-second timer on the main run
+  loop that made a synchronous XPC round trip. A banner nobody clicks stays in
+  Notification Center, so its timer never went away: sampled with nine
+  outstanding, a fifth of the UI thread was inside that XPC and every window
+  juddered. The click now arrives through a delegate of our own and nothing runs
+  on the main thread until the user clicks. The identifier carries the pid too,
+  so a banner left over from a previous run reveals nothing.
+
+- **A ligated run stands over its own cells** (#785, reported by @rrpolanco in
+  #751), and every ligature feature is named off rather than just `calt` (#788).
+
+- **A solo glyph stays inside its cell when the next one is taken** (#783).
+
+- **A shift-punctuation chord folds into the key the platform reports** (#784,
+  reported by @rrpolanco in #750). Only half fixed: the US glyph table means
+  secondary-shift-`]`/`[` stay unpressable on German, French and Nordic layouts.
+  The control-code guard runs over the folded spelling too, so ctrl-shift-2 no
+  longer installs ctrl-@ beside it.
+
+- **A machine whose profile is gone is named, not spelled as a UUID** (#786,
+  reported by @shihuaidexianyu in #485).
+
+- **A repository is keyed by one spelling of its root** (#796).
+
+- **A pane's paths are read in its own host's spelling** (#795).
+
+- **The pointer can finish a Ctrl+Tab gesture the keyboard started.** Letting go
+  of Ctrl over the workspace list slammed the panel shut and picked a tab, so
+  switching workspaces by hand — the thing the pointer was on its way to do —
+  was unreachable. A release with the pointer on the card but off the tab column
+  now drops the hold and leaves the panel up; over the tab column it still
+  commits. Two macOS consequences of holding Ctrl go with it: the search box no
+  longer answers a mid-gesture click with Cut/Copy/Paste, and a tab row picked
+  with the mouse arrives on the right button.
+
+- **A dismissing click is spent on the dismissal.** The switcher's scrim covers
+  the whole window, the tile that opens it included, and its mouse-down closed
+  the switcher and then carried on down to whatever sat beneath — for that tile,
+  straight back into the toggle that reopened it, so clicking it a second time
+  looked like it did nothing.
+
+- **The workspace tile answers a hover.** Its only hover state was a fill the
+  palette derives one step off the surface, which on the rail is barely a change
+  at all, and the name, the monogram and the chevron each pinned their own ink,
+  so the button's hover never reached them. The text steps up to full strength
+  now, the way a group header's does.
+
+- **An untouched rename box no longer names the tab** (by @hhdebb in #849,
+  reported in #848). The box opens holding the tab's label as rendered, so it is
+  never empty, and it commits on blur as readily as on Enter — so opening it and
+  clicking away stored that label as the tab's name, which stops following the
+  pane. The box is read against what it was seeded with; an emptied box still
+  clears the name, which is the only way to give a tab back to its pane.
+
+- **An agent's status dot sits outside its disc** (by @hhdebb in #846, reported
+  in #845). The dot places itself with negative offsets so it overhangs the
+  avatar's edge, but it was a child of the element carrying the radius, so
+  everything past the circle was clipped along the arc and the badge came back
+  as a crescent.
+
+- **A long branch no longer eats a group's name.** A header handed its overflow
+  to the name and the branch by flex shrink, which splits it in proportion to
+  what each asked for — so the longer string took the smaller cut and a heading
+  came out as `DEL…` beside thirty characters of branch. The branch takes what
+  it wants up to half the line, the name keeps the rest above a floor, and each
+  is elided into its own share. A group of one row lifts its branch onto the
+  header too (#836), and outside a repo a row's working directory rides on the
+  title's line rather than growing a second one (#851).
+
+- **A folded sidebar group hides its active row too** (#806). A fold left the
+  active tab's row on screen, so folding the group you are working in drew a
+  shut chevron with one row hanging under it and a header counting rows that
+  were not there.
+
+- **A custom group stays out of the workspace subject path.** The window titles
+  itself after the last component of the group most of its tabs are in, and a
+  custom group is a name rather than a path, so a hand-grouped workspace would
+  have been titled `custom:work` and one grouped as `work/urgent` chopped to
+  `urgent`.
+
+- **The agent disc is painted solid again.** The resting tint from the hierarchy
+  work read as a disabled tab rather than a quieter one: a column of 16% discs
+  looked like a list of agents that had been switched off, and the brand hue is
+  how the eye tells a Claude row from a Codex row before it reads either title.
+
+- **An agent's mark has one colour, not one per draw site.** The tab strip and
+  the tray icon each decided it on their own, so TraeCode came out green on a
+  tab and white in the tray. The colour lives on the agent now and both sites
+  read it.
+
+- **The floating notices stack, and the forms have their keyboard back.** The
+  remote input notice and the ssh status strip both placed themselves at the
+  same spot, so a remote workspace whose ssh link had also dropped drew them on
+  top of each other; the anchor is a column now. The managed port-forward form
+  had no keyboard contract at all — no Return, no Escape, and it opened cold.
+  The four sftp edit forms took the focus into a box they owned and dropped the
+  box without handing it back, so naming a folder and pressing Escape left the
+  caret on an element that had stopped rendering. And `Override` on the
+  changed-host-key sheet — the one control that can accept a key that no longer
+  matches — carried no colour at all; it greys until "yes" is typed and then
+  goes red.
+
+- **The right panel's tab underline reaches the rule that closes the row** on
+  Windows and Linux, where the wrapper around the tiles is only as tall as a
+  glyph, so the bar floated a few pixels above the line.
+
+- **A seat that is coming back is waited for during a reap.** A seat is not free
+  the same instant its holder is confirmed dead: the kernel releases the lock
+  while tearing the process down, and a descriptor a `fork` left behind holds it
+  a moment longer. One `EWOULDBLOCK` used to end the attempt and nothing ever
+  revisited the file, so a dead pid stayed in it for good.
+
+- **The Ports panel names the right machine.** Its fallback said "This machine's
+  tty7-server is too old", which reads as the local one; the server that cannot
+  answer is the far side's.
+
+- **Turning off mouse reporting says what it costs** (#780).
+
+- **The lockfile edges #799's merge walked back are restored** (#802). The merge
+  re-resolved `Cargo.lock` and pointed twenty consumers at older copies of
+  dependencies already in the tree. No `version =` line moved, so the change was
+  invisible to the usual scan of a lockfile diff.
+
+### Upstream 26.9.1 (2026-09-07)
+
+#### Fixed
+
+- **A remote server that will not start now says why** (#774). A remote
+  workspace could sit in a loop nobody could get out of: every reconnect failed
+  with "started but nothing was answering on the control socket after 15s", the
+  strip showed a copy bar frozen at 100%, and no button was offered. A daemon
+  whose control listener would not open logged one line and kept running — and a
+  running daemon holds the single-server lock, so every later start stood down
+  at once and every probe failed, forever. Whether something else is serving is
+  now settled by connecting rather than by reading the errno, and a daemon that
+  cannot listen exits. The reason is kept too: the remote daemon's output and
+  exit status land beside the binary, stamped with the launch's own nonce so a
+  restart never reads the outgoing daemon's status as the incoming one's, and a
+  start that has already failed no longer waits out the full timeout. On the
+  window side, an automatic reconnect retires its install progress instead of
+  drawing an install still in flight, and a long error no longer stretches the
+  status card past the window and takes the retry button off screen with it.
+
+- **A stale pane socket no longer stops every later daemon** (#779). A daemon
+  that died without unlinking its Unix socket left a file `bind` refuses, so the
+  client launched a daemon, it exited on the bind, and the client launched
+  another — forever. The removal is now decided by the single-server seat rather
+  than the pidfile: holding the seat means nobody else can be serving that config
+  dir, so anything still at the endpoint belongs to a process that is gone.
+  Where there is no seat, a socket that answers is refused rather than removed.
+
+#### Changed
+
+- **The control dialect is v9.** v8 added the project verbs; this build takes
+  them back out and speaks v7's messages again, message for message — but the
+  number does not go back with them. v8 is deployed, and a number that moves
+  backwards stops being an identity: a 7 on the wire would mean either "before
+  projects" or "after them" depending on which build put it there, and the
+  handshake has nothing but the number to tell the two apart.
+
+
 ## [26.9.4] - 2026-09-04
 
 ### Added
@@ -304,6 +662,77 @@ Synced with upstream tty7 (`ba6760c..a2b5ae5`).
   prompt text (Codex, Copilot, Grok) are left out rather than drawn as a column
   of anonymous dots.
 
+
+- **The interface font is configurable** (#761). **Settings → Appearance →
+  Typography** now carries an interface font family beside the terminal one, so
+  the chrome can be set apart from — or matched to — what the panes are using.
+
+- **A coding agent's conversation gets an outline, and every turn is a jump
+  target** (#703). The right panel lists the turns it saw go by; clicking one
+  scrolls the pane back to where that turn started. A turn under a full-screen
+  agent has nothing to land in, and the row now says so on hover rather than
+  drawing a link that does nothing (#759).
+
+- **A remote workspace relinks its own dead panes** (#757). Panes whose SSH
+  route died come back on their own when the link returns, and the tabs are
+  named after what is actually running in them instead of keeping whatever the
+  snapshot said.
+
+- **Saved SSH hosts are one click from the New Tab button** (#647), and an SSH
+  pane names itself after its host, reaches the host form from wherever you
+  are, and can test a connection before you commit to it (#566).
+
+- **Nushell panes get OSC 7 cwd tracking and OSC 133 prompt marks** (#637), so
+  the sidebar follows a Nushell pane's directory and command marks work the way
+  they do under the other supported shells.
+
+- **The shell's own line editor owns the prompt** (#633). tty7 stops
+  second-guessing the line being edited and hands the row to zsh, fish, bash or
+  Nushell, which is what makes their completion, history search and multi-line
+  editing behave the way they do outside tty7.
+
+- **A tab whose cwd is not a repository groups by its folder** (#631) instead of
+  falling into an unsorted pile at the bottom of the sidebar.
+
+- **The wheel-zoom modifier is configurable** (#676) — for anyone whose mouse or
+  trackpad already spends Ctrl+wheel on something else.
+
+- **`tty7 server restart` replaces the server in place, keeping every session**
+  (#669). The old stop-and-start is still there behind `--hard` for when the
+  process really does have to go.
+
+- **Linux updates install in app** (#306, #652). A verified AppImage release is
+  downloaded, checked and swapped in without leaving tty7, the way macOS and
+  Windows already worked.
+
+- **An all-users Windows install updates through a single UAC prompt** (#562)
+  rather than one per file it has to replace.
+
+- **A file path printed by a program opens in tty7**, resolved on the host the
+  pane is actually on (#568) — a path from an SSH pane opens the remote file,
+  not a local one that happens to share its name.
+
+- **The workspace switcher is a flat list with a create form**, and connecting
+  to a machine syncs its workspaces at that moment rather than whenever the
+  next poll came round (#616).
+
+- **SFTP opens remote text files in the built-in editor** instead of handing
+  them to whatever the OS thought should have them.
+
+- **Hooks, resume and fork are wired for the CLI agents that support them**
+  (#666), and Kimi Code CLI is detected and driven like the rest (#694).
+
+- **Four dark themes** (#663).
+
+- **Closing the last window retires tty7 to the tray** rather than quitting it,
+  so the shells keep running and the next launch is instant (#639).
+
+- **A `tty7-server` build is published for macOS** (#605), so a Mac can host a
+  remote workspace and not only connect to one.
+
+- **↑ and Ctrl+P recall the last command that matches what is already typed**
+  (#768), instead of walking history from the end regardless of the prefix.
+
 ### Changed
 
 - **The Info panel's `agent` row is gone.** It said `Claude Code · working`
@@ -362,6 +791,24 @@ Synced with upstream tty7 (`ba6760c..a2b5ae5`).
   it has nothing to send, the same as a lone `send %83` always did. It fails
   loudly and never presses anything anywhere; to type a number as text, name
   the pane too (`tty7 send %5 83 --enter`) (#538).
+
+
+- **The seam between panes is lighter than the outline around a menu** (#771).
+  One hairline colour used to serve both, which made the sidebar, the right
+  panel and the document column read as boxes bolted together rather than one
+  surface. The two are derived the same way and floored differently now: a line
+  that is the only thing marking an edge keeps its weight, a line running
+  between two panes that already carry their own fills steps back.
+
+- **The app's copy is shorter** (#663). Settings descriptions, prompts and
+  notifications lost the sentences that were restating their own titles.
+
+- **`tty7 send` takes the bare pane id that `--json` prints** (#699), so an id
+  read out of one command can be pasted into the next without editing it.
+
+- **The control dialect is v6** (#605). A daemon left behind by an older build
+  is detected at launch and offered a restart instead of serving a window with
+  no tabs.
 
 ### Fixed
 
@@ -681,6 +1128,144 @@ Synced with upstream tty7 (`ba6760c..a2b5ae5`).
   used to fail into a logfile line and nothing else; the click now raises the
   same kind of toast a failed image upload does, naming the path and the
   error. (#542)
+
+
+- **A restart no longer asks a second time about a server that is already
+  gone** (#770). The record behind the "Restart Server?" prompt could only ever
+  accumulate: the control link re-armed it on every failed reconnect, including
+  in the seconds spent reading the dialog, so restarting fixed the daemon and
+  not the record and the next window asked again. A probe that finds the daemon
+  ours now clears it, on both the handoff and the stop-and-spawn paths, and a
+  verdict about a daemon that has since been replaced is dropped rather than
+  written.
+
+- **A split pane's cursor reflects which pane actually has focus** (#736) —
+  both cursors could render active at once, so neither said where typing would
+  land.
+
+- **The agent unread badge reads live focus** (#758), instead of clearing on a
+  pane that was merely visible.
+
+- **Clicking a sidebar row's change counts activates that row before opening
+  its diff** (#706, #729), so the diff that opens is the one whose numbers were
+  clicked.
+
+- **A window arriving at a workspace no longer claims to speak for panes it has
+  not read** (#716, #728) — the state that let a fresh window prune tabs it
+  knew nothing about.
+
+- **Every SSH channel tty7 abandons is closed before the server does it**
+  (#715, #727). Leaked channels accumulated over a long session until the
+  server's per-connection limit refused the next pane.
+
+- **A restored tab keeps its name** (#725). The title was left out of the
+  snapshot, so a tab restored after a restart came back labelled by its shell.
+
+- **An emoji that overflows its cell gets the room instead of being shaved
+  flat** (#707), and a regional-indicator pair is shaped as the one flag it is
+  rather than two letters (#686, #691).
+
+- **An orphan pane's Close button stays on screen** (#712) — the one control
+  that could clear it was the first thing to scroll away.
+
+- **A stalled remote link no longer blocks the UI thread** (#709). A server
+  that stopped answering froze the whole window rather than the one workspace
+  waiting on it.
+
+- **Windows paths are quoted correctly, "Checkout to…" is wired up, and the
+  Spawn reply is bounded** (#705).
+
+- **The input bar measures columns with `unicode-width`** (#704) instead of a
+  hand-rolled table that disagreed with the terminal beside it.
+
+- **A window that draws its own title bar is not framed again by the
+  compositor** (#679, #683) on Linux.
+
+- **Reveal and copy normalize path separators on Windows** (#680).
+
+- **The PTY gets back the Ctrl chords tty7 was eating** (#684), and Ctrl+V
+  reaches a full-screen program on the alternate screen instead of pasting over
+  it (#677, #682).
+
+- **A silent Attach fails instead of hanging, and a rebuild that cannot put the
+  tabs up holds them** (#673, #681) rather than dropping them on the floor.
+
+- **A daemon that lost both its names is still found and reaped** (#671), and
+  one lingering after quit-and-stop stays findable rather than stranding its
+  shells (#655).
+
+- **Hidden panes stop repainting the whole window** (#670) — a background tab
+  under a busy program cost the same frames as a visible one.
+
+- **The code editor keeps scrolled-out text off the line numbers**, and stops
+  painting its gutter and current line in the stock syntax theme's colours
+  (#636).
+
+- **Ctrl+W in the editor kills one path component at a time** (#658, #659).
+
+- **The sidebar's tab rows and workspace head resolve to a width** (#662)
+  instead of collapsing at certain panel sizes.
+
+- **A restored screen stays out of ConPTY's viewport on Windows, and Restart
+  Server no longer crashes the window** (#657).
+
+- **The SCM sync tile stays on the branch row at any panel width** (#650), a
+  branchless push is answered, and a refused commit says why (#545, #546,
+  #576).
+
+- **The SSH menu keeps a menu's shape** (#649), the password prompt's scrim
+  covers the whole window, and a failed reconnect names the machine (#645).
+
+- **The in-app notification is restyled to tty7's own visual language** (#646).
+
+- **A command that is over in a blink no longer flashes across the tab.**
+
+- **Settings gets its scroll range back**, and the scrollbar is held off the
+  window corner.
+
+- **A remote server stops cleanly on machines with no `/proc`**, and the install
+  shows on the strip (#627).
+
+- **A pane seeded by a window is recorded in that window's own mirror** (#628),
+  and a workspace switch no longer rereads the app mid-update (#618).
+
+- **A resize defers to the daemon's Size echo on remote routes too** (#632), so
+  a remote pane reflows once rather than twice.
+
+- **Shell integration is not injected into a zsh or fish the user gave
+  arguments to** (#629) — the case where injecting silently changed what the
+  shell was asked to do.
+
+- **The new-worktree prompt is a window-level modal** (#626).
+
+- **A deleted remote workspace is scrubbed from the listing snapshots** (#622).
+
+- **A server creation interrupted by an update is finished**, and the note that
+  answered it is retired.
+
+- **A new workspace keeps the name it was given** (#619).
+
+- **A dialect refusal has a way out instead of a retry loop** (#617).
+
+- **A window is told the name the machine gave the workspace it made** (#604,
+  #613).
+
+- **A Unix pwsh pane's title names the user, host and home** (#611).
+
+- **The right panel's tab icons redraw, and the tree glyph sits on the tile
+  ladder** (#578); the plus is drawn on the same optical bound as the rest of
+  the set (#577).
+
+- **The tab strip's status dot is ringed in white on dark themes.**
+
+- **`tty7 send --enter` presses the key it is shorthand for** (#581, #606).
+
+- **In-app updates check a Mach-O's signature by codesign's exit status**
+  (#696), and CI asserts every Mach-O in the macOS bundle is the architecture
+  it ships as (#687, #692).
+
+- **Nine UX fixes across the diff overlay, layout, settings and pane spawn**
+  (#623), and nineteen more low-severity ones (#584–#602, #615).
 
 ## [26.8.3] - 2026-08-12
 
@@ -4386,10 +4971,13 @@ Initial release.
 - zsh shell integration (OSC 7 cwd + OSC 133 prompt marks) via a throwaway `ZDOTDIR`.
 - Native macOS light/dark themes that follow the system appearance.
 
+[Unreleased]: https://github.com/xiaozhaodong/scottie/compare/v26.9.4...HEAD
+[26.9.4]: https://github.com/xiaozhaodong/scottie/compare/v26.9.3...v26.9.4
 [26.9.3]: https://github.com/xiaozhaodong/scottie/compare/v26.9.2...v26.9.3
 [26.9.2]: https://github.com/xiaozhaodong/scottie/compare/v26.9.1...v26.9.2
 [26.9.1]: https://github.com/xiaozhaodong/scottie/compare/v26.8.7...v26.9.1
 [26.8.6]: https://github.com/xiaozhaodong/scottie/compare/v26.8.5...v26.8.6
+[26.9.0]: https://github.com/l0ng-ai/tty7/compare/v26.8.3...v26.9.0
 [26.8.3]: https://github.com/l0ng-ai/tty7/compare/v26.8.2...v26.8.3
 [26.8.2]: https://github.com/l0ng-ai/tty7/compare/v26.8.1...v26.8.2
 [26.8.1]: https://github.com/l0ng-ai/tty7/compare/v26.8.0...v26.8.1

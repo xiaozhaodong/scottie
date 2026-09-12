@@ -395,7 +395,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsMouseZoomOff => "关闭",
         L10nKey::SettingsReportMouseToApps => "向应用报告鼠标",
         L10nKey::SettingsReportMouseToAppsDesc => {
-            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。"
+            "让全屏应用（如 vim、tmux）处理点击和滚动；按住 Shift 可让操作保持本地。\
+             关闭后点击不再传给它们，滚轮也会变成方向键。"
         }
         L10nKey::SettingsBell => "铃声",
         L10nKey::SettingsTerminalBell => "终端铃声",
@@ -405,9 +406,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsLinks => "链接",
         L10nKey::DetectUrls => "检测 URL",
         L10nKey::SettingsDetectUrlsDesc => "悬停时给链接加下划线，通过 {modifier}+点击 打开。",
-        L10nKey::ForwardSshLoopbackLinks => "转发 SSH 回环链接",
+        L10nKey::ForwardSshLoopbackLinks => "转发远程端口",
         L10nKey::SettingsForwardSshLoopbackLinksDesc => {
-            "当窗格处于 SSH 中时，通过临时端口转发打开 localhost 链接。"
+            "SSH 会话里，自动转发窗格开始监听的端口，并在本机打开它的 localhost 链接。"
         }
         L10nKey::SettingsOpenFilesInternal => "内置编辑器",
         L10nKey::SettingsOpenFilesSystem => "默认应用",
@@ -572,6 +573,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::KeybindForkSessionDown => "向下 Fork 会话",
         L10nKey::KeybindForkSessionUp => "向上 Fork 会话",
         L10nKey::SettingsAboutDesc1 => "终端工作台：常驻会话、远程工作、agent。",
+        L10nKey::SettingsDefaultTerminal => "默认终端",
+        L10nKey::SettingsDefaultTerminalDesc => {
+            "将 Scottie 设为 Unix 可执行文件、SSH 链接和 man 页面链接的 macOS 默认终端。Scottie 仍可打开文件夹和脚本，但不会替换 Finder 的文件夹处理程序。自行指定终端的应用可能不会遵循此设置。"
+        }
+        L10nKey::SettingsDefaultTerminalSet => "设为默认终端",
+        L10nKey::SettingsDefaultTerminalSetSuccess => {
+            "Scottie 已成为受支持终端文件和链接的默认处理程序。"
+        }
+        L10nKey::SettingsDefaultTerminalSetFailed => "无法将 Scottie 设为默认终端：{error}",
         L10nKey::SettingsVersion => "版本",
         L10nKey::SettingsUpdates => "更新",
         L10nKey::SettingsUpdateAndRelaunch => "更新并重新启动",
@@ -665,6 +675,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAppHttpProxyInvalid => "不是有效的代理地址，该值未保存。",
         L10nKey::SettingsAgentClaudeCode => "Claude Code",
         L10nKey::SettingsAgentCodex => "Codex",
+        L10nKey::SettingsAgentTraeCode => "TraeCode",
         L10nKey::SettingsAgentCopilotCli => "Copilot CLI",
         L10nKey::SettingsAgentOpencode => "OpenCode",
         L10nKey::SettingsAgentPi => "Pi",
@@ -675,6 +686,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsAgentQwenCode => "Qwen Code",
         L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
+        L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
         L10nKey::SettingsSearchAboutKeywords => {
             "关于 版本 许可证 致谢 构建 更新 检查 github about version license credits update"
         }
@@ -702,6 +714,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchCodexKeywords => {
             "Codex agent 集成 hook 安装 OpenAI codex agent integration hooks install"
+        }
+        L10nKey::SettingsSearchTraeCodeKeywords => {
+            "TraeCode traecli traex agent 集成 hook 安装 agent integration hooks install"
         }
         L10nKey::SettingsSearchCommandLineToolKeywords => {
             "命令行工具 cli tty7 scottie 路径 shell 命令 安装 符号链接 terminal command line tool"
@@ -749,7 +764,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "字号 字体大小 文字 放大 缩小 typography font size bigger smaller zoom"
         }
         L10nKey::SettingsSearchForwardSshLoopbackLinksKeywords => {
-            "SSH回环链接 端口转发 隧道 localhost 转发 forward ssh loopback links tunnel"
+            "SSH回环链接 端口转发 隧道 localhost 转发 自动转发 端口检测 forward ssh loopback links tunnel ports"
         }
         L10nKey::SettingsSearchGrokBuildKeywords => {
             "Grok Build agent 集成 hook 安装 xai grok build agent integration hooks install"
@@ -813,6 +828,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchKimiCodeKeywords => {
             "Kimi Code 月之暗面 agent 集成 钩子 安装 kimi code moonshot agent integration hooks install"
         }
+        L10nKey::SettingsSearchQoderCLIKeywords => "Qoder CLI agent 集成 钩子 安装 qoder qodercli",
         L10nKey::SettingsSearchPiKeywords => {
             "Pi agent 集成 扩展 安装 pi agent integration extension install"
         }
@@ -931,7 +947,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferListFailed => "无法获取传输状态：{error}",
         L10nKey::SftpImagePasteUploadFailed => "无法将粘贴的图片上传到 {host}：{error}",
         L10nKey::LinkFileOpenFailed => "无法打开 {path}：{error}",
-        L10nKey::ForwardPanelTitle => "端口转发",
         L10nKey::ForwardDisconnected => "已断开",
         L10nKey::ForwardDisconnectedFrom => "与 {host} 的连接已断开",
         L10nKey::SshEditProfile => "编辑连接…",
@@ -944,6 +959,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardToLabel => "到",
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "添加",
+        L10nKey::ForwardPortLabel => "远程端口",
+        L10nKey::ForwardPortHere => "在 localhost:{port} 打开",
+        L10nKey::ForwardNeedsPort => "端口是 1 到 65535 之间的数字。",
+        L10nKey::ForwardAdvancedToggle => "高级",
+        L10nKey::ForwardSimpleToggle => "简单",
         L10nKey::ForwardRequestFailed => "联系不上这个会话——什么都没有改动。",
         L10nKey::FileTreePlaceholderFileName => "文件名",
         L10nKey::FileTreePlaceholderFolderName => "文件夹名",
@@ -1021,6 +1041,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelTurnNoScrollback => "这一轮画在 alt screen 上，scrollback 里没有留下它。",
         L10nKey::PanelProcessesSubtitle => "进程",
         L10nKey::PanelPortsSubtitle => "端口",
+        L10nKey::PanelLatency => "延迟",
+        L10nKey::PanelPortsUnsupported => "对端的 tty7-server 太旧，列不出端口。",
+        L10nKey::PanelPortsProbeFailed => "没能查出这个窗格在监听什么。",
+        L10nKey::PanelPortsRestricted => "这里有以其他用户身份运行的进程，看不到它们的端口。",
+        L10nKey::PortAutoForwarded => "远程 :{port} 现在是 http://localhost:{local}",
         L10nKey::PanelCwd => "工作目录",
         L10nKey::PanelShell => "shell",
         L10nKey::PanelSsh => "ssh",
@@ -1158,6 +1183,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffUntrackedSummary => "{count} 个未跟踪",
         L10nKey::DiffViewSplit => "并排",
         L10nKey::DiffViewUnified => "统一",
+        L10nKey::DiffCopySelection => "复制选中的行",
         L10nKey::PendingConnecting => "正在连接 {machine}…",
         L10nKey::PendingUnreachable => "无法连接到 {machine}",
         L10nKey::WorktreePromptNeedsName => "worktree 需要一个名称",
@@ -1275,7 +1301,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。"
         }
         L10nKey::SwitcherThisComputer => "本机",
-        L10nKey::SwitcherRestartingServer => "正在重启 Scottie server…",
+        L10nKey::SwitcherStartingServer => "正在启动 Scottie server…",
         L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 Scottie server… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 Scottie server… {done}",
         L10nKey::SwitcherCopyingServer => "正在复制 Scottie server… {done} / {total}",
@@ -1337,6 +1363,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdGroupAgents => "Agents",
         L10nKey::CmdGroupApplication => "应用",
         L10nKey::CmdNewTab => "新标签页",
+        L10nKey::CmdNewWindow => "新建窗口",
         L10nKey::CmdNewWorktreeTab => "新建 worktree 标签页…",
         L10nKey::CmdNewWorktreeTabSubtitle => "在全新分支上独立检出",
         L10nKey::CmdRenameTab => "重命名标签页…",
@@ -1364,6 +1391,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdForkSessionSubtitle => "将此 agent 会话 fork 到新标签页",
         L10nKey::CmdMarkTabAsUnread => "将标签页标记为未读",
         L10nKey::CmdClosePaneTab => "关闭窗格/标签页",
+        L10nKey::CmdCloseWindow => "关闭窗口",
+        L10nKey::CmdCloseWindowSubtitle => "shell 保持运行",
         L10nKey::CmdCloseOtherTabs => "关闭其他标签页",
         L10nKey::CmdCloseTabsToTheRight => "关闭右侧标签页",
         L10nKey::CmdReopenClosedTab => "重新打开已关闭标签页",
@@ -1438,7 +1467,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRestartServer => "重启 server…",
         L10nKey::CmdRestartServerSubtitle => "结束所有运行中的 shell；保留布局",
         L10nKey::CmdQuitTty7 => "退出 Scottie",
-        L10nKey::CmdQuitTty7Subtitle => "shell 保持运行",
+        L10nKey::CmdQuitTty7Subtitle => "停止服务；结束所有运行中的 shell",
         L10nKey::CmdQuickConnect => "连接到“{target}”",
         L10nKey::CmdQuickConnectSaveProfile => "将“{target}”保存为主机配置…",
         L10nKey::CmdRecent => "最近使用",
@@ -1676,6 +1705,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuFocusPreviousPane => "聚焦上一个窗格",
         L10nKey::AppMenuZoomPane => "缩放窗格",
         L10nKey::AppMenuClearScrollback => "清除回滚内容",
+        L10nKey::AppMenuOpenLink => "打开",
+        L10nKey::AppMenuRevealInFinder => "在访达中显示",
+        L10nKey::AppMenuRevealInFolder => "打开所在文件夹",
+        L10nKey::AppMenuCopyLinkPath => "复制路径",
         L10nKey::AppMenuDocumentation => "Scottie 文档",
         L10nKey::AppMenuKeyboardShortcuts => "键盘快捷键",
         L10nKey::AppMenuJoinDiscord => "加入 Discord",
@@ -1698,6 +1731,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideSidebar => "隐藏侧栏",
         L10nKey::TabTooltipHideDetailPanel => "隐藏详情面板",
         L10nKey::TabTooltipShowDetailPanel => "显示详情面板",
+        L10nKey::TabTooltipZoomed => "窗格已缩放 — 其他窗格已隐藏",
         L10nKey::TabMenuLocalShells => "本地",
         L10nKey::TabMenuAddHost => "添加 SSH 主机…",
         L10nKey::TabMenuAllHosts => "所有 SSH 主机…",
@@ -1705,6 +1739,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabUnnamedShell => "终端 {n}",
         L10nKey::ShellDefault => "默认",
         L10nKey::SidebarScratchGroup => "草稿",
+        L10nKey::SidebarMoveToGroup => "移到分组",
+        L10nKey::SidebarNewGroup => "新建分组…",
+        L10nKey::SidebarAutoGroup => "恢复自动分组",
+        L10nKey::SidebarNewGroupName => "新建分组",
+        L10nKey::SidebarRenameGroup => "重命名分组",
         L10nKey::TabContextCloseTab => "关闭标签页",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",

@@ -233,3 +233,138 @@ fn spec_for(port: u16) -> NativeSshSpec {
     spec.verify_host_keys = false;
     spec
 }
+
+/// What a password server was asked for, so a test can say not only what the
+/// user was shown but what actually went out on the wire.
+#[derive(Default)]
+struct AuthCounts {
+    passwords: AtomicUsize,
+    kbdint: AtomicUsize,
+}
+
+/// A server that wants a password and offers `keyboard-interactive` as the
+/// other way to hand it one, counting both.
+///
+/// This is the shape of the host in #820: OpenSSH with `PasswordAuthentication
+/// yes` advertises both methods, and a client that treats them as two separate
+/// questions asks the same person the same thing twice.
+struct PasswordSshd {
+    secret: String,
+    counts: Arc<AuthCounts>,
+}
+
+impl PasswordSshd {
+    fn reject() -> Auth {
+        Auth::Reject {
+            proceed_with_methods: Some(russh::MethodSet::from(
+                &[
+                    russh::MethodKind::Password,
+                    russh::MethodKind::KeyboardInteractive,
+                ][..],
+            )),
+            partial_success: false,
+        }
+    }
+}
+
+impl server::Handler for PasswordSshd {
+    type Error = russh::Error;
+
+    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        Ok(Self::reject())
+    }
+
+    async fn auth_password(&mut self, _user: &str, password: &str) -> Result<Auth, Self::Error> {
+        self.counts.passwords.fetch_add(1, Ordering::SeqCst);
+        match password == self.secret {
+            true => Ok(Auth::Accept),
+            false => Ok(Self::reject()),
+        }
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        _user: &str,
+        _submethods: &str,
+        response: Option<russh::server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        self.counts.kbdint.fetch_add(1, Ordering::SeqCst);
+        match response {
+            // The opening request asks the question; only a client that got an
+            // answer out of somebody comes back carrying one.
+            None => Ok(Auth::Partial {
+                name: "".into(),
+                instructions: "".into(),
+                prompts: vec![("Password: ".into(), false)].into(),
+            }),
+            Some(_) => Ok(Self::reject()),
+        }
+    }
+}
+
+/// A client handle parked on a password server with not one authentication
+/// method run yet, so a test can drive [`super::auth::authenticate`] itself.
+pub(crate) struct PasswordFake {
+    pub(crate) handle: russh::client::Handle<ClientHandler>,
+    pub(crate) spec: NativeSshSpec,
+    counts: Arc<AuthCounts>,
+}
+
+impl PasswordFake {
+    pub(crate) async fn connect(secret: &str) -> PasswordFake {
+        let counts = Arc::new(AuthCounts::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let addr = listener.local_addr().expect("bound address");
+
+        let mut config = server::Config::default();
+        config.inactivity_timeout = None;
+        // Rejections are deliberately slow in the default config, and these
+        // tests walk through several.
+        config.auth_rejection_time = Duration::from_millis(0);
+        config.auth_rejection_time_initial = Some(Duration::from_millis(0));
+        config
+            .keys
+            .push(PrivateKey::from(Ed25519Keypair::from_seed(&[9; 32])));
+        let handler = PasswordSshd {
+            secret: secret.to_string(),
+            counts: Arc::clone(&counts),
+        };
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept the test client");
+            let running = server::run_stream(Arc::new(config), socket, handler)
+                .await
+                .expect("server handshake");
+            let _ = running.await;
+        });
+
+        let spec = spec_for(addr.port());
+        let handler = ClientHandler {
+            host: spec.host.clone(),
+            port: spec.port,
+            verify_host_keys: false,
+            skip_banner: true,
+            broker: PromptBroker::new(Box::new(|_| true)),
+            remote_forwards: RemoteForwardTable::default(),
+        };
+        let handle =
+            russh::client::connect(Arc::new(russh::client::Config::default()), addr, handler)
+                .await
+                .expect("client handshake");
+        PasswordFake {
+            handle,
+            spec,
+            counts,
+        }
+    }
+
+    /// `userauth` requests the server saw, per method.
+    pub(crate) fn password_attempts(&self) -> usize {
+        self.counts.passwords.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn kbdint_attempts(&self) -> usize {
+        self.counts.kbdint.load(Ordering::SeqCst)
+    }
+}
