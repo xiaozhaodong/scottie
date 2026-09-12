@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.9.5] - 2026-09-12
+
 _Synced with upstream tty7 through v26.9.2 (`l0ng-ai/tty7@66c42e4`). Scottie keeps the Info panel's CONVERSATION outline, which upstream removed in that range. Upstream's own notes follow, grouped by their release._
 
 ### Upstream 26.9.2 (2026-09-10)
