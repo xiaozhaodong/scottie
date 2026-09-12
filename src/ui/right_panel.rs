@@ -1256,7 +1256,6 @@ impl Tty7App {
         )
     }
 
-
     fn procs_section(&self, pane_id: Option<u64>, cx: &mut Context<Self>) -> Option<AnyElement> {
         let procs = &self.procs(pane_id)?.procs;
         if procs.len() < 2 {
@@ -2019,7 +2018,6 @@ fn turn_is_jumpable(row: Option<i64>, alt_now: bool) -> bool {
     row.is_some() && !alt_now
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{InfoRow, InfoValue, format_rtt, forwards_port, turn_is_jumpable};
@@ -2127,7 +2125,6 @@ mod tests {
             "and an anchor is no use while a full-screen program owns the pane"
         );
     }
-
 
     #[test]
     fn counts_are_a_button_only_when_there_is_a_diff_to_open() {

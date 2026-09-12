@@ -1732,8 +1732,9 @@ impl TerminalView {
         let home = self.display_home(cx);
         let show_activity_prefix = cx.global::<Config>().show_agent_title_activity_prefix;
         let view = self.tab_view(tty7_core::core::machine::TabId::new(), None, 1);
-        let label = crate::ui::tab_strip::rendered_label(&view, home.as_deref(), show_activity_prefix)
-            .filter(|label| !label.trim().is_empty());
+        let label =
+            crate::ui::tab_strip::rendered_label(&view, home.as_deref(), show_activity_prefix)
+                .filter(|label| !label.trim().is_empty());
         match label {
             Some(label) => HeaderTitle {
                 label,

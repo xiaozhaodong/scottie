@@ -2948,7 +2948,10 @@ mod tests {
         tab.cwd = Some("/Users/x/repo/tty7/crates/tty7-core/src".into());
         assert_eq!(
             label_of(&tab, 0, Some(home())),
-            crate::ui::path_display::short_title("/Users/x/repo/tty7/crates/tty7-core/src", Some(home())),
+            crate::ui::path_display::short_title(
+                "/Users/x/repo/tty7/crates/tty7-core/src",
+                Some(home())
+            ),
         );
     }
 

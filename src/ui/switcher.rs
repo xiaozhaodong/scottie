@@ -3823,18 +3823,27 @@ mod tests {
         // No title at all: the label falls to the cwd, which is the case the
         // gate always caught.
         view.osc_title = None;
-        assert!(!crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)));
+        assert!(!crate::ui::tab_strip::names_more_than_its_place(
+            &view,
+            Some(home)
+        ));
 
         // ...unless an agent claims the label first, and then the directory is
         // new information again.
         view.agent = Some(crate::core::cli_agent::CLIAgent::Claude);
-        assert!(crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)));
+        assert!(crate::ui::tab_strip::names_more_than_its_place(
+            &view,
+            Some(home)
+        ));
 
         // A tab someone named says what they called it; where it sits is still
         // worth a line.
         view.agent = None;
         view.name = Some("deploy".to_string());
-        assert!(crate::ui::tab_strip::names_more_than_its_place(&view, Some(home)));
+        assert!(crate::ui::tab_strip::names_more_than_its_place(
+            &view,
+            Some(home)
+        ));
     }
 }
 
