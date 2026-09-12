@@ -7963,8 +7963,8 @@ mod tests {
         use super::stated_title;
 
         // Nothing has spoken — this is the pane a directory stands in for.
-        assert_eq!(stated_title("tty7"), None);
-        assert_eq!(stated_title("  tty7  "), None);
+        assert_eq!(stated_title(DEFAULT_TITLE), None);
+        assert_eq!(stated_title(&format!("  {DEFAULT_TITLE}  ")), None);
         assert_eq!(stated_title("   "), None);
 
         // A title from the program running in it.

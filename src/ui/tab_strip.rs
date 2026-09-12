@@ -3072,7 +3072,10 @@ mod tests {
     fn a_pane_with_nothing_to_say_falls_back_the_way_it_always_did() {
         // No title and no directory: the placeholder, exactly as before.
         let tab = strip_tab();
-        assert_eq!(label_of(&tab, 0, Some(home())), "tty7");
+        assert_eq!(
+            label_of(&tab, 0, Some(home())),
+            crate::terminal::view::DEFAULT_TITLE
+        );
 
         // And a tab holding no live pane at all is still numbered.
         let mut empty = strip_tab();
