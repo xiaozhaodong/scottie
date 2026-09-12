@@ -2395,8 +2395,8 @@ mod ssh_host_row_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use gpui::TestAppContext;
+    use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
 
     fn host(name: &str, user: &str, addr: &str) -> crate::core::ssh_profile::SshProfile {
