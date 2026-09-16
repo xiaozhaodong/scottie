@@ -270,13 +270,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsKeepEditing => "Keep Editing",
         L10nKey::SettingsName => "Name",
-        L10nKey::SettingsNameDesc => "A label for this connection.",
         L10nKey::SettingsHost => "Host",
-        L10nKey::SettingsHostDesc => "Hostname or IP address.",
         L10nKey::SettingsHostRequired => "Needs a host — won't be saved.",
         L10nKey::SettingsPortInvalid => "Port must be 1-65535 — blank means 22.",
         L10nKey::SettingsUser => "User",
-        L10nKey::SettingsUserDesc => "Login user (blank = resolve at connect).",
         L10nKey::SettingsAuth => "Auth",
         L10nKey::SettingsAuthDesc => "Authentication method. Auto tries every applicable method.",
         L10nKey::SettingsAuthModeAuto => "Auto",
@@ -284,6 +281,24 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAuthModeKey => "Key",
         L10nKey::SettingsAuthModeAgent => "Agent",
         L10nKey::SettingsAuthMode2Fa => "2FA",
+        L10nKey::SettingsPassword => "Password",
+        L10nKey::SettingsNameHint => "Optional label",
+        L10nKey::SettingsHostHint => "hostname or IP",
+        L10nKey::SettingsUserHint => "resolved at connect",
+        L10nKey::SettingsPasswordDesc => "Kept in the system keychain, never in the config file.",
+        L10nKey::SettingsPasswordHint => "Ask when connecting",
+        L10nKey::SettingsKeyPassphrase => "Key passphrase",
+        L10nKey::SettingsKeyPassphraseDesc => "Unlocks the key above. Kept in the system keychain.",
+        L10nKey::SettingsPassphraseNeedsKey => {
+            "Name a key file first — a passphrase is stored against the key it unlocks."
+        }
+        L10nKey::SettingsBrowseKey => "Browse…",
+        L10nKey::SettingsCouldntSavePassword => {
+            "Could not save the password for {endpoint}: {error}"
+        }
+        L10nKey::SettingsCouldntSavePassphrase => {
+            "Could not save the passphrase for {key}: {error}"
+        }
         L10nKey::SettingsJumpHost => "Jump host",
         L10nKey::SettingsJumpHostDesc => {
             "Name of another profile to tunnel through (blank = direct)."
@@ -770,6 +785,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsAgentGoose => "Goose",
         L10nKey::SettingsAgentKimiCode => "Kimi Code",
         L10nKey::SettingsAgentQoderCLI => "Qoder CLI",
+        L10nKey::SettingsAgentCrush => "Crush",
         L10nKey::SettingsSearchAboutKeywords => "version license credits build update check github",
         L10nKey::SettingsSearchAppHttpProxyKeywords => {
             "proxy http https socks socks5 clash v2ray network download update"
@@ -872,6 +888,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "agent integration hooks install kimi code kimi-code moonshot"
         }
         L10nKey::SettingsSearchQoderCLIKeywords => "agent integration hooks install qoder qodercli",
+        L10nKey::SettingsSearchCrushKeywords => "agent integration hooks install crush",
         L10nKey::SettingsSearchPiKeywords => "agent integration extension install pi",
         L10nKey::SettingsSearchPortForwardingKeywords => {
             "ssh tunnel local remote dynamic socks forward rule"
@@ -1602,6 +1619,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::AppReopenTabFailed => "Could not reopen the tab: no terminal started",
         L10nKey::AppOpenTerminalFailed => "Could not open a terminal: {error}",
         L10nKey::AppTabsNotRestored => "{count} tabs from last time could not be reopened",
+        L10nKey::AppFullscreenEntered => "Fullscreen — press {key} to leave",
+        L10nKey::AppFullscreenEnteredNoKey => {
+            "Fullscreen — the window buttons are hidden until you leave"
+        }
         L10nKey::LaunchWorkspacesLeftRunning => {
             "Only this window was restored — {count} workspaces are still running in the background. Reopen them from the sidebar."
         }
