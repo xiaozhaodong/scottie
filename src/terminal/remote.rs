@@ -5794,6 +5794,8 @@ mod tests {
                 rich: true,
                 cwd: None,
                 activity: 0,
+                last_task_title: None,
+                explicit_task_title: None,
                 turns: 0,
             }))
             .encode(daemon)
@@ -5855,6 +5857,8 @@ mod tests {
             rich: true,
             cwd: None,
             activity: 0,
+            last_task_title: None,
+            explicit_task_title: None,
             turns: 0,
         }))
         .encode(&mut daemon_side)
