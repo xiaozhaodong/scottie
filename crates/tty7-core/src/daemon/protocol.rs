@@ -1842,6 +1842,7 @@ mod tests {
                 activity: 12,
                 last_task_title: Some("fix title routing".into()),
                 explicit_task_title: Some("fix title routing".into()),
+                turns: 4,
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

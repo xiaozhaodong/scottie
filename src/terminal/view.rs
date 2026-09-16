@@ -204,6 +204,31 @@ pub struct ShellParts {
     pub(crate) owner: Option<crate::core::session::WorkspaceId>,
 }
 
+/// What the reader was last shown of each pane's finished agent turn, kept for
+/// the life of the app rather than of a view.
+///
+/// A view is thrown away and built again over the same daemon pane whenever a
+/// workspace is switched out and back or a window is reopened from the tray,
+/// and a fresh view sees a `Done` agent arrive from nothing — exactly what a
+/// turn finishing live looks like. This is how the new view tells the two apart
+/// (#870).
+#[derive(Default)]
+struct AgentReadMarks(std::collections::HashMap<(crate::ui::host_ops::HostId, u64), AgentReadMark>);
+
+impl gpui::Global for AgentReadMarks {}
+
+#[derive(Clone)]
+struct AgentReadMark {
+    session: (Option<String>, Option<Vec<String>>),
+    /// The status the pane's last view saw. Kept for every status, not only
+    /// `Done`, so that a pane with no mark at all is one this app never watched
+    /// an agent in — the only case where a reattach's replayed status may be
+    /// taken as a baseline (see `poll_agent_status`).
+    status: Option<crate::core::cli_agent::AgentStatus>,
+    turns: u64,
+    unread: bool,
+}
+
 #[derive(Clone, Copy)]
 struct DragScroll {
     overshoot: f32,
@@ -394,6 +419,9 @@ pub struct TerminalView {
     /// time, however fast the pane is printing.
     pub(super) search_scan_armed: bool,
     pub bell_flash: bool,
+    /// Bumped by every bell, so only the timer armed by the latest one clears
+    /// the flash: a burst of bells holds one steady flash instead of strobing.
+    bell_epoch: u64,
     pub report_mouse: bool,
     last_at_prompt: bool,
     last_typeahead_blocked: bool,
@@ -406,6 +434,9 @@ pub struct TerminalView {
     agent_was_rich: bool,
     agent_result_unread: bool,
     keep_unread_on_focus: bool,
+    /// Whether this view has seen its pane's agent status move at all. The
+    /// first move is where a rebuilt view consults [`AgentReadMarks`].
+    agent_status_seen: bool,
     git_status_cwd: Option<std::path::PathBuf>,
     last_agent_activity: u64,
     cmd: CmdEditor,
@@ -1221,6 +1252,27 @@ fn fallback_chain(family: &str, configured: &[String]) -> Vec<String> {
     chain
 }
 
+/// Put `chain` on the regular face and on the bold and italic ones.
+///
+/// Bold and italic never carry a chain of their own — `alt_font` copies theirs
+/// off the regular face when they are built — so a rebuild that skipped them
+/// would leave two of the three faces resolving against the old chain.
+fn apply_fallback_chain(
+    chain: Vec<String>,
+    font: &mut Font,
+    bold: &mut Option<Font>,
+    italic: &mut Option<Font>,
+) {
+    let fallbacks = Some(gpui::FontFallbacks::from_fonts(chain));
+    font.fallbacks = fallbacks.clone();
+    if let Some(font) = bold {
+        font.fallbacks = fallbacks.clone();
+    }
+    if let Some(font) = italic {
+        font.fallbacks = fallbacks;
+    }
+}
+
 impl TerminalView {
     pub fn spawn_shell_terminal_in(
         workspace: Option<crate::terminal::PaneWorkspace>,
@@ -1420,6 +1472,7 @@ impl TerminalView {
                     view.keep_unread_on_focus = false;
                 } else {
                     view.agent_result_unread = false;
+                    view.note_agent_result_unread(cx);
                 }
                 view.report_focus_change(true);
                 cx.notify();
@@ -1569,6 +1622,7 @@ impl TerminalView {
             search_scan_epoch: 0,
             search_scan_armed: false,
             bell_flash: false,
+            bell_epoch: 0,
             last_at_prompt: false,
             last_typeahead_blocked: false,
             running_since: None,
@@ -1580,6 +1634,7 @@ impl TerminalView {
             agent_was_rich: false,
             agent_result_unread: false,
             keep_unread_on_focus: false,
+            agent_status_seen: false,
             git_status_cwd: None,
             last_agent_activity: 0,
             cmd: CmdEditor::new(),
@@ -1980,9 +2035,38 @@ impl TerminalView {
         self.agent_result_unread
     }
 
-    pub fn mark_agent_result_unread(&mut self, refocus_incoming: bool) {
+    pub fn mark_agent_result_unread(&mut self, refocus_incoming: bool, cx: &mut App) {
         self.agent_result_unread = true;
         self.keep_unread_on_focus = refocus_incoming;
+        self.note_agent_result_unread(cx);
+    }
+
+    /// Leave what the reader has seen of this pane's agent where the pane's
+    /// next view will look for it — see [`AgentReadMarks`]. A mark left at any
+    /// status other than `Done` never vouches for a finished turn, but it still
+    /// records that this app was watching: a turn that was running when the
+    /// view went and finished before the next one came must badge.
+    fn record_agent_read_mark(&self, turns: u64, cx: &mut App) {
+        cx.default_global::<AgentReadMarks>().0.insert(
+            (self.host_id, self.pane_id),
+            AgentReadMark {
+                session: self.last_agent_session.clone(),
+                status: self.last_agent_status,
+                turns,
+                unread: self.agent_result_unread,
+            },
+        );
+    }
+
+    /// Carry a change to the badge alone into the mark the last status left.
+    fn note_agent_result_unread(&self, cx: &mut App) {
+        if !cx.has_global::<AgentReadMarks>() {
+            return;
+        }
+        let key = (self.host_id, self.pane_id);
+        if let Some(mark) = cx.global_mut::<AgentReadMarks>().0.get_mut(&key) {
+            mark.unread = self.agent_result_unread;
+        }
     }
 
     pub fn git_status(&self, cx: &App) -> Option<crate::terminal::git_status::GitStatus> {
@@ -2407,7 +2491,8 @@ impl TerminalView {
         let kitty = self.key_flags();
         if let Some(bytes) = super::input::keystroke_to_bytes(ks, kitty) {
             let plain = !m.control && !m.alt && !m.platform;
-            let interrupt = is_typeahead_interrupt(ks.key.as_str(), m);
+            let boundary = typeahead_boundary(ks.key.as_str(), m);
+            let interrupt = boundary.is_some();
             let shell_owns_prompt = self.shell_owns_prompt();
             let held = plain
                 && ks.key == "backspace"
@@ -2424,11 +2509,11 @@ impl TerminalView {
                 };
             if !held {
                 self.release_hold();
-                if !shell_owns_prompt && interrupt {
-                    // Ctrl-C cancels the foreground input transaction. Clear
-                    // the gap before delivering it so a prompt transition
-                    // cannot flush this interrupt as a later Ctrl-U.
-                    self.observe_typeahead(RawInput::Interrupt);
+                if let Some(boundary) = boundary.filter(|_| !shell_owns_prompt) {
+                    // Ctrl-C interrupts and Ctrl-D can close the foreground reader.
+                    // Discard the gap before sending either so a prompt transition
+                    // cannot turn the pending record into a later Ctrl-U.
+                    self.observe_typeahead(boundary);
                 }
                 self.terminal.write(bytes);
                 if !shell_owns_prompt && !interrupt {
@@ -3092,6 +3177,8 @@ impl TerminalView {
     }
 
     fn flash_bell(&mut self, cx: &mut Context<Self>) {
+        self.bell_epoch += 1;
+        let epoch = self.bell_epoch;
         self.bell_flash = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -3099,6 +3186,12 @@ impl TerminalView {
                 .timer(std::time::Duration::from_millis(150))
                 .await;
             let _ = this.update(cx, |view, cx| {
+                // A bell rung since this one owns the flash now. Holding
+                // Backspace on an empty bash prompt rings at key-repeat rate,
+                // and clearing here would blank it every few frames (#874).
+                if view.bell_epoch != epoch {
+                    return;
+                }
                 view.bell_flash = false;
                 cx.notify();
             });
@@ -3597,14 +3690,30 @@ impl TerminalView {
     }
 
     pub fn set_font_family(&mut self, family: String, cx: &mut Context<Self>) {
-        let fallbacks = self.font.fallbacks.clone();
         let mut font = gpui::font(family);
-        font.fallbacks = fallbacks;
         if let Some(features) = &self.font_features {
             font.features = features.clone();
         }
         self.font = font;
+        // Rebuild rather than carry the chain over: `fallback_chain` skips
+        // pinning a last-resort face that the family already is, so the chain
+        // that went with the old family can be missing a pin the new one needs.
+        self.reread_fallback_chain(cx);
         cx.notify();
+    }
+
+    /// Rebuild the fallback chain from the config and put it on all three faces.
+    ///
+    /// The chain is built once in `with_terminal` and then only ever cloned
+    /// around, so a `font_fallbacks` edit reaches new panes and no one else.
+    pub fn reread_fallback_chain(&mut self, cx: &mut Context<Self>) {
+        let chain = fallback_chain(&self.font.family, &cx.global::<Config>().font_fallbacks);
+        apply_fallback_chain(
+            chain,
+            &mut self.font,
+            &mut self.font_bold,
+            &mut self.font_italic,
+        );
     }
 
     pub fn set_font_family_bold(&mut self, family: Option<String>, cx: &mut Context<Self>) {
@@ -3986,6 +4095,33 @@ impl TerminalView {
     ) -> bool {
         use crate::core::cli_agent::AgentStatus;
 
+        // Attaching to a pane the daemon kept alive — the app restarting onto
+        // last session's tabs above all — has the daemon replay the pane's
+        // stored agent status as an ordinary report. When this app has never
+        // watched the pane, that is a baseline, not an edge: the turn it
+        // describes ended before this view existed, often before this process
+        // did, and reading it as "a result just landed" is what used to bring
+        // every restored agent tab up wearing an unread badge for output its
+        // reader had long since read.
+        //
+        // When an earlier view of this app did watch the pane (a workspace
+        // switched out and back, a window reopened from the tray), its read
+        // mark knows more than the replay does, so the replay stays an edge and
+        // the mark decides below: the same finished turn takes its badge back
+        // as the reader left it, anything else is news (#870).
+        let adopted_baseline = match self.terminal.take_replayed_agent_status() {
+            Some(restored)
+                if !cx
+                    .try_global::<AgentReadMarks>()
+                    .is_some_and(|marks| marks.0.contains_key(&(self.host_id, self.pane_id))) =>
+            {
+                self.last_agent_status = restored;
+                self.agent_status_seen = true;
+                true
+            }
+            _ => false,
+        };
+
         let session = self.terminal.agent_session();
         if session.as_ref().is_some_and(|s| s.rich) {
             self.agent_was_rich = true;
@@ -4004,10 +4140,43 @@ impl TerminalView {
         }
 
         let status = session.as_ref().map(|s| s.status);
+        let turns = session.as_ref().map_or(0, |s| s.turns);
+        if adopted_baseline {
+            // From here on this app is watching the pane, so a later rebuild
+            // must find a mark rather than adopt its own replay.
+            self.record_agent_read_mark(turns, cx);
+        }
         if status == self.last_agent_status {
             return false;
         }
         let prev = std::mem::replace(&mut self.last_agent_status, status);
+        let first_sight = !std::mem::replace(&mut self.agent_status_seen, true);
+
+        // A view built over a pane that already holds a finished turn sees
+        // `Done` arrive from nothing, the same as a turn finishing now. If the
+        // pane's previous view left a mark for this session at this turn count,
+        // it is the turn the reader was already shown: take their badge back as
+        // they left it instead of raising a new one (#870). A turn that
+        // finished after the old view went has no such mark, or a lower count.
+        if first_sight
+            && status == Some(AgentStatus::Done)
+            && let Some(mark) = cx
+                .try_global::<AgentReadMarks>()
+                .and_then(|marks| marks.0.get(&(self.host_id, self.pane_id)))
+                .filter(|mark| {
+                    mark.status == Some(AgentStatus::Done)
+                        && mark.session == self.last_agent_session
+                        && mark.turns == turns
+                })
+                .cloned()
+        {
+            self.agent_result_unread = mark.unread && !self.focus_handle.is_focused(window);
+            self.keep_unread_on_focus = false;
+            self.record_agent_read_mark(turns, cx);
+            cx.notify();
+            return false;
+        }
+
         let turn_finished = status == Some(AgentStatus::Done) && prev != Some(AgentStatus::Done);
 
         match status {
@@ -4027,6 +4196,7 @@ impl TerminalView {
                 self.keep_unread_on_focus = false;
             }
         }
+        self.record_agent_read_mark(turns, cx);
 
         let rich = session.as_ref().is_some_and(|s| s.rich);
         let agent_name = self
@@ -6865,8 +7035,15 @@ impl TerminalView {
     }
 }
 
-fn is_typeahead_interrupt(key: &str, modifiers: &Modifiers) -> bool {
-    modifiers.control && !modifiers.alt && !modifiers.platform && key == "c"
+fn typeahead_boundary(key: &str, modifiers: &Modifiers) -> Option<RawInput<'static>> {
+    if !modifiers.control || modifiers.alt || modifiers.platform {
+        return None;
+    }
+    match key {
+        "c" => Some(RawInput::Interrupt),
+        "d" => Some(RawInput::EndOfInput),
+        _ => None,
+    }
 }
 
 fn sync_typeahead_owner_state(
@@ -8044,8 +8221,8 @@ mod tests {
     use super::{
         COMPLETION_MENU_MAX_W, LoopbackPlan, PortRoute, RawInput, SelectEndCopy, Typeahead,
         WheelRoute, clipboard_paste_text, compose_notification_title, cwd_is_on_host,
-        display_width, is_typeahead_interrupt, link_path_style, loopback_plan,
-        observe_typeahead_for_owner,
+        display_width, link_path_style, loopback_plan, observe_typeahead_for_owner,
+        typeahead_boundary,
     };
     use super::{SCROLL_ANIM_FRAME, scroll_anim_step};
     use super::{
@@ -8218,20 +8395,28 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_ctrl_c_is_a_typeahead_interrupt() {
+    fn ctrl_c_and_ctrl_d_discard_foreground_typeahead() {
         let ctrl = Modifiers {
             control: true,
             ..Default::default()
         };
-        assert!(is_typeahead_interrupt("c", &ctrl));
-        assert!(!is_typeahead_interrupt("d", &ctrl));
+        assert!(matches!(
+            typeahead_boundary("c", &ctrl),
+            Some(RawInput::Interrupt)
+        ));
+        assert!(matches!(
+            typeahead_boundary("d", &ctrl),
+            Some(RawInput::EndOfInput)
+        ));
+        assert!(typeahead_boundary("u", &ctrl).is_none());
 
         let ctrl_alt = Modifiers {
             control: true,
             alt: true,
             ..Default::default()
         };
-        assert!(!is_typeahead_interrupt("c", &ctrl_alt));
+        assert!(typeahead_boundary("c", &ctrl_alt).is_none());
+        assert!(typeahead_boundary("d", &ctrl_alt).is_none());
     }
 
     fn ws(target: RemoteTarget, with_spec: bool) -> PaneWorkspace {
@@ -8794,6 +8979,33 @@ mod tests {
             "Hack",
             "a Hack-prefixed family name must not suppress the bundled anchor"
         );
+    }
+
+    #[test]
+    fn apply_fallback_chain_reaches_every_face_a_view_has() {
+        // Bold and italic are the ones at risk: they hold a copy taken off the
+        // regular face when `alt_font` built them, so a rebuild that wrote only
+        // the regular face would strand them on the chain it replaced.
+        let mut font = gpui::font("Hack");
+        let mut bold = Some(gpui::font("Hack Bold"));
+        let mut italic = Some(gpui::font("Hack Italic"));
+
+        super::apply_fallback_chain(vec!["Menlo".to_string()], &mut font, &mut bold, &mut italic);
+
+        for face in [&font, bold.as_ref().unwrap(), italic.as_ref().unwrap()] {
+            assert_eq!(face.fallbacks.as_ref().unwrap().fallback_list(), ["Menlo"]);
+        }
+
+        // Neither is configured by default, and a view carries `None` for one
+        // it was never given.
+        let (mut none_bold, mut none_italic) = (None, None);
+        super::apply_fallback_chain(
+            vec!["Menlo".to_string()],
+            &mut font,
+            &mut none_bold,
+            &mut none_italic,
+        );
+        assert_eq!(font.fallbacks.unwrap().fallback_list(), ["Menlo"]);
     }
 
     #[test]
@@ -9832,6 +10044,22 @@ pub(crate) fn quiet_test_pane(
     (view, daemon_side)
 }
 
+/// The same pane, but reattached rather than spawned — what restoring last
+/// session's tabs builds, and the only shape in which the daemon replays state
+/// the pane already had.
+#[cfg(test)]
+pub(crate) fn quiet_reattached_test_pane(
+    pane_id: u64,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) -> (gpui::Entity<TerminalView>, crate::daemon::transport::Stream) {
+    let (client_side, daemon_side) = test_stream_pair();
+    let terminal = RemoteTerminal::from_stream_reattached(client_side, TermSize::new(80, 24))
+        .expect("quiet reattached test terminal");
+    let view = cx.new(|cx| TerminalView::with_terminal(terminal, pane_id, window, cx));
+    (view, daemon_side)
+}
+
 /// A quiet pane that was dialled by hand, with no saved host behind it.
 ///
 /// Ungated on purpose: the transport this hands back is already
@@ -10009,6 +10237,7 @@ mod gpui_tests {
                 activity: 0,
                 last_task_title: None,
                 explicit_task_title: None,
+                turns: 0,
             }))
             .encode(daemon)
             .unwrap();
@@ -10066,6 +10295,7 @@ mod gpui_tests {
             activity: 0,
             last_task_title: None,
             explicit_task_title: None,
+            turns: 0,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -10111,9 +10341,20 @@ mod gpui_tests {
         cx: &mut TestAppContext,
         daemon: &mut Stream,
     ) {
+        report_agent_turn(status, 0, pane, cx, daemon);
+    }
+
+    /// The same, for a session that has finished `turns` turns so far.
+    fn report_agent_turn(
+        status: crate::core::cli_agent::AgentStatus,
+        turns: u64,
+        pane: &gpui::Entity<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut Stream,
+    ) {
         use crate::core::cli_agent::AgentSessionState;
 
-        DaemonMsg::AgentStatus(Some(AgentSessionState {
+        let state = AgentSessionState {
             status,
             message: None,
             session_id: Some("sid-abc".into()),
@@ -10123,18 +10364,173 @@ mod gpui_tests {
             activity: 0,
             last_task_title: None,
             explicit_task_title: None,
-        }))
-        .encode(daemon)
-        .unwrap();
+            turns,
+        };
+        DaemonMsg::AgentStatus(Some(state.clone()))
+            .encode(daemon)
+            .unwrap();
         for _ in 0..200 {
-            if cx.update(|cx| pane.read(cx).terminal.agent_session().map(|s| s.status))
-                == Some(status)
-            {
+            if cx.update(|cx| pane.read(cx).terminal.agent_session()) == Some(state.clone()) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         panic!("the agent status never reached the pane");
+    }
+
+    /// Poll `pane`'s agent status inside `window` and read its badge back.
+    fn poll_unread(
+        window: gpui::WindowHandle<TerminalView>,
+        pane: &gpui::Entity<TerminalView>,
+        cx: &mut TestAppContext,
+    ) -> bool {
+        // Through the untyped handle: the typed one leases the root view, and
+        // `pane` may be that view.
+        cx.update_window(window.into(), |_, window, cx| {
+            pane.update(cx, |pane, cx| {
+                pane.poll_agent_status(false, window, cx);
+                pane.agent_result_unread()
+            })
+        })
+        .unwrap()
+    }
+
+    /// Switching workspaces, or reopening a window from the tray, throws the
+    /// pane's view away and builds a new one on the same daemon pane (#870).
+    /// The new view's first look at a `Done` agent is not a turn finishing —
+    /// the reader watched that one finish before the old view went.
+    #[gpui::test]
+    fn a_rebuilt_pane_does_not_re_badge_a_turn_the_reader_already_saw(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &before, cx, &mut before_daemon);
+        assert!(
+            !poll_unread(window, &before, cx),
+            "the reader watched it finish"
+        );
+
+        // The same daemon pane, rebuilt the way `tabs_from_session` rebuilds it,
+        // with the reader's focus somewhere else.
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &after, cx, &mut daemon);
+        assert!(
+            !poll_unread(window, &after, cx),
+            "rebuilding the pane is not a turn finishing"
+        );
+    }
+
+    /// What the rebuild must not swallow: a turn that was still running when
+    /// the view went away and finished before the new one arrived.
+    #[gpui::test]
+    fn a_turn_that_finished_while_the_pane_was_away_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Working, 0, &before, cx, &mut before_daemon);
+        assert!(!poll_unread(window, &before, cx));
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &after, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &after, cx),
+            "nobody saw this turn finish"
+        );
+    }
+
+    /// Nor a whole later turn: the reader saw turn one, the agent was sent
+    /// another and finished it while the pane was away. The status reads
+    /// `Done` both times; only the turn count tells them apart.
+    #[gpui::test]
+    fn a_later_turn_that_finished_while_the_pane_was_away_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &before, cx, &mut before_daemon);
+        assert!(!poll_unread(window, &before, cx));
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 2, &after, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &after, cx),
+            "the second turn finished unseen"
+        );
+    }
+
+    /// And a badge the reader had not cleared yet comes back with the pane.
+    #[gpui::test]
+    fn an_unread_turn_is_still_unread_after_the_pane_is_rebuilt(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        let (window, mut before_daemon) = harness(cx);
+        let before = window.update(cx, |_, _, cx| cx.entity()).unwrap();
+        // Building another pane takes the window's focus off `before`.
+        let (_elsewhere, _elsewhere_daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(5, window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &before, cx, &mut before_daemon);
+        assert!(poll_unread(window, &before, cx), "nobody was looking");
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(1, window, cx))
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        report_agent_turn(AgentStatus::Done, 1, &after, cx, &mut daemon);
+        assert!(
+            poll_unread(window, &after, cx),
+            "rebuilding the pane is not reading it"
+        );
     }
 
     /// The badge answers "did the reader see this?", so it has to read the
@@ -10177,6 +10573,197 @@ mod gpui_tests {
                 pane.update(cx, |pane, cx| {
                     pane.poll_agent_status(false, window, cx);
                     assert!(pane.agent_result_unread(), "nobody was looking at the pane");
+                });
+            })
+            .unwrap();
+    }
+
+    /// Reinstalling or restarting the app leaves the daemon — and every agent
+    /// in it — running, so each restored tab reattaches to a pane whose agent
+    /// finished its turn long ago. The daemon replays that status, and reading
+    /// it as a turn that just landed put an unread badge on every agent tab in
+    /// the window the moment it opened.
+    #[gpui::test]
+    fn a_restored_pane_does_not_badge_the_turn_it_reattached_to(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let (pane, mut daemon) = window
+            .update(cx, |_, window, cx| {
+                super::quiet_reattached_test_pane(2, window, cx)
+            })
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(
+                        !pane.agent_result_unread(),
+                        "the replayed status is where this pane starts, not a result that \
+                         just arrived"
+                    );
+                });
+            })
+            .unwrap();
+
+        // And the pane is still armed: the next turn it actually watches finish
+        // badges exactly as it would have without the reattach.
+        report_agent_status(AgentStatus::Working, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                });
+            })
+            .unwrap();
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(
+                        pane.agent_result_unread(),
+                        "a turn that finished while the reader was elsewhere is unread"
+                    );
+                });
+            })
+            .unwrap();
+    }
+
+    /// Build `pane_id`'s first view (unfocused), let it watch `status` at
+    /// `turns`, then rebuild the pane the way restoring a workspace does — a
+    /// reattach, whose head is the daemon replaying `replayed` — and read the
+    /// rebuilt view's badge.
+    fn rebuild_by_reattach(
+        watched: (crate::core::cli_agent::AgentStatus, u64),
+        replayed: (crate::core::cli_agent::AgentStatus, u64),
+        cx: &mut TestAppContext,
+    ) -> bool {
+        let (window, _root_daemon) = harness(cx);
+        let focus_root = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |view, window, cx| {
+                    view.focus_handle.clone().focus(window, cx)
+                })
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let (before, mut before_daemon) = window
+            .update(cx, |_, window, cx| super::quiet_test_pane(2, window, cx))
+            .unwrap();
+        focus_root(cx);
+        report_agent_turn(watched.0, watched.1, &before, cx, &mut before_daemon);
+        poll_unread(window, &before, cx);
+        drop(before);
+
+        let (after, mut daemon) = window
+            .update(cx, |_, window, cx| {
+                super::quiet_reattached_test_pane(2, window, cx)
+            })
+            .unwrap();
+        focus_root(cx);
+        report_agent_turn(replayed.0, replayed.1, &after, cx, &mut daemon);
+        poll_unread(window, &after, cx)
+    }
+
+    /// A reattach whose pane this app already watched is a rebuild, not a
+    /// restart: the read mark, not the replay, says whether the turn is news.
+    #[gpui::test]
+    fn a_reattached_pane_takes_back_the_badge_its_reader_left(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        assert!(
+            rebuild_by_reattach((AgentStatus::Done, 1), (AgentStatus::Done, 1), cx),
+            "the reader never cleared that badge; rebuilding the pane is not reading it"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reattached_pane_badges_a_turn_that_was_running_when_its_view_went(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::cli_agent::AgentStatus;
+        assert!(
+            rebuild_by_reattach((AgentStatus::Working, 0), (AgentStatus::Done, 1), cx),
+            "nobody saw this turn finish"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reattached_pane_badges_a_later_turn_that_finished_while_away(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        // Turn one left a mark; turn two finishing before the reattach is a
+        // different count, so the mark does not vouch for it.
+        assert!(
+            rebuild_by_reattach((AgentStatus::Done, 1), (AgentStatus::Done, 2), cx),
+            "the second turn finished unseen"
+        );
+    }
+
+    /// A relink keeps the view and what it last saw. A turn that was running
+    /// when the link dropped and finished before it came back reaches the view
+    /// only as the daemon's replay, and that replay has to badge: nobody saw
+    /// the turn finish.
+    #[gpui::test]
+    fn a_turn_that_finished_while_the_link_was_down_still_badges(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+
+        crate::core::config::pin_test_config_dir();
+        let (window, _root_daemon) = harness(cx);
+        let (pane, mut daemon) = window
+            .update(cx, |_, window, cx| {
+                super::quiet_reattached_test_pane(2, window, cx)
+            })
+            .unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                view.focus_handle.clone().focus(window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        report_agent_status(AgentStatus::Working, &pane, cx, &mut daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(!pane.agent_result_unread(), "the turn is still running");
+                });
+            })
+            .unwrap();
+
+        let (new_client, mut new_daemon) = super::test_stream_pair();
+        pane.update(cx, |pane, cx| {
+            pane.adopt_relink(
+                new_client,
+                Vec::new(),
+                &crate::terminal::PaneRoute::Local,
+                TermSize::new(80, 24),
+                8,
+                17,
+                cx,
+            )
+            .expect("the swap itself cannot fail");
+        });
+        drop(daemon);
+
+        report_agent_status(AgentStatus::Done, &pane, cx, &mut new_daemon);
+        window
+            .update(cx, |_, window, cx| {
+                pane.update(cx, |pane, cx| {
+                    pane.poll_agent_status(false, window, cx);
+                    assert!(
+                        pane.agent_result_unread(),
+                        "the turn finished while the link was down, so nobody read it"
+                    );
                 });
             })
             .unwrap();
@@ -10236,6 +10823,7 @@ mod gpui_tests {
             activity: 0,
             last_task_title: None,
             explicit_task_title: None,
+            turns: 0,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -11525,11 +12113,26 @@ mod gpui_tests {
 
     #[gpui::test]
     fn passthrough_ctrl_c_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
+        assert_foreground_interrupt_does_not_wipe_prompt(cx, "agent input", "ctrl-c", 0x03);
+    }
+
+    #[gpui::test]
+    fn passthrough_ctrl_d_discards_typeahead_before_the_shell_can_resume(cx: &mut TestAppContext) {
+        // Ctrl-D only ends input on an empty line; with text it is an edit.
+        assert_foreground_interrupt_does_not_wipe_prompt(cx, "", "ctrl-d", 0x04);
+    }
+
+    fn assert_foreground_interrupt_does_not_wipe_prompt(
+        cx: &mut TestAppContext,
+        pending: &str,
+        chord: &str,
+        byte: u8,
+    ) {
         let (window, mut daemon) = harness(cx);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground process owns input");
-                view.typeahead.observe(RawInput::Text("agent input"), false);
+                view.typeahead.observe(RawInput::Text(pending), false);
                 view.typeahead.observe(
                     RawInput::Key {
                         key: "up",
@@ -11540,23 +12143,70 @@ mod gpui_tests {
 
                 view.on_key_down(
                     &KeyDownEvent {
-                        keystroke: key("ctrl-c"),
+                        keystroke: key(chord),
                         is_held: false,
                         prefer_character_input: false,
                     },
                     window,
                     cx,
                 );
-                assert_eq!(view.typeahead.drain(), None);
+                // Exercise the consumers without draining their input first.
+                view.adopt_typeahead();
                 view.flush_typeahead();
+                assert!(view.cmd.text().is_empty());
             })
             .unwrap();
 
-        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![0x03]));
+        assert_eq!(next_input_until_timeout(&mut daemon), Some(vec![byte]));
         assert_eq!(
             next_input_until_timeout(&mut daemon),
             None,
-            "resuming the shell must not synthesize Ctrl-U after Ctrl-C"
+            "resuming the shell must not synthesize Ctrl-U after {chord}"
+        );
+    }
+
+    #[gpui::test]
+    fn submitted_exit_typeahead_does_not_wipe_the_returned_prompt(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                // Ordinary SSH need not take the alternate screen or identify
+                // as an agent. Its input reaches the passthrough recorder.
+                assert!(!view.input_active());
+                for ch in ["e", "x", "i", "t"] {
+                    type_char(view, ch, window, cx);
+                }
+                view.on_key_down(
+                    &KeyDownEvent {
+                        keystroke: key("enter"),
+                        is_held: false,
+                        prefer_character_input: false,
+                    },
+                    window,
+                    cx,
+                );
+            })
+            .unwrap();
+        for bytes in [b"e", b"x", b"i", b"t", b"\r"] {
+            assert_eq!(next_input_until_timeout(&mut daemon), Some(bytes.to_vec()));
+        }
+
+        prompt_ready(&window, cx, &mut daemon);
+        window
+            .update(cx, |view, _, _| {
+                assert!(view.input_active());
+                view.adopt_typeahead();
+                view.flush_typeahead();
+                assert!(
+                    view.cmd.text().is_empty(),
+                    "exit belongs to the finished session"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "returning from exit must not inject Ctrl-U into the local prompt"
         );
     }
 
@@ -14769,6 +15419,40 @@ mod gpui_tests {
             .unwrap();
     }
 
+    /// Holding Backspace on an empty bash prompt (or Tab with nothing to
+    /// complete) rings the bell at key-repeat rate. Every flash used to arm its
+    /// own clear timer, so the first bell's timer blanked a flash the fifth bell
+    /// had just re-lit, and the pane strobed for as long as the key was held
+    /// (#874).
+    #[gpui::test]
+    fn a_bell_rung_at_key_repeat_rate_holds_one_steady_flash(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        let lit =
+            |cx: &mut TestAppContext| window.update(cx, |view, _, _| view.bell_flash).unwrap();
+
+        let repeat = std::time::Duration::from_millis(33);
+        let mut dark = Vec::new();
+        for i in 0..30 {
+            window
+                .update(cx, |view, _, cx| view.handle_event(AlacEvent::Bell, cx))
+                .unwrap();
+            cx.executor().advance_clock(repeat);
+            cx.run_until_parked();
+            if !lit(cx) {
+                dark.push(i);
+            }
+        }
+        assert!(
+            dark.is_empty(),
+            "the flash went dark between bells after repeats {dark:?}"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.run_until_parked();
+        assert!(!lit(cx), "the flash outlived the last bell");
+    }
+
     #[gpui::test]
     fn text_area_size_request_replies_with_the_current_geometry(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
@@ -15278,6 +15962,125 @@ mod gpui_tests {
             cell,
             Some((3, 10)),
             "a Hidden shape must not collapse the editor anchor to the top-left corner"
+        );
+    }
+
+    /// #844: a TUI that resets DECTCEM and draws its own reverse-video caret
+    /// gets no terminal caret painted over it — focused, unfocused, and after
+    /// a re-attach replays its screen — and `?25h` brings the caret back.
+    ///
+    /// The stream is the reporter's shape: an alternate screen and 69 `?25l`
+    /// interleaved with 75 `?25h`, the last one a hide. What is checked is the
+    /// snapshot a real paint left behind, through the same `painted_cursor`
+    /// the element paints from.
+    #[gpui::test]
+    fn dectcem_reset_paints_no_terminal_caret_over_the_tuis_own(cx: &mut TestAppContext) {
+        use crate::core::config::CursorStyle;
+
+        // An Ink-style frame: our own caret as one reverse-video cell at
+        // row 5 column 13, and the real cursor parked on it.
+        const FRAME: &[u8] = b"\x1b[5;1H\x1b[2K> type here \x1b[7m \x1b[27m\x1b[5;13H";
+        let mut stream = b"\x1b[?1049h".to_vec();
+        stream.extend(std::iter::repeat_n(&b"\x1b[?25h"[..], 7).flatten());
+        for _ in 0..68 {
+            stream.extend_from_slice(b"\x1b[?25l");
+            stream.extend_from_slice(FRAME);
+            stream.extend_from_slice(b"\x1b[?25h");
+        }
+        stream.extend_from_slice(b"\x1b[?25l");
+        stream.extend_from_slice(FRAME);
+        assert_eq!(stream.windows(6).filter(|w| w == b"\x1b[?25l").count(), 69);
+        assert_eq!(stream.windows(6).filter(|w| w == b"\x1b[?25h").count(), 75);
+
+        type Painted = Option<(usize, usize, CursorStyle)>;
+        // Paints frames until the one the pane settles on matches `want`, and
+        // returns the last painted caret either way.
+        let paint_until = |window: &gpui::WindowHandle<TerminalView>,
+                           cx: &mut TestAppContext,
+                           focused: bool,
+                           want: &dyn Fn(Painted) -> bool| {
+            let mut painted = None;
+            for _ in 0..400 {
+                window
+                    .update(cx, |view, window, cx| {
+                        if focused {
+                            window.activate_window();
+                            view.focus_handle.focus(window, cx);
+                        } else {
+                            window.blur();
+                        }
+                        cx.notify();
+                    })
+                    .unwrap();
+                let mut vcx = gpui::VisualTestContext::from_window((*window).into(), cx);
+                vcx.update(|window, _| window.refresh());
+                vcx.run_until_parked();
+                let (text, snap) = window
+                    .update(cx, |view, window, _| {
+                        assert_eq!(view.focus_handle.is_focused(window), focused);
+                        use alacritty_terminal::grid::Dimensions as _;
+                        use alacritty_terminal::index::{Column, Line};
+                        let term = view.terminal.term.lock();
+                        let row = &term.grid()[Line(4)];
+                        let text = (0..term.grid().columns())
+                            .map(|col| row[Column(col)].c)
+                            .collect::<String>();
+                        (text, view.grid_snap.as_ref().map(|s| s.painted_cursor()))
+                    })
+                    .unwrap();
+                if text.starts_with("> type here")
+                    && let Some(p) = snap
+                {
+                    painted = p;
+                    if want(p) {
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            painted
+        };
+
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Output(stream.clone())
+            .encode(&mut daemon)
+            .unwrap();
+        let focused = paint_until(&window, cx, true, &|p| p.is_none());
+        assert_eq!(
+            focused, None,
+            "a focused pane painted its caret over a TUI that reset DECTCEM"
+        );
+        let unfocused = paint_until(&window, cx, false, &|p| p.is_none());
+        assert_eq!(
+            unfocused, None,
+            "an unfocused pane painted its hollow caret over a TUI that reset DECTCEM"
+        );
+
+        DaemonMsg::Output(b"\x1b[?25h".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        let shown = paint_until(&window, cx, true, &|p| p.is_some());
+        assert_eq!(
+            shown.map(|(row, col, _)| (row, col)),
+            Some((4, 12)),
+            "`?25h` must bring the caret back where the program parked it"
+        );
+
+        // Switching back to the tab: a brand new view replays the screen the
+        // daemon kept, then the prompt state, which says a program is running.
+        let (window, mut daemon) = harness(cx);
+        DaemonMsg::Snapshot(stream).encode(&mut daemon).unwrap();
+        DaemonMsg::Prompt {
+            active: true,
+            at_prompt: false,
+            last_exit: None,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        let replayed = paint_until(&window, cx, true, &|p| p.is_none());
+        assert_eq!(
+            replayed, None,
+            "a re-attached pane painted its caret over a TUI that reset DECTCEM"
         );
     }
 

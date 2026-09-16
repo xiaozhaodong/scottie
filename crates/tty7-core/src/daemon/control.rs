@@ -1609,6 +1609,7 @@ mod tests {
                     activity: 3,
                     last_task_title: Some("repair deploy".into()),
                     explicit_task_title: Some("repair deploy".into()),
+                    turns: 1,
                 },
             }])),
             ControlReply::Ok(ReplyOk::AgentStates(Vec::new())),

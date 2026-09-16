@@ -5316,6 +5316,7 @@ mod tests {
             activity: 0,
             last_task_title: None,
             explicit_task_title: None,
+            turns: 0,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(
