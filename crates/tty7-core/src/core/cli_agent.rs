@@ -1469,6 +1469,7 @@ mod tests {
             message: None,
             cwd: None,
             prompt: None,
+            session_title: None,
         };
 
         let mut s = AgentSessionState::default();
